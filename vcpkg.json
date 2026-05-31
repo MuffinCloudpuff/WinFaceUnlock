@@ -1,0 +1,25 @@
+{
+  "name": "winfaceunlock",
+  "version-string": "0.1.0",
+  "dependencies": [
+    {
+      "name": "opencv4",
+      "default-features": false,
+      "features": [
+        "dnn",
+        "dshow",
+        "calib3d",
+        "fs",
+        "intrinsics",
+        "jpeg",
+        "msmf",
+        "png",
+        "thread"
+      ]
+    },
+    {
+      "name": "sqlcipher",
+      "default-features": false
+    }
+  ]
+}

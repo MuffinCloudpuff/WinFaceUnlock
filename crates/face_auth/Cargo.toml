@@ -1,0 +1,14 @@
+[package]
+name = "face_auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+common_protocol = { path = "../common_protocol" }
+face_engine = { path = "../face_engine" }
+video_provider = { path = "../video_provider" }
+
+[lints]
+workspace = true

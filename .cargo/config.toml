@@ -1,0 +1,15 @@
+[build]
+target = "x86_64-pc-windows-msvc"
+
+[term]
+color = "auto"
+
+[env]
+VCPKG_ROOT = "D:\\tools\\vcpkg"
+OpenCV_DIR = { value = "vcpkg_installed\\x64-windows\\share\\opencv4", relative = true }
+LIBCLANG_PATH = "C:\\Program Files\\LLVM\\bin"
+CLANG_PATH = { value = "C:\\Program Files\\LLVM\\bin\\clang.exe", force = true }
+OPENCV_LINK_LIBS = "opencv_core4,opencv_imgproc4,opencv_imgcodecs4,opencv_videoio4,opencv_calib3d4,opencv_features2d4,opencv_flann4,opencv_dnn4,opencv_objdetect4"
+OPENCV_LINK_PATHS = { value = "vcpkg_installed\\x64-windows\\lib", relative = true }
+OPENCV_INCLUDE_PATHS = { value = "vcpkg_installed\\x64-windows\\include\\opencv4", relative = true }
+PATH = { value = "C:\\Program Files\\LLVM\\bin;D:\\study\\workspace\\Rust_workspace\\WinFaceUnlock\\vcpkg_installed\\x64-windows\\bin;D:\\study\\workspace\\Rust_workspace\\WinFaceUnlock\\vcpkg_installed\\x64-windows\\debug\\bin;C:\\Program Files\\CMake\\bin;C:\\Users\\Liu\\AppData\\Local\\Microsoft\\WinGet\\Links;C:\\Windows\\system32;C:\\Windows;C:\\Users\\Liu\\.cargo\\bin", force = true }

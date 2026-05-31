@@ -1,0 +1,18 @@
+[package]
+name = "win_service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+common_protocol = { path = "../common_protocol" }
+credential_store = { path = "../credential_store" }
+face_engine = { path = "../face_engine" }
+hardware_binding = { path = "../hardware_binding" }
+ipc = { path = "../ipc" }
+video_provider = { path = "../video_provider" }
+windows-service = "0.8.1"
+
+[lints]
+workspace = true

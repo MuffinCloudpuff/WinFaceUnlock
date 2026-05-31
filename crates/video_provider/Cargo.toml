@@ -1,0 +1,13 @@
+[package]
+name = "video_provider"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+opencv = { version = "0.98.2", default-features = false, features = ["clang-runtime", "videoio", "imgproc", "imgcodecs"] }
+
+[lints]
+workspace = true

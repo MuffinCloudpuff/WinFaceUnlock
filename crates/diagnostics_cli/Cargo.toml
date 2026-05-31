@@ -1,0 +1,16 @@
+[package]
+name = "diagnostics_cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+common_protocol = { path = "../common_protocol" }
+face_auth = { path = "../face_auth" }
+face_engine = { path = "../face_engine" }
+ipc = { path = "../ipc" }
+video_provider = { path = "../video_provider" }
+
+[lints]
+workspace = true

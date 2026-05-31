@@ -1,0 +1,23 @@
+[package]
+name = "credential_store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+aes-gcm = "0.10.3"
+common_protocol = { path = "../common_protocol" }
+hardware_binding = { path = "../hardware_binding" }
+rusqlite = { version = "0.40.0", default-features = false, features = ["sqlcipher"] }
+zeroize = "1.8.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+] }
+
+[lints]
+workspace = true

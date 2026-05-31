@@ -1,0 +1,48 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "core:window:allow-close",
+    "sql:allow-load",
+    "sql:default",
+    "sql:allow-execute",
+    "dialog:default",
+    "opener:allow-default-urls",
+    "log:default",
+    "fs:default",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    {
+      "identifier": "fs:allow-exists",
+      "allow": [
+        { "path": "$RESOURCE/faces/**" },
+        { "path": "$RESOURCE/logs/**" },
+        { "path": "$RESOURCE/block/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-read-file",
+      "allow": [
+        { "path": "$RESOURCE/faces/**" },
+        { "path": "$RESOURCE/block/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-read-text-file",
+      "allow": [{ "path": "$RESOURCE/logs/**" }]
+    },
+    {
+      "identifier": "fs:allow-remove",
+      "allow": [
+        { "path": "$RESOURCE/faces/**" },
+        { "path": "$RESOURCE/block/**" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,210 @@
+// 引入必要的同步原语和Win32 API
+use std::sync::{Arc, Mutex};
+use windows::Win32::{
+    Foundation::{ERROR_NOT_READY, E_NOTIMPL, STATUS_SUCCESS}, Graphics::Gdi::HBITMAP, Security::Credentials::{CredPackAuthenticationBufferW, CRED_PACK_FLAGS}, System::Com::CoTaskMemAlloc, UI::Shell::{
+        ICredentialProviderCredential, ICredentialProviderCredentialEvents, ICredentialProviderCredential_Impl, CPFIS_NONE, CPFS_DISPLAY_IN_BOTH, CPGSR_RETURN_CREDENTIAL_FINISHED, CPSI_ERROR, CPSI_NONE, CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION, CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE, CREDENTIAL_PROVIDER_FIELD_STATE, CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE, CREDENTIAL_PROVIDER_STATUS_ICON
+    }
+};
+use windows_core::{implement, BOOL, PCWSTR, PWSTR};
+use crate::{CLSID_SampleProvider, SharedCredentials};
+
+/// 凭据实现类，代表登录界面上的一个磁贴
+/// 每个凭据对应一个可选择的登录选项
+#[implement(ICredentialProviderCredential)]
+pub struct SampleCredential {
+    // 用于接收系统事件通知的接口（互斥锁保护线程安全）
+    events: Mutex<Option<ICredentialProviderCredentialEvents>>,
+    shared_creds: Arc<Mutex<SharedCredentials>>,
+    auth_package_id: u32
+}
+
+impl SampleCredential {
+    /// 创建新的凭据实例
+    pub fn new(shared_creds: Arc<Mutex<SharedCredentials>>, auth_package_id: u32) -> Self {
+        info!("SampleCredential::new - 创建凭据实例");
+        // 引用计数不在此处管理了
+        // 原因是：当 SampleCredential 转换为 ICredentialProviderCredential COM 接口后，它的生命周期由 Windows COM 运行时管理，而不是 Rust
+        // 所以 SampleCredential 的Drop永远不会被调用，在new中创建的引用计数也永远不会减少
+        Self { 
+            events: Mutex::new(None),
+            shared_creds: shared_creds,
+            auth_package_id: auth_package_id
+        }
+    }
+}
+
+impl Drop for SampleCredential {
+    fn drop(&mut self) {
+        info!("SampleCredential::drop - 销毁凭据实例");
+    }
+}
+
+impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
+    /// 设置事件通知接口，用于向系统发送状态变化
+    /// pcpce: 系统提供的事件接口
+    fn Advise(&self, pcpce: windows_core::Ref<ICredentialProviderCredentialEvents>) -> windows_core::Result<()> {
+        info!("SampleCredential::Advise - 注册事件通知");
+        let mut events = self.events.lock().unwrap();
+        *events = pcpce.clone(); // 保存事件接口
+        Ok(())
+    }
+
+    /// 取消事件通知
+    fn UnAdvise(&self) -> windows_core::Result<()> {
+        info!("SampleCredential::UnAdvise - 取消事件通知");
+        let mut events = self.events.lock().unwrap();
+        *events = None; // 清除事件接口
+        Ok(())
+    }
+
+    /// 当凭据磁贴被选中时调用
+    fn SetSelected(&self) -> windows_core::Result<BOOL> {
+        info!("SampleCredential::SetSelected - 磁贴被选中");
+        Ok(true.into()) // 返回true表示处理成功
+    }
+
+    /// 当凭据磁贴被取消选中时调用
+    fn SetDeselected(&self) -> windows_core::Result<()> {
+        info!("SampleCredential::SetDeselected - 磁贴被取消选中");
+        Ok(())
+    }
+
+    /// 获取字段的状态（可见性和交互性）
+    /// dwfieldid: 字段ID
+    /// pcpfs: 输出参数，字段的显示状态
+    /// pcpfis: 输出参数，字段的交互状态
+    fn GetFieldState(
+        &self, 
+        dwfieldid: u32, 
+        pcpfs: *mut CREDENTIAL_PROVIDER_FIELD_STATE, 
+        pcpfis: *mut CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE
+    ) -> windows_core::Result<()> {
+        info!("SampleCredential::GetFieldState - 获取字段 {} 的状态", dwfieldid);
+        unsafe {
+            match dwfieldid {
+                // 字段0: 图标，字段1: 文本
+                0 | 1 => {  
+                    *pcpfs = CPFS_DISPLAY_IN_BOTH; // 在磁贴和详细视图中都显示
+                    *pcpfis = CPFIS_NONE;          // 非交互元素（不能点击或编辑）
+                }
+                _ => {
+                    error!("SampleCredential::GetFieldState - 无效的字段ID: {}", dwfieldid);
+                    return Err(windows::Win32::Foundation::E_INVALIDARG.into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 获取文本字段的内容
+    /// dwfieldid: 字段ID
+    fn GetStringValue(&self, dwfieldid: u32) -> windows_core::Result<PWSTR> {
+        info!("SampleCredential::GetStringValue - 获取字段 {} 的文本内容", dwfieldid);
+        let val = match dwfieldid {
+            1 => "FaceWinUnlock-Tauri-请勿点击此磁贴",  // 字段1的文本内容
+            _ => {
+                warn!("SampleCredential::GetStringValue - 字段 {} 无文本内容", dwfieldid);
+                ""
+            }
+        };
+        
+        // 分配COM可释放的内存（使用CoTaskMemAlloc）
+        unsafe {
+            let utf16: Vec<u16> = val.encode_utf16().chain(Some(0)).collect(); // 转换为UTF-16并添加终止符
+            let ptr = windows::Win32::System::Com::CoTaskMemAlloc(utf16.len() * 2); // 分配内存
+            if ptr.is_null() {
+                error!("SampleCredential::GetStringValue - 内存分配失败");
+                return Err(windows::Win32::Foundation::E_OUTOFMEMORY.into());
+            }
+            // 复制数据到分配的内存
+            std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr as *mut u16, utf16.len());
+            Ok(PWSTR(ptr as *mut _))
+        }
+    }
+
+    /// 获取图标字段的位图
+    /// _dwfieldid: 字段ID（这里是0）
+    fn GetBitmapValue(&self, _dwfieldid: u32) -> windows_core::Result<HBITMAP> {
+        info!("SampleCredential::GetBitmapValue - 获取图标字段的位图");
+        Ok(HBITMAP::default())  // 返回默认图标
+    }
+
+    /// 获取复选框字段的值（未实现）
+    fn GetCheckboxValue(&self, _dwfieldid: u32, _pbchecked: *mut BOOL, _ppszlabel: *mut PWSTR) -> windows_core::Result<()> {
+        info!("SampleCredential::GetCheckboxValue - 未实现的接口");
+        Err(E_NOTIMPL.into())
+    }
+
+    /// 获取提交按钮字段的值（未实现）
+    fn GetSubmitButtonValue(&self, _dwfieldid: u32) -> windows_core::Result<u32> {
+        info!("SampleCredential::GetSubmitButtonValue - 未实现的接口");
+        Err(E_NOTIMPL.into())
+    }
+
+    /// 获取下拉框字段的选项数量（未实现）
+    fn GetComboBoxValueCount(&self, _dwfieldid: u32, _pcitems: *mut u32, _pdwselecteditem: *mut u32) -> windows_core::Result<()> {
+        info!("SampleCredential::GetComboBoxValueCount - 未实现的接口");
+        Err(E_NOTIMPL.into())
+    }
+
+    /// 获取下拉框指定选项的文本（未实现）
+    fn GetComboBoxValueAt(&self, _dwfieldid: u32, _dwitem: u32) -> windows_core::Result<PWSTR> {
+        info!("SampleCredential::GetComboBoxValueAt - 未实现的接口");
+        Err(E_NOTIMPL.into())
+    }
+
+    /// 设置文本字段的值（未实现）
+    fn SetStringValue(&self, _dwfieldid: u32, _psz: &windows_core::PCWSTR) -> windows_core::Result<()> {
+        info!("SampleCredential::SetStringValue - 未实现的接口");
+        Err(E_NOTIMPL.into())
+    }
+
+    /// 设置复选框字段的值（未实现）
+    fn SetCheckboxValue(&self, _dwfieldid: u32, _bchecked: BOOL) -> windows_core::Result<()> {
+        info!("SampleCredential::SetCheckboxValue - 未实现的接口");
+        Err(E_NOTIMPL.into())
+    }
+
+    /// 设置下拉框选中项（未实现）
+    fn SetComboBoxSelectedValue(&self, _dwfieldid: u32, _dwselecteditem: u32) -> windows_core::Result<()> {
+        info!("SampleCredential::SetComboBoxSelectedValue - 未实现的接口");
+        Err(E_NOTIMPL.into())
+    }
+
+    /// 命令链接被点击（未实现）
+    fn CommandLinkClicked(&self, _dwfieldid: u32) -> windows_core::Result<()> {
+        info!("SampleCredential::CommandLinkClicked - 未实现的接口");
+        Err(E_NOTIMPL.into())
+    }
+
+    /// 序列化凭据信息（登录时调用）
+    fn GetSerialization(
+        &self, 
+        pcpgsr: *mut CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE, 
+        pcpcs: *mut CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION, 
+        _ppszoptionalstatustext: *mut PWSTR, 
+        _pcpsioptionalstatusicon: *mut CREDENTIAL_PROVIDER_STATUS_ICON
+    ) -> windows_core::Result<()> {
+        // 因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
+        // 如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
+        Ok(())
+    }
+
+    /// 报告登录结果
+    fn ReportResult(
+        &self, 
+        ntsstatus: windows::Win32::Foundation::NTSTATUS, 
+        _ntssubstatus: windows::Win32::Foundation::NTSTATUS, 
+        ppszoptionalstatustext: *mut PWSTR, 
+        pcpsioptionalstatusicon: *mut CREDENTIAL_PROVIDER_STATUS_ICON
+    ) -> windows_core::Result<()> {
+        // 因发现市面上有人在盗卖本项目，更有甚者改个软件名字，就当成自己软件在卖，多次举报无果。所以从2026年3月1日开始，本项目闭源。
+        // 如果你对程序某一块功能感兴趣，可以提交 issues，我看到后会给你提供一些支持。
+        Ok(())
+    }
+}
+
+// 将 String 转换为符合 Win32 要求的 UTF-16 向量（带 null 结尾）
+fn to_wide_vec(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}

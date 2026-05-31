@@ -1,0 +1,15 @@
+/target/
+/vcpkg_installed/
+/models/*.onnx
+/node_modules/
+/.idea/
+/.vscode/
+*.pdb
+*.ilk
+*.dll
+*.exe
+*.db
+*.db-shm
+*.db-wal
+*.log
+.gitnexus

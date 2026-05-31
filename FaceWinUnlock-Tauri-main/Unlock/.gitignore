@@ -1,0 +1,36 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+build/
+test.html
+test.js
+test.css
+
+target
+UI/src-tauri/2
+UI.zip
+UI/src-tauri/bin/Microsoft.WebView2.FixedVersionRuntime.143.0.3650.139.x64.cab
+UI/src-tauri/nsis/installer.nsi
+src/备份.rs

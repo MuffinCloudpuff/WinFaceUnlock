@@ -1,0 +1,29 @@
+[workspace]
+members = [
+    "crates/common_protocol",
+    "crates/credential_store",
+    "crates/diagnostics_cli",
+    "crates/face_auth",
+    "crates/face_engine",
+    "crates/hardware_binding",
+    "crates/installer_cli",
+    "crates/ipc",
+    "crates/video_provider",
+    "crates/win_service",
+    "crates/windows_provider",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "AGPL-3.0-or-later"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
