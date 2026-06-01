@@ -1,7 +1,7 @@
 use common_protocol::{AuthFailureReason, UserId};
 use face_engine::{
-    FaceEngineError, FaceMatchDecision, FaceModelProvider, FaceTemplate, FaceTemplateMatch,
-    FaceTemplateMatcher,
+    FaceEngineError, FaceMatchDecision, FaceModelDescriptor, FaceModelProvider, FaceTemplate,
+    FaceTemplateMatch, FaceTemplateMatcher,
 };
 use video_provider::VideoFrame;
 
@@ -23,6 +23,12 @@ impl RecognitionTemplates {
 
     pub fn as_slice(&self) -> &[FaceTemplate] {
         &self.templates
+    }
+
+    pub fn has_compatible_template(&self, recognition_model: &FaceModelDescriptor) -> bool {
+        self.templates
+            .iter()
+            .any(|template| template.is_compatible_with(recognition_model))
     }
 }
 
@@ -67,11 +73,19 @@ where
         if self.attempt_policy.cooldown_is_active(current_time_unix_ms) {
             return Err(AuthFailureReason::CooldownActive);
         }
+        let recognition_model = self.model_provider.recognition_model().clone();
+        if !templates.has_compatible_template(&recognition_model) {
+            return Err(AuthFailureReason::TemplateModelMismatch);
+        }
 
         let candidate = self
             .extract_single_face_embedding(frame)
             .map_err(face_engine_error_to_auth_failure)?;
-        let Some(best_match) = self.matcher.best_match(templates.as_slice(), &candidate) else {
+        let Some(best_match) = self.matcher.best_compatible_match(
+            templates.as_slice(),
+            &recognition_model,
+            &candidate,
+        ) else {
             self.attempt_policy
                 .record_failed_attempt(current_time_unix_ms);
             return Err(AuthFailureReason::MatchBelowThreshold);
@@ -128,5 +142,82 @@ fn face_engine_error_to_auth_failure(error: FaceEngineError) -> AuthFailureReaso
         | FaceEngineError::InvalidFrame
         | FaceEngineError::InvalidEmbedding
         | FaceEngineError::InferenceFailed => AuthFailureReason::InternalError,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use face_engine::{
+        DetectedFace, FaceEmbedding, FaceMatch, FaceMatchDecision, FaceModelDescriptor,
+        FaceTemplateRef,
+    };
+    use video_provider::{PixelFormat, VideoFrame};
+
+    use super::*;
+    use crate::AttemptPolicyConfig;
+
+    struct StubModelProvider {
+        recognition_model: FaceModelDescriptor,
+    }
+
+    impl FaceModelProvider for StubModelProvider {
+        fn load_models(&mut self) -> Result<(), FaceEngineError> {
+            Ok(())
+        }
+
+        fn unload_models(&mut self) {}
+
+        fn recognition_model(&self) -> &FaceModelDescriptor {
+            &self.recognition_model
+        }
+
+        fn detect(&mut self, _frame: &VideoFrame) -> Result<Vec<DetectedFace>, FaceEngineError> {
+            Err(FaceEngineError::InferenceFailed)
+        }
+
+        fn extract(
+            &mut self,
+            _frame: &VideoFrame,
+            _face: &DetectedFace,
+        ) -> Result<FaceEmbedding, FaceEngineError> {
+            Err(FaceEngineError::InferenceFailed)
+        }
+
+        fn compare(&self, _enrolled: &FaceEmbedding, _candidate: &FaceEmbedding) -> FaceMatch {
+            FaceMatch {
+                score: 0.0,
+                decision: FaceMatchDecision::MatchRejectedBelowThreshold,
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_template_from_another_recognition_model_before_inference() {
+        let provider = StubModelProvider {
+            recognition_model: FaceModelDescriptor {
+                model_family: "sface".to_owned(),
+                model_version: "2021dec".to_owned(),
+            },
+        };
+        let templates = RecognitionTemplates::new(vec![FaceTemplate {
+            template_ref: FaceTemplateRef("face-1".to_owned()),
+            user_id: "user-1".to_owned(),
+            model_family: "other-recognizer".to_owned(),
+            model_version: "v2".to_owned(),
+            embedding: FaceEmbedding { values: vec![1.0] },
+        }]);
+        let matcher = FaceTemplateMatcher::new(0.55);
+        let policy = AttemptPolicy::new(AttemptPolicyConfig::default());
+        let mut authenticator = FaceAuthenticator::new(provider, matcher, policy);
+        let frame = VideoFrame {
+            width: 1,
+            height: 1,
+            format: PixelFormat::Gray8,
+            data: vec![0],
+        };
+
+        let result = authenticator.authenticate_frame(&frame, &templates, 1_000);
+
+        assert_eq!(result, Err(AuthFailureReason::TemplateModelMismatch));
     }
 }

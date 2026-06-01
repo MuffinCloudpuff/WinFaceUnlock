@@ -38,6 +38,7 @@ pub enum AuthFailureReason {
     NoFaceDetected,
     MultipleFacesDetected,
     MatchBelowThreshold,
+    TemplateModelMismatch,
     LivenessFailed,
     CooldownActive,
     Timeout,
@@ -58,6 +59,20 @@ pub struct CredentialRef(pub String);
 pub struct ProtectedCredential {
     pub user_id: UserId,
     pub credential_ref: CredentialRef,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum CredentialMaterialProtection {
+    DpapiLocalMachineV1,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ProtectedCredentialMaterial {
+    pub user_id: UserId,
+    pub domain: String,
+    pub username: String,
+    pub protected_password: Vec<u8>,
+    pub protection: CredentialMaterialProtection,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -93,6 +108,11 @@ pub enum ServiceRequest {
         grant_id: GrantId,
         nonce: Nonce,
     },
+    FetchCredentialMaterial {
+        session_id: SessionId,
+        grant_id: GrantId,
+        nonce: Nonce,
+    },
     Cancel {
         session_id: SessionId,
     },
@@ -114,6 +134,10 @@ pub enum ServiceEvent {
     CredentialReady {
         grant_id: GrantId,
         protected_credential: ProtectedCredential,
+    },
+    CredentialMaterialReady {
+        grant_id: GrantId,
+        protected_credential_material: ProtectedCredentialMaterial,
     },
     AuthCancelled {
         session_id: SessionId,

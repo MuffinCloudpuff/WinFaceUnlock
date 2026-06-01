@@ -11,6 +11,18 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 common_protocol = { path = "../common_protocol" }
 ipc = { path = "../ipc" }
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Credentials",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_System_SystemServices",
+    "Win32_UI_Shell",
+] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Registry"] }
+windows-core = "0.62.2"
 
 [lints]
 workspace = true

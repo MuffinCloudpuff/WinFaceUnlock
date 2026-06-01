@@ -1,10 +1,15 @@
 use std::{ffi::OsString, path::PathBuf};
 
-use crate::service_manager::{
-    InstallerError, ServiceInstallPlan, ServiceLifecycleCommand, ServiceManagerFacade,
+use crate::{
+    provider_registry::{ProviderInstallPlan, ProviderRegistry, default_provider_binary_path},
+    service_manager::{
+        InstallerError, ServiceInstallPlan, ServiceLifecycleCommand, ServiceManagerFacade,
+    },
+    service_registry::{ServiceAuthRegistry, ServiceAuthRegistryConfig},
 };
+use windows_provider::{WAKE_AUTH_SOURCE_LOCAL_CAMERA, WAKE_AUTH_SOURCE_MANUAL_TEST};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum InstallerCommand {
     InstallService {
         service_binary_path: PathBuf,
@@ -22,6 +27,20 @@ pub enum InstallerCommand {
         service_binary_path: PathBuf,
         dry_run: bool,
     },
+    ConfigureServiceAuth {
+        config: ServiceAuthRegistryConfig,
+        dry_run: bool,
+    },
+    ServiceAuthStatus,
+    InstallProvider {
+        provider_binary_path: PathBuf,
+        wake_auth_source: &'static str,
+        dry_run: bool,
+    },
+    UninstallProvider {
+        dry_run: bool,
+    },
+    ProviderStatus,
     Help,
 }
 
@@ -94,6 +113,77 @@ fn run_command(command: InstallerCommand) -> Result<(), InstallerError> {
             manager.repair_service(&plan)?;
             println!("repaired {}", plan.service_name.to_string_lossy());
         }
+        InstallerCommand::ConfigureServiceAuth { config, dry_run } => {
+            if dry_run {
+                print_service_auth_config("configure-service-auth dry-run", &config);
+                return Ok(());
+            }
+            ServiceAuthRegistry::configure_local_camera(&config)?;
+            println!("configured WinFaceUnlockService auth");
+            print_service_auth_config("service auth config", &config);
+        }
+        InstallerCommand::ServiceAuthStatus => {
+            let status = ServiceAuthRegistry::status();
+            println!(
+                "service_auth_registry_config_exists: {}",
+                status.registry_config_exists
+            );
+            println!(
+                "auth_mode: {}",
+                status.auth_mode.as_deref().unwrap_or("<unset>")
+            );
+            println!(
+                "face_template_path: {}",
+                status.face_template_path.as_deref().unwrap_or("<unset>")
+            );
+            println!(
+                "camera_id: {}",
+                status.camera_id.as_deref().unwrap_or("<unset>")
+            );
+            println!(
+                "match_threshold: {}",
+                status.match_threshold.as_deref().unwrap_or("<unset>")
+            );
+        }
+        InstallerCommand::InstallProvider {
+            provider_binary_path,
+            wake_auth_source,
+            dry_run,
+        } => {
+            let plan = ProviderInstallPlan::new(provider_binary_path)
+                .with_wake_auth_source(wake_auth_source);
+            if dry_run {
+                print_provider_install_plan("install-provider dry-run", &plan);
+                return Ok(());
+            }
+            ProviderRegistry::install_provider(&plan)?;
+            println!("installed {}", plan.provider_name);
+            println!("provider_clsid: {}", plan.provider_clsid);
+        }
+        InstallerCommand::UninstallProvider { dry_run } => {
+            if dry_run {
+                println!("uninstall-provider dry-run: provider registry keys will be removed");
+                return Ok(());
+            }
+            ProviderRegistry::uninstall_provider()?;
+            println!("uninstalled WinFaceUnlockProvider");
+        }
+        InstallerCommand::ProviderStatus => {
+            let status = ProviderRegistry::provider_status();
+            println!(
+                "WinFaceUnlockProvider registered: {}",
+                status.is_registered()
+            );
+            println!(
+                "credential_provider_registered: {}",
+                status.credential_provider_registered
+            );
+            println!("com_server_registered: {}", status.com_server_registered);
+            println!(
+                "project_config_registered: {}",
+                status.project_config_registered
+            );
+        }
         InstallerCommand::Help => print_usage(),
     }
 
@@ -105,6 +195,9 @@ fn parse_command(args: &[String]) -> Result<InstallerCommand, InstallerError> {
     let service_binary_path = argument_value(args, "--service-binary")
         .map(PathBuf::from)
         .unwrap_or(default_service_binary_path()?);
+    let provider_binary_path = argument_value(args, "--provider-binary")
+        .map(PathBuf::from)
+        .unwrap_or(default_provider_binary_path()?);
     let dry_run = has_flag(args, "--dry-run");
 
     match command {
@@ -124,11 +217,84 @@ fn parse_command(args: &[String]) -> Result<InstallerCommand, InstallerError> {
             service_binary_path,
             dry_run,
         }),
+        "configure-service-auth" => Ok(InstallerCommand::ConfigureServiceAuth {
+            config: parse_service_auth_config(args)?,
+            dry_run,
+        }),
+        "service-auth-status" => Ok(InstallerCommand::ServiceAuthStatus),
+        "install-provider" => Ok(InstallerCommand::InstallProvider {
+            provider_binary_path,
+            wake_auth_source: wake_auth_source_argument(args)?,
+            dry_run,
+        }),
+        "uninstall-provider" => Ok(InstallerCommand::UninstallProvider { dry_run }),
+        "provider-status" => Ok(InstallerCommand::ProviderStatus),
         "help" | "--help" | "-h" => Ok(InstallerCommand::Help),
         other => Err(InstallerError::InvalidArguments(format!(
             "unknown command: {other}"
         ))),
     }
+}
+
+fn wake_auth_source_argument(args: &[String]) -> Result<&'static str, InstallerError> {
+    match argument_value(args, "--wake-source").unwrap_or(WAKE_AUTH_SOURCE_LOCAL_CAMERA) {
+        WAKE_AUTH_SOURCE_LOCAL_CAMERA => Ok(WAKE_AUTH_SOURCE_LOCAL_CAMERA),
+        WAKE_AUTH_SOURCE_MANUAL_TEST => Ok(WAKE_AUTH_SOURCE_MANUAL_TEST),
+        other => Err(InstallerError::InvalidArguments(format!(
+            "--wake-source must be local-camera or manual-test, got {other}"
+        ))),
+    }
+}
+
+fn parse_service_auth_config(args: &[String]) -> Result<ServiceAuthRegistryConfig, InstallerError> {
+    let face_template_path = argument_value(args, "--face-template")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            InstallerError::InvalidArguments("--face-template is required".to_owned())
+        })?;
+    let yunet_model_path = argument_value(args, "--yunet-model")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"models\face_detection_yunet_2023mar.onnx"));
+    let sface_model_path = argument_value(args, "--sface-model")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"models\face_recognition_sface_2021dec.onnx"));
+    let mut config = ServiceAuthRegistryConfig::local_camera(
+        face_template_path,
+        yunet_model_path,
+        sface_model_path,
+    );
+
+    if let Some(camera_id) = argument_value(args, "--camera-id") {
+        config.camera_id = camera_id.to_owned();
+    }
+    config.frame_width = optional_u32(args, "--frame-width")?;
+    config.frame_height = optional_u32(args, "--frame-height")?;
+    if let Some(max_auth_frames) = optional_u32(args, "--max-auth-frames")? {
+        config.max_auth_frames = max_auth_frames;
+    }
+    if let Some(required_consecutive) = optional_u32(args, "--required-consecutive")? {
+        config.required_consecutive_match_count = required_consecutive;
+    }
+    if let Some(match_threshold) = optional_f32(args, "--match-threshold")? {
+        config.match_threshold = match_threshold;
+    }
+    Ok(config)
+}
+
+fn optional_u32(args: &[String], name: &str) -> Result<Option<u32>, InstallerError> {
+    argument_value(args, name)
+        .map(str::parse::<u32>)
+        .transpose()
+        .map_err(|_| {
+            InstallerError::InvalidArguments(format!("{name} must be an unsigned integer"))
+        })
+}
+
+fn optional_f32(args: &[String], name: &str) -> Result<Option<f32>, InstallerError> {
+    argument_value(args, name)
+        .map(str::parse::<f32>)
+        .transpose()
+        .map_err(|_| InstallerError::InvalidArguments(format!("{name} must be a number")))
 }
 
 fn default_service_binary_path() -> Result<PathBuf, InstallerError> {
@@ -163,6 +329,57 @@ fn print_install_plan(label: &str, plan: &ServiceInstallPlan) {
     println!("account: LocalSystem");
 }
 
+fn print_provider_install_plan(label: &str, plan: &ProviderInstallPlan) {
+    println!("{label}");
+    println!("provider_name: {}", plan.provider_name);
+    println!("provider_clsid: {}", plan.provider_clsid);
+    println!("binary: {}", plan.provider_binary_path.display());
+    println!(
+        "credential_provider_registry_path: HKLM\\{}",
+        plan.credential_provider_registry_path
+    );
+    println!(
+        "com_inproc_server_registry_path: HKLM\\{}",
+        plan.com_inproc_server_registry_path
+    );
+    println!("threading_model: Apartment");
+    println!("tile_visibility: {}", plan.tile_visibility);
+    println!("auto_wake_on_advise: {}", plan.auto_wake_on_advise);
+    println!("wake_auth_source: {}", plan.wake_auth_source);
+}
+
+fn print_service_auth_config(label: &str, config: &ServiceAuthRegistryConfig) {
+    println!("{label}");
+    println!("auth_mode: {}", config.auth_mode);
+    println!(
+        "face_template_path: {}",
+        config.face_template_path.display()
+    );
+    println!("camera_id: {}", config.camera_id);
+    println!("yunet_model_path: {}", config.yunet_model_path.display());
+    println!("sface_model_path: {}", config.sface_model_path.display());
+    println!(
+        "frame_width: {}",
+        config
+            .frame_width
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "<camera-default>".to_owned())
+    );
+    println!(
+        "frame_height: {}",
+        config
+            .frame_height
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "<camera-default>".to_owned())
+    );
+    println!("max_auth_frames: {}", config.max_auth_frames);
+    println!(
+        "required_consecutive_match_count: {}",
+        config.required_consecutive_match_count
+    );
+    println!("match_threshold: {}", config.match_threshold);
+}
+
 fn print_usage() {
     println!("WinFaceUnlock installer");
     println!("Usage:");
@@ -172,6 +389,15 @@ fn print_usage() {
     println!("  installer_cli stop-service");
     println!("  installer_cli service-status");
     println!("  installer_cli repair-service [--service-binary <path>] [--dry-run]");
+    println!(
+        "  installer_cli configure-service-auth --face-template <path> [--camera-id opencv-index:0] [--yunet-model <path>] [--sface-model <path>] [--match-threshold 0.55] [--dry-run]"
+    );
+    println!("  installer_cli service-auth-status");
+    println!(
+        "  installer_cli install-provider [--provider-binary <path>] [--wake-source local-camera|manual-test] [--dry-run]"
+    );
+    println!("  installer_cli uninstall-provider [--dry-run]");
+    println!("  installer_cli provider-status");
 }
 
 #[cfg(test)]
@@ -226,5 +452,88 @@ mod tests {
             argument_value(&args, "--service-binary"),
             Some("service.exe")
         );
+    }
+
+    #[test]
+    fn parse_install_provider_with_explicit_binary() -> Result<(), InstallerError> {
+        let args = vec![
+            "installer_cli".to_owned(),
+            "install-provider".to_owned(),
+            "--provider-binary".to_owned(),
+            r"C:\WinFaceUnlock\windows_provider.dll".to_owned(),
+        ];
+
+        assert_eq!(
+            parse_command(&args)?,
+            InstallerCommand::InstallProvider {
+                provider_binary_path: PathBuf::from(r"C:\WinFaceUnlock\windows_provider.dll"),
+                wake_auth_source: WAKE_AUTH_SOURCE_LOCAL_CAMERA,
+                dry_run: false,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_install_provider_with_manual_test_wake_source() -> Result<(), InstallerError> {
+        let args = vec![
+            "installer_cli".to_owned(),
+            "install-provider".to_owned(),
+            "--provider-binary".to_owned(),
+            r"C:\WinFaceUnlock\windows_provider.dll".to_owned(),
+            "--wake-source".to_owned(),
+            "manual-test".to_owned(),
+        ];
+
+        assert_eq!(
+            parse_command(&args)?,
+            InstallerCommand::InstallProvider {
+                provider_binary_path: PathBuf::from(r"C:\WinFaceUnlock\windows_provider.dll"),
+                wake_auth_source: WAKE_AUTH_SOURCE_MANUAL_TEST,
+                dry_run: false,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_provider_status() -> Result<(), InstallerError> {
+        let args = vec!["installer_cli".to_owned(), "provider-status".to_owned()];
+
+        assert_eq!(parse_command(&args)?, InstallerCommand::ProviderStatus);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_configure_service_auth_with_explicit_camera_values() -> Result<(), InstallerError> {
+        let args = vec![
+            "installer_cli".to_owned(),
+            "configure-service-auth".to_owned(),
+            "--face-template".to_owned(),
+            r"D:\WinFaceUnlock\phase4-face-template.json".to_owned(),
+            "--camera-id".to_owned(),
+            "opencv-index:1".to_owned(),
+            "--match-threshold".to_owned(),
+            "0.6".to_owned(),
+            "--required-consecutive".to_owned(),
+            "1".to_owned(),
+        ];
+
+        let InstallerCommand::ConfigureServiceAuth { config, dry_run } = parse_command(&args)?
+        else {
+            return Err(InstallerError::InvalidArguments(
+                "unexpected command".to_owned(),
+            ));
+        };
+
+        assert!(!dry_run);
+        assert_eq!(
+            config.face_template_path,
+            PathBuf::from(r"D:\WinFaceUnlock\phase4-face-template.json")
+        );
+        assert_eq!(config.camera_id, "opencv-index:1");
+        assert_eq!(config.match_threshold, 0.6);
+        assert_eq!(config.required_consecutive_match_count, 1);
+        Ok(())
     }
 }

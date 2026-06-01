@@ -8,6 +8,7 @@ use crate::{
 };
 
 const DEFAULT_POLICY_ID: &str = "default";
+const DEFAULT_FACE_MATCH_THRESHOLD: f32 = 0.55;
 
 pub struct RepositoryCredentialStore<R: StoreRepository> {
     repository: R,
@@ -62,7 +63,7 @@ impl<R: StoreRepository> CredentialStore for RepositoryCredentialStore<R> {
         self.repository.save_policy_record(PolicyRecord {
             policy_id: PolicyId(DEFAULT_POLICY_ID.to_owned()),
             liveness_requirement: LivenessRequirement::NotRequired,
-            face_match_threshold: 0.363,
+            face_match_threshold: DEFAULT_FACE_MATCH_THRESHOLD,
             failure_limit_before_cooldown: 3,
             cooldown_duration_seconds: 30,
         })

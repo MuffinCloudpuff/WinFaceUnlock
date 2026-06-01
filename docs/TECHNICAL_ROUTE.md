@@ -11,7 +11,7 @@ WinFaceUnlock 是一个自研的 Windows 人脸解锁项目，目标是实现类
 1. 不依赖 `PC_Client`。
 2. 不依赖小车端。
 3. 能在本机独立安装、独立运行、独立卸载。
-4. 支持 Windows 锁屏后通过鼠标或键盘操作唤醒识别。
+4. 支持 Windows 锁屏或登录界面加载后自动唤醒识别。
 5. 默认使用本地摄像头完成识别。
 6. 后续可扩展小车摄像头和 24G 毫米波雷达触发。
 7. 最终认证、凭据保护和 Windows 解锁都在 PC 本机完成。
@@ -246,8 +246,9 @@ Vehicle Integration
 
 ```text
 Windows 锁屏 / 开机登录界面
--> 用户移动鼠标或按键盘
--> Credential Provider 通知 Service 开始识别
+-> Credential Provider 被 LogonUI 加载
+-> Credential Provider 自动通知 Service 开始识别
+-> 用户移动鼠标或按键盘时可作为额外唤醒 / 重试触发
 -> Service 打开本地摄像头
 -> YuNet 检测人脸
 -> SFace 提取特征并比对模板
@@ -255,11 +256,22 @@ Windows 锁屏 / 开机登录界面
 -> 认证通过
 -> Service 生成短时授权
 -> Service 解密 Windows 凭据 blob
--> 通过受 ACL 限制的 named pipe 发给 Credential Provider
--> Credential Provider 调 CredPackAuthenticationBufferW
+-> 通过受 ACL 限制的 named pipe 或等价本机安全通道交给 Credential Provider
+-> Credential Provider 调 CredentialsChanged
+-> LogonUI 重新枚举凭据
+-> Credential Provider 在 GetCredentialCount 返回默认凭据和自动登录标记
+-> Credential Provider 在 GetSerialization 调 CredPackAuthenticationBufferW
 -> Windows 完成登录或解锁
 -> 清理明文密码、授权和临时状态
 ```
+
+自动登录机制边界：
+
+1. 本项目不伪装成 Windows Hello 设备，也不依赖已废弃的 Windows Hello Companion Device Framework。
+2. 系统入口仍是 Windows Credential Provider；“磁贴”是系统凭据对象，不是普通 App UI。
+3. 用户体验目标是不要求每次点击磁贴：Provider 可在未准备好时显示或隐藏磁贴，认证成功后由 `CredentialsChanged` 触发 LogonUI 重新枚举。
+4. 认证成功后，`GetCredentialCount` 必须返回具体默认凭据索引和 `pbautologonwithdefault = TRUE`，再由 `GetSerialization` 提交凭据。
+5. 自动登录失败、认证失败、服务不可用或 Provider 不可用时，Windows 原 PIN / 密码登录方式必须仍可手动选择。
 
 小车增强闭环：
 
@@ -416,9 +428,11 @@ Credential Provider DLL
   运行环境：Winlogon / LogonUI
   职责：
     - 显示磁贴或隐藏磁贴
-    - 监听锁屏 / 登录界面触发
+    - 在 LogonUI 加载后自动发起识别请求
+    - 监听锁屏 / 登录界面的额外触发和重试
     - 与 Service 通信
     - 调用 CredentialsChanged
+    - 在 GetCredentialCount 中声明默认自动登录凭据
     - 在 GetSerialization 中提交凭据
 ```
 
@@ -477,13 +491,21 @@ FaceRecognizerSF / SFace
   face_liveness.onnx
 ```
 
-必须抽象为：
+必须拆分为：
 
 ```text
-FaceModelProvider
+FaceDetectionModelProvider
   detect(frame) -> face boxes / landmarks
+
+FaceRecognitionModelProvider
   extract(frame, face) -> embedding
   compare(a, b) -> score
+
+FaceModelPipeline
+  detector: FaceDetectionModelProvider
+  recognizer: FaceRecognitionModelProvider
+
+LivenessModelProvider
   liveness(frame, face) -> score
 
 VideoFrameProvider
@@ -491,7 +513,7 @@ VideoFrameProvider
   vehicle_camera 后续扩展
 ```
 
-上层策略不直接依赖 OpenCV 具体类型。
+上层策略不直接依赖 OpenCV 具体类型。检测模型和识别模型必须可以独立替换。识别模型替换后，旧 embedding 模板必须因模型族或版本不兼容而被拒绝，重新注册后才能进入认证链路。
 
 ## 十一、阶段路线
 
@@ -515,6 +537,8 @@ VideoFrameProvider
 
 目标：不接 Credential Provider，先完成人脸注册和识别。
 
+该阶段必须把真实摄像头识别接入 Service 主链路，而不只是单独的模型测试。`diagnostics_cli` 应能够触发 `WakeAuth`，由 Service 打开摄像头、完成人脸检测和比对、执行策略，并返回结构化认证结果。只有这个闭环稳定后，才进入 Credential Provider 自动登录。
+
 任务：
 
 1. 接入本地摄像头。
@@ -524,21 +548,26 @@ VideoFrameProvider
 5. 实现连续成功策略。
 6. 实现失败冷却。
 7. 实现日志脱敏。
+8. 将真实识别链路接入 Service 的 `WakeAuth` 处理。
+9. 用 diagnostics CLI 验证真实识别成功、失败、超时和冷却状态。
 
 ### Phase 2：Credential Provider 虚拟机 PoC
 
-目标：在虚拟机中跑通最小 Windows 登录/解锁链路。
+目标：在虚拟机中跑通自动唤醒、自动识别、自动提交的 Windows 登录/解锁链路。
+
+前置条件：Service 真实识别闭环已经通过桌面环境验收。Credential Provider DLL 只做 LogonUI 集成、自动 wake、`CredentialsChanged`、`GetCredentialCount` 自动登录标记和 `GetSerialization` 凭据提交，不承载摄像头、模型推理或复杂策略。
 
 任务：
 
 1. 创建 Rust `cdylib` Credential Provider。
 2. 注册 CLSID 和 Provider。
-3. 实现基础磁贴。
-4. 实现键鼠触发。
+3. 实现可显示/可隐藏的基础磁贴。
+4. 实现 Provider 加载后自动 wake request。
 5. 实现与 Service 的 IPC。
 6. 实现 `CredentialsChanged`。
-7. 实现 `GetSerialization`。
-8. 实现安全卸载脚本。
+7. 实现 `GetCredentialCount` 默认凭据和 auto-logon 标记。
+8. 实现 `GetSerialization`。
+9. 实现 PIN / 密码 fallback 和安全卸载脚本。
 
 ### Phase 3：开机未登录登录
 

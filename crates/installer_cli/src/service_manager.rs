@@ -7,6 +7,8 @@ use std::{
 };
 
 use common_protocol::SERVICE_NAME;
+
+use crate::{provider_registry::ProviderRegistryError, service_registry::ServiceRegistryError};
 use windows_service::{
     service::{
         ServiceAccess, ServiceAction, ServiceActionType, ServiceErrorControl,
@@ -251,6 +253,8 @@ fn is_service_missing_error(error: &windows_service::Error) -> bool {
 pub enum InstallerError {
     InvalidArguments(String),
     Io(std::io::Error),
+    ProviderRegistry(ProviderRegistryError),
+    ServiceRegistry(ServiceRegistryError),
     Service(windows_service::Error),
     TimedOut(String),
 }
@@ -260,6 +264,8 @@ impl fmt::Display for InstallerError {
         match self {
             Self::InvalidArguments(message) => write!(formatter, "invalid arguments: {message}"),
             Self::Io(error) => write!(formatter, "io error: {error}"),
+            Self::ProviderRegistry(error) => write!(formatter, "provider registry error: {error}"),
+            Self::ServiceRegistry(error) => write!(formatter, "service registry error: {error}"),
             Self::Service(windows_service::Error::Winapi(error)) => {
                 write!(formatter, "windows service winapi error: {error}")
             }
@@ -280,6 +286,18 @@ impl From<std::io::Error> for InstallerError {
 impl From<windows_service::Error> for InstallerError {
     fn from(error: windows_service::Error) -> Self {
         Self::Service(error)
+    }
+}
+
+impl From<ProviderRegistryError> for InstallerError {
+    fn from(error: ProviderRegistryError) -> Self {
+        Self::ProviderRegistry(error)
+    }
+}
+
+impl From<ServiceRegistryError> for InstallerError {
+    fn from(error: ServiceRegistryError) -> Self {
+        Self::ServiceRegistry(error)
     }
 }
 

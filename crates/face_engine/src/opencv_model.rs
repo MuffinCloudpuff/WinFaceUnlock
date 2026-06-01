@@ -9,8 +9,9 @@ use opencv::{
 use video_provider::{PixelFormat, VideoFrame};
 
 use crate::{
-    DetectedFace, FaceBox, FaceEmbedding, FaceEngineError, FaceLandmark, FaceMatch,
-    FaceMatchDecision, FaceModelProvider, cosine_similarity,
+    DetectedFace, FaceBox, FaceDetectionModelProvider, FaceEmbedding, FaceEngineError,
+    FaceLandmark, FaceMatch, FaceMatchDecision, FaceModelDescriptor, FaceModelProvider,
+    FaceRecognitionModelProvider, cosine_similarity,
 };
 
 pub const SFACE_COSINE_MATCH_THRESHOLD: f32 = 0.363;
@@ -18,46 +19,70 @@ const YUNET_INPUT_WIDTH: i32 = 320;
 const YUNET_INPUT_HEIGHT: i32 = 320;
 
 #[derive(Clone, Debug)]
-pub struct OpenCvFaceModelConfig {
-    pub yunet_model_path: PathBuf,
-    pub sface_model_path: PathBuf,
+pub struct OpenCvYuNetDetectorConfig {
+    pub model_path: PathBuf,
     pub score_threshold: f32,
     pub nms_threshold: f32,
     pub top_k: i32,
-    pub match_threshold: f32,
 }
 
-impl OpenCvFaceModelConfig {
-    pub fn new(yunet_model_path: PathBuf, sface_model_path: PathBuf) -> Self {
+impl OpenCvYuNetDetectorConfig {
+    pub fn new(model_path: PathBuf) -> Self {
         Self {
-            yunet_model_path,
-            sface_model_path,
+            model_path,
             score_threshold: 0.9,
             nms_threshold: 0.3,
             top_k: 5000,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OpenCvSFaceRecognizerConfig {
+    pub model_path: PathBuf,
+    pub model: FaceModelDescriptor,
+    pub match_threshold: f32,
+}
+
+impl OpenCvSFaceRecognizerConfig {
+    pub fn new(model_path: PathBuf) -> Self {
+        Self {
+            model_path,
+            model: FaceModelDescriptor {
+                model_family: "sface".to_owned(),
+                model_version: "2021dec".to_owned(),
+            },
             match_threshold: SFACE_COSINE_MATCH_THRESHOLD,
         }
     }
 }
 
-pub struct OpenCvFaceModelProvider {
-    config: OpenCvFaceModelConfig,
-    detector: Option<core::Ptr<FaceDetectorYN>>,
-    recognizer: Option<core::Ptr<FaceRecognizerSF>>,
+#[derive(Clone, Debug)]
+pub struct OpenCvFaceModelConfig {
+    pub detector: OpenCvYuNetDetectorConfig,
+    pub recognizer: OpenCvSFaceRecognizerConfig,
 }
 
-impl OpenCvFaceModelProvider {
-    pub fn new(config: OpenCvFaceModelConfig) -> Self {
+impl OpenCvFaceModelConfig {
+    pub fn new(yunet_model_path: PathBuf, sface_model_path: PathBuf) -> Self {
+        Self {
+            detector: OpenCvYuNetDetectorConfig::new(yunet_model_path),
+            recognizer: OpenCvSFaceRecognizerConfig::new(sface_model_path),
+        }
+    }
+}
+
+pub struct OpenCvYuNetDetectorProvider {
+    config: OpenCvYuNetDetectorConfig,
+    detector: Option<core::Ptr<FaceDetectorYN>>,
+}
+
+impl OpenCvYuNetDetectorProvider {
+    pub fn new(config: OpenCvYuNetDetectorConfig) -> Self {
         Self {
             config,
             detector: None,
-            recognizer: None,
         }
-    }
-
-    pub fn read_image_frame(image_path: &str) -> Result<VideoFrame, FaceEngineError> {
-        let image = imgcodecs::imread_def(image_path).map_err(|_| FaceEngineError::InvalidFrame)?;
-        mat_to_video_frame(&image).map_err(|_| FaceEngineError::InvalidFrame)
     }
 
     fn detector_mut(&mut self) -> Result<&mut core::Ptr<FaceDetectorYN>, FaceEngineError> {
@@ -65,24 +90,17 @@ impl OpenCvFaceModelProvider {
             .as_mut()
             .ok_or(FaceEngineError::ModelNotLoaded)
     }
-
-    fn recognizer_mut(&mut self) -> Result<&mut core::Ptr<FaceRecognizerSF>, FaceEngineError> {
-        self.recognizer
-            .as_mut()
-            .ok_or(FaceEngineError::ModelNotLoaded)
-    }
 }
 
-impl FaceModelProvider for OpenCvFaceModelProvider {
-    fn load_models(&mut self) -> Result<(), FaceEngineError> {
-        if !self.config.yunet_model_path.exists() || !self.config.sface_model_path.exists() {
+impl FaceDetectionModelProvider for OpenCvYuNetDetectorProvider {
+    fn load_detection_model(&mut self) -> Result<(), FaceEngineError> {
+        if !self.config.model_path.exists() {
             return Err(FaceEngineError::ModelPathMissing);
         }
 
-        let yunet_model_path = self.config.yunet_model_path.to_string_lossy();
-        let sface_model_path = self.config.sface_model_path.to_string_lossy();
+        let model_path = self.config.model_path.to_string_lossy();
         let detector = FaceDetectorYN::create(
-            &yunet_model_path,
+            &model_path,
             "",
             Size::new(YUNET_INPUT_WIDTH, YUNET_INPUT_HEIGHT),
             self.config.score_threshold,
@@ -92,17 +110,13 @@ impl FaceModelProvider for OpenCvFaceModelProvider {
             0,
         )
         .map_err(|_| FaceEngineError::ModelLoadFailed)?;
-        let recognizer = FaceRecognizerSF::create_def(&sface_model_path, "")
-            .map_err(|_| FaceEngineError::ModelLoadFailed)?;
 
         self.detector = Some(detector);
-        self.recognizer = Some(recognizer);
         Ok(())
     }
 
-    fn unload_models(&mut self) {
+    fn unload_detection_model(&mut self) {
         self.detector = None;
-        self.recognizer = None;
     }
 
     fn detect(&mut self, frame: &VideoFrame) -> Result<Vec<DetectedFace>, FaceEngineError> {
@@ -122,6 +136,49 @@ impl FaceModelProvider for OpenCvFaceModelProvider {
             .map_err(|_| FaceEngineError::InferenceFailed)?;
 
         detected_faces_from_mat(&faces)
+    }
+}
+
+pub struct OpenCvSFaceRecognitionProvider {
+    config: OpenCvSFaceRecognizerConfig,
+    recognizer: Option<core::Ptr<FaceRecognizerSF>>,
+}
+
+impl OpenCvSFaceRecognitionProvider {
+    pub fn new(config: OpenCvSFaceRecognizerConfig) -> Self {
+        Self {
+            config,
+            recognizer: None,
+        }
+    }
+
+    fn recognizer_mut(&mut self) -> Result<&mut core::Ptr<FaceRecognizerSF>, FaceEngineError> {
+        self.recognizer
+            .as_mut()
+            .ok_or(FaceEngineError::ModelNotLoaded)
+    }
+}
+
+impl FaceRecognitionModelProvider for OpenCvSFaceRecognitionProvider {
+    fn load_recognition_model(&mut self) -> Result<(), FaceEngineError> {
+        if !self.config.model_path.exists() {
+            return Err(FaceEngineError::ModelPathMissing);
+        }
+
+        let model_path = self.config.model_path.to_string_lossy();
+        let recognizer = FaceRecognizerSF::create_def(&model_path, "")
+            .map_err(|_| FaceEngineError::ModelLoadFailed)?;
+
+        self.recognizer = Some(recognizer);
+        Ok(())
+    }
+
+    fn unload_recognition_model(&mut self) {
+        self.recognizer = None;
+    }
+
+    fn recognition_model(&self) -> &FaceModelDescriptor {
+        &self.config.model
     }
 
     fn extract(
@@ -157,6 +214,155 @@ impl FaceModelProvider for OpenCvFaceModelProvider {
         };
 
         FaceMatch { score, decision }
+    }
+}
+
+pub struct FaceModelPipeline<D, R> {
+    detector: D,
+    recognizer: R,
+}
+
+pub type HotSwappableFaceModelPipeline =
+    FaceModelPipeline<Box<dyn FaceDetectionModelProvider>, Box<dyn FaceRecognitionModelProvider>>;
+
+impl<D, R> FaceModelPipeline<D, R> {
+    pub fn new(detector: D, recognizer: R) -> Self {
+        Self {
+            detector,
+            recognizer,
+        }
+    }
+
+    pub fn detector(&self) -> &D {
+        &self.detector
+    }
+
+    pub fn recognizer(&self) -> &R {
+        &self.recognizer
+    }
+}
+
+impl<D, R> FaceModelPipeline<D, R>
+where
+    D: FaceDetectionModelProvider,
+    R: FaceRecognitionModelProvider,
+{
+    pub fn swap_detector(&mut self, mut detector: D) -> Result<D, FaceEngineError> {
+        detector.load_detection_model()?;
+        let mut previous_detector = std::mem::replace(&mut self.detector, detector);
+        previous_detector.unload_detection_model();
+        Ok(previous_detector)
+    }
+
+    pub fn swap_recognizer(&mut self, mut recognizer: R) -> Result<R, FaceEngineError> {
+        recognizer.load_recognition_model()?;
+        let mut previous_recognizer = std::mem::replace(&mut self.recognizer, recognizer);
+        previous_recognizer.unload_recognition_model();
+        Ok(previous_recognizer)
+    }
+}
+
+impl<D, R> FaceModelProvider for FaceModelPipeline<D, R>
+where
+    D: FaceDetectionModelProvider,
+    R: FaceRecognitionModelProvider,
+{
+    fn load_models(&mut self) -> Result<(), FaceEngineError> {
+        self.detector.load_detection_model()?;
+        if let Err(error) = self.recognizer.load_recognition_model() {
+            self.detector.unload_detection_model();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn unload_models(&mut self) {
+        self.detector.unload_detection_model();
+        self.recognizer.unload_recognition_model();
+    }
+
+    fn recognition_model(&self) -> &FaceModelDescriptor {
+        self.recognizer.recognition_model()
+    }
+
+    fn detect(&mut self, frame: &VideoFrame) -> Result<Vec<DetectedFace>, FaceEngineError> {
+        self.detector.detect(frame)
+    }
+
+    fn extract(
+        &mut self,
+        frame: &VideoFrame,
+        face: &DetectedFace,
+    ) -> Result<FaceEmbedding, FaceEngineError> {
+        self.recognizer.extract(frame, face)
+    }
+
+    fn compare(&self, enrolled: &FaceEmbedding, candidate: &FaceEmbedding) -> FaceMatch {
+        self.recognizer.compare(enrolled, candidate)
+    }
+}
+
+pub struct OpenCvFaceModelProvider {
+    pipeline: FaceModelPipeline<OpenCvYuNetDetectorProvider, OpenCvSFaceRecognitionProvider>,
+}
+
+impl OpenCvFaceModelProvider {
+    pub fn new(config: OpenCvFaceModelConfig) -> Self {
+        Self {
+            pipeline: FaceModelPipeline::new(
+                OpenCvYuNetDetectorProvider::new(config.detector),
+                OpenCvSFaceRecognitionProvider::new(config.recognizer),
+            ),
+        }
+    }
+
+    pub fn read_image_frame(image_path: &str) -> Result<VideoFrame, FaceEngineError> {
+        let image = imgcodecs::imread_def(image_path).map_err(|_| FaceEngineError::InvalidFrame)?;
+        mat_to_video_frame(&image).map_err(|_| FaceEngineError::InvalidFrame)
+    }
+
+    pub fn swap_detector(
+        &mut self,
+        detector: OpenCvYuNetDetectorProvider,
+    ) -> Result<OpenCvYuNetDetectorProvider, FaceEngineError> {
+        self.pipeline.swap_detector(detector)
+    }
+
+    pub fn swap_recognizer(
+        &mut self,
+        recognizer: OpenCvSFaceRecognitionProvider,
+    ) -> Result<OpenCvSFaceRecognitionProvider, FaceEngineError> {
+        self.pipeline.swap_recognizer(recognizer)
+    }
+}
+
+impl FaceModelProvider for OpenCvFaceModelProvider {
+    fn load_models(&mut self) -> Result<(), FaceEngineError> {
+        self.pipeline.load_models()
+    }
+
+    fn unload_models(&mut self) {
+        self.pipeline.unload_models();
+    }
+
+    fn recognition_model(&self) -> &FaceModelDescriptor {
+        self.pipeline.recognition_model()
+    }
+
+    fn detect(&mut self, frame: &VideoFrame) -> Result<Vec<DetectedFace>, FaceEngineError> {
+        self.pipeline.detect(frame)
+    }
+
+    fn extract(
+        &mut self,
+        frame: &VideoFrame,
+        face: &DetectedFace,
+    ) -> Result<FaceEmbedding, FaceEngineError> {
+        self.pipeline.extract(frame, face)
+    }
+
+    fn compare(&self, enrolled: &FaceEmbedding, candidate: &FaceEmbedding) -> FaceMatch {
+        self.pipeline.compare(enrolled, candidate)
     }
 }
 
@@ -301,4 +507,163 @@ fn embedding_from_feature_mat(feature: &Mat) -> Result<FaceEmbedding, FaceEngine
         .map_err(|_| FaceEngineError::InferenceFailed)?
         .to_vec();
     FaceEmbedding::new(values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct StubDetector {
+        loaded: bool,
+        load_error: Option<FaceEngineError>,
+    }
+
+    impl FaceDetectionModelProvider for StubDetector {
+        fn load_detection_model(&mut self) -> Result<(), FaceEngineError> {
+            if let Some(error) = &self.load_error {
+                return Err(error.clone());
+            }
+            self.loaded = true;
+            Ok(())
+        }
+
+        fn unload_detection_model(&mut self) {
+            self.loaded = false;
+        }
+
+        fn detect(&mut self, _frame: &VideoFrame) -> Result<Vec<DetectedFace>, FaceEngineError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct StubRecognizer {
+        loaded: bool,
+        model: FaceModelDescriptor,
+        load_error: Option<FaceEngineError>,
+    }
+
+    impl FaceRecognitionModelProvider for StubRecognizer {
+        fn load_recognition_model(&mut self) -> Result<(), FaceEngineError> {
+            if let Some(error) = &self.load_error {
+                return Err(error.clone());
+            }
+            self.loaded = true;
+            Ok(())
+        }
+
+        fn unload_recognition_model(&mut self) {
+            self.loaded = false;
+        }
+
+        fn recognition_model(&self) -> &FaceModelDescriptor {
+            &self.model
+        }
+
+        fn extract(
+            &mut self,
+            _frame: &VideoFrame,
+            _face: &DetectedFace,
+        ) -> Result<FaceEmbedding, FaceEngineError> {
+            FaceEmbedding::new(vec![1.0])
+        }
+
+        fn compare(&self, enrolled: &FaceEmbedding, candidate: &FaceEmbedding) -> FaceMatch {
+            FaceMatch {
+                score: cosine_similarity(&enrolled.values, &candidate.values).unwrap_or(0.0),
+                decision: FaceMatchDecision::MatchAccepted,
+            }
+        }
+    }
+
+    #[test]
+    fn pipeline_exposes_recognition_model_without_detector_metadata() -> Result<(), FaceEngineError>
+    {
+        let detector = StubDetector {
+            loaded: false,
+            load_error: None,
+        };
+        let recognizer = StubRecognizer {
+            loaded: false,
+            model: FaceModelDescriptor {
+                model_family: "recognizer-family".to_owned(),
+                model_version: "recognizer-version".to_owned(),
+            },
+            load_error: None,
+        };
+        let mut pipeline = FaceModelPipeline::new(detector, recognizer);
+
+        pipeline.load_models()?;
+
+        assert_eq!(
+            pipeline.recognition_model(),
+            &FaceModelDescriptor {
+                model_family: "recognizer-family".to_owned(),
+                model_version: "recognizer-version".to_owned(),
+            }
+        );
+        assert!(pipeline.detector().loaded);
+        assert!(pipeline.recognizer().loaded);
+        Ok(())
+    }
+
+    #[test]
+    fn detector_swap_keeps_previous_detector_when_new_model_fails_to_load()
+    -> Result<(), FaceEngineError> {
+        let detector = StubDetector {
+            loaded: false,
+            load_error: None,
+        };
+        let recognizer = StubRecognizer {
+            loaded: false,
+            model: FaceModelDescriptor {
+                model_family: "recognizer-family".to_owned(),
+                model_version: "recognizer-version".to_owned(),
+            },
+            load_error: None,
+        };
+        let mut pipeline = FaceModelPipeline::new(detector, recognizer);
+        pipeline.load_models()?;
+
+        let result = pipeline.swap_detector(StubDetector {
+            loaded: false,
+            load_error: Some(FaceEngineError::ModelLoadFailed),
+        });
+
+        assert!(matches!(result, Err(FaceEngineError::ModelLoadFailed)));
+        assert!(pipeline.detector().loaded);
+        Ok(())
+    }
+
+    #[test]
+    fn recognizer_swap_replaces_recognition_model_independently() -> Result<(), FaceEngineError> {
+        let detector = StubDetector {
+            loaded: false,
+            load_error: None,
+        };
+        let recognizer = StubRecognizer {
+            loaded: false,
+            model: FaceModelDescriptor {
+                model_family: "recognizer-family".to_owned(),
+                model_version: "v1".to_owned(),
+            },
+            load_error: None,
+        };
+        let mut pipeline = FaceModelPipeline::new(detector, recognizer);
+        pipeline.load_models()?;
+
+        let previous = pipeline.swap_recognizer(StubRecognizer {
+            loaded: false,
+            model: FaceModelDescriptor {
+                model_family: "recognizer-family".to_owned(),
+                model_version: "v2".to_owned(),
+            },
+            load_error: None,
+        })?;
+
+        assert!(!previous.loaded);
+        assert!(pipeline.detector().loaded);
+        assert!(pipeline.recognizer().loaded);
+        assert_eq!(pipeline.recognition_model().model_version, "v2");
+        Ok(())
+    }
 }

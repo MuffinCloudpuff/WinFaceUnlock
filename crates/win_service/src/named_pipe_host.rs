@@ -1,24 +1,18 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use common_protocol::{
-    AccountType, CredentialRef, ProtocolError, ServiceEvent, ServiceRequest, UserId,
-};
-use credential_store::{
-    CredentialBlob, CredentialBlobAlgorithm, CredentialStore, KeyProtector, MasterKey,
-    ProtectedMasterKeyFile, RepositoryCredentialStore, SqlCipherRepository, UserRecord,
-    WindowsDpapiKeyProtector,
-};
-use hardware_binding::HardwareFingerprint;
+use common_protocol::{ProtocolError, ServiceEvent, ServiceRequest, UserId};
 use ipc::{
     IpcClient, IpcServer, NamedPipeClient, NamedPipeServer, PipeSecurity, ServiceRequestHandler,
     SystemUnixTimeMillisClock,
 };
 
 use crate::{
-    credential_resolver::StoreProtectedCredentialResolver, simulated_auth::SimulatedAuthGrantIssuer,
+    auth_issuer::DevelopmentAuthGrantIssuer,
+    credential_resolver::StoreProtectedCredentialResolver,
+    credential_store_config::{
+        ServiceCredentialStore, ServiceCredentialStorePaths,
+        ensure_development_credential_if_missing, open_service_credential_store,
+    },
 };
 
 pub fn run_named_pipe_once(pipe_name: &str) -> Result<ServiceEvent, ProtocolError> {
@@ -78,100 +72,31 @@ pub fn wake_named_pipe_host(pipe_name: &str) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-type DevelopmentCredentialStore = RepositoryCredentialStore<SqlCipherRepository>;
-type DevelopmentCredentialResolver = StoreProtectedCredentialResolver<DevelopmentCredentialStore>;
+type DevelopmentCredentialResolver = StoreProtectedCredentialResolver<ServiceCredentialStore>;
 type DevelopmentServiceRequestHandler = ServiceRequestHandler<
-    SimulatedAuthGrantIssuer,
+    DevelopmentAuthGrantIssuer,
     DevelopmentCredentialResolver,
     SystemUnixTimeMillisClock,
 >;
 
 pub fn build_development_handler() -> Result<DevelopmentServiceRequestHandler, ProtocolError> {
-    build_development_handler_with_paths(&DevelopmentCredentialStorePaths::default())
-}
-
-struct DevelopmentCredentialStorePaths {
-    master_key_path: PathBuf,
-    database_path: PathBuf,
-}
-
-impl DevelopmentCredentialStorePaths {
-    fn default() -> Self {
-        Self {
-            master_key_path: std::env::temp_dir()
-                .join("winfaceunlock-dev-protected-master-key.bin"),
-            database_path: std::env::temp_dir().join("winfaceunlock-dev-credential-store.db"),
-        }
-    }
+    build_development_handler_with_paths(&ServiceCredentialStorePaths::from_environment_or_default())
 }
 
 fn build_development_handler_with_paths(
-    paths: &DevelopmentCredentialStorePaths,
+    paths: &ServiceCredentialStorePaths,
 ) -> Result<DevelopmentServiceRequestHandler, ProtocolError> {
     let dev_user_id = UserId("dev-user".to_owned());
-    let master_key = load_or_create_development_master_key(&paths.master_key_path)?;
-    let repository = SqlCipherRepository::open(&paths.database_path, &master_key)
-        .map_err(|_| ProtocolError::TransportUnavailable)?;
-    let mut credential_store = RepositoryCredentialStore::new(repository);
-    credential_store
-        .initialize(&HardwareFingerprint::empty())
-        .map_err(|_| ProtocolError::TransportUnavailable)?;
-    credential_store
-        .save_encrypted_credential_blob(
-            CredentialRef("dev-credential-ref".to_owned()),
-            development_placeholder_credential_blob(),
-        )
-        .map_err(|_| ProtocolError::TransportUnavailable)?;
-    credential_store
-        .upsert_user(UserRecord {
-            user_id: dev_user_id.clone(),
-            user_sid: "S-1-5-21-dev-user".to_owned(),
-            username: "dev-user".to_owned(),
-            account_type: AccountType::Local,
-            credential_ref: CredentialRef("dev-credential-ref".to_owned()),
-        })
-        .map_err(|_| ProtocolError::TransportUnavailable)?;
+    let context = open_service_credential_store(paths)?;
+    let mut credential_store = context.store;
+    let master_key = context.master_key;
+    ensure_development_credential_if_missing(&mut credential_store, &master_key, &dev_user_id)?;
 
     Ok(ServiceRequestHandler::new(
-        SimulatedAuthGrantIssuer::for_user(dev_user_id),
-        StoreProtectedCredentialResolver::new(credential_store),
+        DevelopmentAuthGrantIssuer::from_environment(dev_user_id)?,
+        StoreProtectedCredentialResolver::with_master_key(credential_store, master_key),
         SystemUnixTimeMillisClock,
     ))
-}
-
-fn development_placeholder_credential_blob() -> CredentialBlob {
-    CredentialBlob::new(
-        CredentialBlobAlgorithm::Aes256GcmV1,
-        vec![1; 12],
-        vec![2; 16],
-    )
-}
-
-fn load_or_create_development_master_key(
-    master_key_path: &Path,
-) -> Result<MasterKey, ProtocolError> {
-    let key_file = ProtectedMasterKeyFile::new(master_key_path.to_path_buf());
-    let key_protector = WindowsDpapiKeyProtector::new();
-
-    if key_file.path().exists() {
-        let protected = key_file
-            .load()
-            .map_err(|_| ProtocolError::TransportUnavailable)?;
-        key_protector
-            .unprotect_master_key(&protected)
-            .map_err(|_| ProtocolError::TransportUnavailable)
-    } else {
-        let master_key = key_protector
-            .generate_master_key()
-            .map_err(|_| ProtocolError::TransportUnavailable)?;
-        let protected = key_protector
-            .protect_master_key(&master_key)
-            .map_err(|_| ProtocolError::TransportUnavailable)?;
-        key_file
-            .save(&protected)
-            .map_err(|_| ProtocolError::TransportUnavailable)?;
-        Ok(master_key)
-    }
 }
 
 #[cfg(test)]
@@ -304,7 +229,7 @@ mod tests {
     fn run_server_requests(
         server: &mut NamedPipeServer,
         handler: &mut ServiceRequestHandler<
-            SimulatedAuthGrantIssuer,
+            DevelopmentAuthGrantIssuer,
             DevelopmentCredentialResolver,
             SystemUnixTimeMillisClock,
         >,
@@ -335,15 +260,12 @@ mod tests {
         )
     }
 
-    fn unique_development_store_paths() -> DevelopmentCredentialStorePaths {
+    fn unique_development_store_paths() -> ServiceCredentialStorePaths {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
         let prefix = format!("winfaceunlock-dev-test-{}-{nanos}", std::process::id());
-        DevelopmentCredentialStorePaths {
-            master_key_path: std::env::temp_dir().join(format!("{prefix}-master-key.bin")),
-            database_path: std::env::temp_dir().join(format!("{prefix}-store.db")),
-        }
+        ServiceCredentialStorePaths::from_store_dir(std::env::temp_dir().join(prefix))
     }
 }

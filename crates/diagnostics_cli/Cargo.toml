@@ -10,7 +10,9 @@ common_protocol = { path = "../common_protocol" }
 face_auth = { path = "../face_auth" }
 face_engine = { path = "../face_engine" }
 ipc = { path = "../ipc" }
+rpassword = "7.4.0"
 video_provider = { path = "../video_provider" }
+win_service = { path = "../win_service" }
 
 [lints]
 workspace = true

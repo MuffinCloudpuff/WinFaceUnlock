@@ -5,12 +5,15 @@ mod types;
 
 pub use embedding::cosine_similarity;
 pub use opencv_model::{
-    OpenCvFaceModelConfig, OpenCvFaceModelProvider, SFACE_COSINE_MATCH_THRESHOLD,
+    FaceModelPipeline, HotSwappableFaceModelPipeline, OpenCvFaceModelConfig,
+    OpenCvFaceModelProvider, OpenCvSFaceRecognitionProvider, OpenCvSFaceRecognizerConfig,
+    OpenCvYuNetDetectorConfig, OpenCvYuNetDetectorProvider, SFACE_COSINE_MATCH_THRESHOLD,
 };
 pub use template::{
     FaceTemplate, FaceTemplateCodecError, FaceTemplateMatch, FaceTemplateMatcher, FaceTemplateRef,
 };
 pub use types::{
-    DetectedFace, FaceBox, FaceEmbedding, FaceEngineError, FaceLandmark, FaceMatch,
-    FaceMatchDecision, FaceModelProvider,
+    DetectedFace, FaceBox, FaceDetectionModelProvider, FaceEmbedding, FaceEngineError,
+    FaceLandmark, FaceMatch, FaceMatchDecision, FaceModelDescriptor, FaceModelProvider,
+    FaceRecognitionModelProvider,
 };

@@ -155,16 +155,22 @@ username::FaceWinUnlock::password
 3. CPU 可跑。
 4. OpenCV 文档和样例较多。
 
-但要做成 `FaceModelProvider`：
+但要拆成独立 provider，再通过组合 pipeline 接入上层：
 
 ```text
-FaceModelProvider
+FaceDetectionModelProvider
   detect(frame) -> face boxes / landmarks
+
+FaceRecognitionModelProvider
   extract(frame, face) -> embedding
   compare(a, b) -> score
+
+FaceModelPipeline
+  detector: FaceDetectionModelProvider
+  recognizer: FaceRecognitionModelProvider
 ```
 
-不要让上层策略知道 YuNet/SFace 的具体类型。
+不要让上层策略知道 YuNet/SFace 的具体类型。检测模型和识别模型必须可以单独替换。替换识别模型后，旧 embedding 模板不得静默参与新模型比对；模板需要记录识别模型族和版本，并重新注册和校准阈值。
 
 ### 2.5 安装、卸载、注册表与计划任务
 

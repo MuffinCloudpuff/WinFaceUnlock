@@ -1,14 +1,38 @@
-use common_protocol::{AuthGrant, ProtectedCredential, ProtocolError};
-use credential_store::{CredentialStore, CredentialStoreError};
-use ipc::ProtectedCredentialResolver;
+use common_protocol::{
+    AccountType, AuthGrant, ProtectedCredential, ProtectedCredentialMaterial, ProtocolError,
+};
+use credential_store::{
+    AesGcmCredentialBlobProtector, CredentialBlobAssociatedData, CredentialBlobProtector,
+    CredentialStore, CredentialStoreError, MasterKey, WindowsSecureRandom,
+};
+use ipc::{
+    CredentialMaterialProtector, CredentialMaterialSecret,
+    DpapiLocalMachineCredentialMaterialProtector, ProtectedCredentialMaterialResolver,
+    ProtectedCredentialResolver,
+};
 
 pub struct StoreProtectedCredentialResolver<S: CredentialStore> {
     credential_store: S,
+    master_key: Option<MasterKey>,
+    credential_material_protector: DpapiLocalMachineCredentialMaterialProtector,
 }
 
 impl<S: CredentialStore> StoreProtectedCredentialResolver<S> {
+    #[cfg(test)]
     pub fn new(credential_store: S) -> Self {
-        Self { credential_store }
+        Self {
+            credential_store,
+            master_key: None,
+            credential_material_protector: DpapiLocalMachineCredentialMaterialProtector,
+        }
+    }
+
+    pub fn with_master_key(credential_store: S, master_key: MasterKey) -> Self {
+        Self {
+            credential_store,
+            master_key: Some(master_key),
+            credential_material_protector: DpapiLocalMachineCredentialMaterialProtector,
+        }
     }
 }
 
@@ -20,6 +44,68 @@ impl<S: CredentialStore> ProtectedCredentialResolver for StoreProtectedCredentia
         self.credential_store
             .get_protected_credential(&grant.user_id)
             .map_err(credential_store_error_to_protocol_error)
+    }
+}
+
+impl<S: CredentialStore> ProtectedCredentialMaterialResolver
+    for StoreProtectedCredentialResolver<S>
+{
+    fn resolve_protected_credential_material(
+        &mut self,
+        grant: &AuthGrant,
+    ) -> Result<ProtectedCredentialMaterial, ProtocolError> {
+        let user = self
+            .credential_store
+            .get_user(&grant.user_id)
+            .map_err(credential_store_error_to_protocol_error)?;
+        let credential_blob = self
+            .credential_store
+            .load_encrypted_credential_blob(&user.credential_ref)
+            .map_err(credential_store_error_to_protocol_error)?;
+        let master_key = self
+            .master_key
+            .as_ref()
+            .ok_or(ProtocolError::TransportUnavailable)?;
+        let blob_protector = AesGcmCredentialBlobProtector::new(WindowsSecureRandom::new());
+        let secret = blob_protector
+            .decrypt_credential_secret(
+                master_key,
+                &CredentialBlobAssociatedData {
+                    user_id: user.user_id.clone(),
+                    credential_ref: user.credential_ref,
+                },
+                &credential_blob,
+            )
+            .map_err(credential_store_error_to_protocol_error)?;
+
+        self.credential_material_protector
+            .protect_credential_material(CredentialMaterialSecret {
+                user_id: user.user_id,
+                domain: credential_domain(&user.account_type, &user.username),
+                username: credential_username(&user.account_type, &user.username),
+                password: secret.expose_for_encryption().to_vec(),
+            })
+    }
+}
+
+fn credential_domain(account_type: &AccountType, username: &str) -> String {
+    match account_type {
+        AccountType::Local => std::env::var("COMPUTERNAME").unwrap_or_else(|_| ".".to_owned()),
+        AccountType::MicrosoftAccount => String::new(),
+        AccountType::Domain => username
+            .split_once('\\')
+            .map(|(domain, _)| domain.to_owned())
+            .unwrap_or_default(),
+    }
+}
+
+fn credential_username(account_type: &AccountType, username: &str) -> String {
+    match account_type {
+        AccountType::Domain => username
+            .split_once('\\')
+            .map(|(_, username)| username.to_owned())
+            .unwrap_or_else(|| username.to_owned()),
+        AccountType::Local | AccountType::MicrosoftAccount => username.to_owned(),
     }
 }
 
@@ -88,6 +174,25 @@ mod tests {
 
         assert_eq!(result, Err(ProtocolError::Unauthorized));
         Ok(())
+    }
+
+    #[test]
+    fn local_account_domain_uses_machine_name_when_available() {
+        let domain = credential_domain(&AccountType::Local, "Leo16");
+
+        assert!(!domain.is_empty());
+    }
+
+    #[test]
+    fn domain_account_splits_domain_and_username() {
+        assert_eq!(
+            credential_domain(&AccountType::Domain, r"WORKSTATION\Leo16"),
+            "WORKSTATION"
+        );
+        assert_eq!(
+            credential_username(&AccountType::Domain, r"WORKSTATION\Leo16"),
+            "Leo16"
+        );
     }
 
     fn test_grant(user_id: &str) -> AuthGrant {

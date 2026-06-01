@@ -1,8 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use common_protocol::{
-    AuthFailureReason, AuthGrant, AuthSource, ProtectedCredential, ProtocolError, ServiceEvent,
-    ServiceRequest, SessionId,
+    AuthFailureReason, AuthGrant, AuthSource, ProtectedCredential, ProtectedCredentialMaterial,
+    ProtocolError, ServiceEvent, ServiceRequest, SessionId,
 };
 
 use crate::GrantRegistry;
@@ -21,6 +21,13 @@ pub trait ProtectedCredentialResolver {
         &mut self,
         grant: &AuthGrant,
     ) -> Result<ProtectedCredential, ProtocolError>;
+}
+
+pub trait ProtectedCredentialMaterialResolver {
+    fn resolve_protected_credential_material(
+        &mut self,
+        grant: &AuthGrant,
+    ) -> Result<ProtectedCredentialMaterial, ProtocolError>;
 }
 
 pub trait UnixTimeMillisClock {
@@ -50,7 +57,7 @@ pub struct ServiceRequestHandler<I, R, C> {
 impl<I, R, C> ServiceRequestHandler<I, R, C>
 where
     I: AuthGrantIssuer,
-    R: ProtectedCredentialResolver,
+    R: ProtectedCredentialResolver + ProtectedCredentialMaterialResolver,
     C: UnixTimeMillisClock,
 {
     pub fn new(grant_issuer: I, credential_resolver: R, clock: C) -> Self {
@@ -90,6 +97,26 @@ where
                     protected_credential,
                 })
             }
+            ServiceRequest::FetchCredentialMaterial {
+                session_id,
+                grant_id,
+                nonce,
+            } => {
+                let grant = self.grant_registry.redeem_grant_for_session(
+                    &grant_id,
+                    &nonce,
+                    &session_id,
+                    self.clock.now_unix_ms(),
+                )?;
+                let protected_credential_material = self
+                    .credential_resolver
+                    .resolve_protected_credential_material(&grant)?;
+
+                Ok(ServiceEvent::CredentialMaterialReady {
+                    grant_id,
+                    protected_credential_material,
+                })
+            }
             ServiceRequest::Cancel { session_id } => {
                 self.grant_registry.remove_grants_for_session(&session_id);
                 Ok(ServiceEvent::AuthCancelled { session_id })
@@ -120,7 +147,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use common_protocol::{AuthScore, CredentialRef, DEFAULT_GRANT_TTL, GrantId, Nonce, UserId};
+    use common_protocol::{
+        AuthScore, CredentialMaterialProtection, CredentialRef, DEFAULT_GRANT_TTL, GrantId, Nonce,
+        UserId,
+    };
 
     use super::*;
 
@@ -187,6 +217,21 @@ mod tests {
         }
     }
 
+    impl ProtectedCredentialMaterialResolver for FixedCredentialResolver {
+        fn resolve_protected_credential_material(
+            &mut self,
+            grant: &AuthGrant,
+        ) -> Result<ProtectedCredentialMaterial, ProtocolError> {
+            Ok(ProtectedCredentialMaterial {
+                user_id: grant.user_id.clone(),
+                domain: ".".to_owned(),
+                username: "test-user".to_owned(),
+                protected_password: vec![1, 2, 3],
+                protection: CredentialMaterialProtection::DpapiLocalMachineV1,
+            })
+        }
+    }
+
     #[test]
     fn handler_issues_grant_then_redeems_protected_credential_once() -> Result<(), ProtocolError> {
         let mut handler = ServiceRequestHandler::new(
@@ -244,6 +289,37 @@ mod tests {
         });
 
         assert_eq!(result, Err(ProtocolError::SessionMismatch));
+        Ok(())
+    }
+
+    #[test]
+    fn handler_redeems_grant_for_protected_credential_material_once() -> Result<(), ProtocolError> {
+        let mut handler = ServiceRequestHandler::new(
+            SuccessfulGrantIssuer,
+            FixedCredentialResolver,
+            FixedClock { now_unix_ms: 1_000 },
+        );
+
+        handler.handle_request(ServiceRequest::WakeAuth {
+            session_id: SessionId("session-1".to_owned()),
+            source: AuthSource::LocalCamera,
+        })?;
+        let ready = handler.handle_request(ServiceRequest::FetchCredentialMaterial {
+            session_id: SessionId("session-1".to_owned()),
+            grant_id: GrantId("grant-1".to_owned()),
+            nonce: Nonce("nonce-1".to_owned()),
+        })?;
+        let replay = handler.handle_request(ServiceRequest::FetchCredentialMaterial {
+            session_id: SessionId("session-1".to_owned()),
+            grant_id: GrantId("grant-1".to_owned()),
+            nonce: Nonce("nonce-1".to_owned()),
+        });
+
+        assert!(matches!(
+            ready,
+            ServiceEvent::CredentialMaterialReady { .. }
+        ));
+        assert_eq!(replay, Err(ProtocolError::UsedGrant));
         Ok(())
     }
 

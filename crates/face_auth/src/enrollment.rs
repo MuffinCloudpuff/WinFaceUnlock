@@ -27,8 +27,6 @@ where
         frame: &VideoFrame,
         user_id: UserId,
         template_ref: EngineFaceTemplateRef,
-        model_family: String,
-        model_version: String,
     ) -> Result<EnrollmentOutcome, FaceEngineError> {
         let faces = self.model_provider.detect(frame)?;
         if faces.is_empty() {
@@ -39,12 +37,13 @@ where
         }
 
         let embedding = self.model_provider.extract(frame, &faces[0])?;
+        let recognition_model = self.model_provider.recognition_model();
         Ok(EnrollmentOutcome {
             template: FaceTemplate {
                 template_ref,
                 user_id: user_id.0,
-                model_family,
-                model_version,
+                model_family: recognition_model.model_family.clone(),
+                model_version: recognition_model.model_version.clone(),
                 embedding,
             },
             detected_face_count: faces.len(),

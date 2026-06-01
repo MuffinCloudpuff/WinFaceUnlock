@@ -312,12 +312,14 @@ policies:
 
 目标：所有识别能力用 Rust 实现。
 
+Phase 4 必须先于 Credential Provider 自动登录实现完成。摄像头、模型推理、人脸模板、连续成功策略、失败冷却和凭据授权都应先在 Service / diagnostics CLI 环境中跑通，不能把真实摄像头或 OpenCV 推理逻辑放进 Provider DLL。
+
 任务：
 
 1. `video_provider` 实现本地摄像头枚举。
 2. 实现本地摄像头打开、读帧、关闭。
-3. `face_engine` 加载 YuNet。
-4. `face_engine` 加载 SFace。
+3. `face_engine` 通过独立检测 provider 加载 YuNet。
+4. `face_engine` 通过独立识别 provider 加载 SFace。
 5. 可选加载 liveness 模型。
 6. 实现图片注册。
 7. 实现摄像头注册。
@@ -325,6 +327,9 @@ policies:
 9. 实现特征比对。
 10. 实现连续成功策略。
 11. 实现失败冷却。
+12. 将真实摄像头识别链路接入 `WinFaceUnlockService` 的 `WakeAuth` 处理。
+13. `diagnostics_cli wake-auth` 支持触发真实摄像头识别，而不是只走模拟认证。
+14. 检测模型和识别模型通过组合 pipeline 独立热插拔；识别模板记录模型族和版本，禁止跨模型静默比对。
 
 验收：
 
@@ -335,10 +340,26 @@ policies:
 5. 能注册模板。
 6. 能在本地摄像头下完成识别。
 7. 空闲时不持续占用摄像头。
+8. Service 收到 `WakeAuth` 后可拉起真实摄像头识别。
+9. 真实识别成功后返回结构化 `AuthSucceeded` 和后续 `CredentialReady`。
+10. 真实识别失败时返回明确失败原因，不影响下一次识别和手动登录 fallback。
+11. Phase 4 未通过前，不进入 Credential Provider 自动登录实现。
 
-## 九、Phase 5：Credential Provider 虚拟机 PoC
+## 九、Phase 5：Credential Provider 自动登录虚拟机 PoC
 
-目标：在虚拟机中接入 Windows 登录界面。
+目标：在虚拟机中接入 Windows 登录界面，并实现类似 FaceWinUnlock-Tauri 的“登录界面自动识别，认证成功后自动提交凭据”体验。
+
+前置条件：Phase 4 已经证明 Service 能在普通桌面环境中独立完成真实摄像头识别和授权返回。Phase 5 不再解决人脸算法正确性，只验证 Winlogon / LogonUI 生命周期、Provider 自动唤醒、`CredentialsChanged`、自动登录提交和 fallback。
+
+路线说明：
+
+1. 仍然使用自定义 Windows Credential Provider，不伪装成 Windows Hello 设备。
+2. 磁贴是 Credential Provider 的系统入口，但不要求用户每次点击磁贴。
+3. Provider 被 LogonUI 加载后即可向 Service 发起自动识别请求。
+4. Service 认证通过后通知 Provider 调用 `CredentialsChanged`。
+5. LogonUI 重新枚举凭据时，Provider 在 `GetCredentialCount` 返回默认凭据和自动登录标记。
+6. `GetSerialization` 只在凭据材料已准备好时调用 `CredPackAuthenticationBufferW`。
+7. PIN / 密码 / Windows 原登录方式必须保留为 fallback。
 
 任务：
 
@@ -350,14 +371,18 @@ policies:
 3. 实现 `IClassFactory`。
 4. 实现 `ICredentialProvider`。
 5. 实现 `ICredentialProviderCredential`。
-6. 实现基础磁贴。
+6. 实现可显示/可隐藏的基础凭据磁贴。
 7. 实现 `Advise` / `UnAdvise` 生命周期。
-8. 实现键鼠触发 wake request。
+8. 实现 Provider 加载后的自动 wake request，键鼠触发只作为额外唤醒源。
 9. 与 Service 通过 named pipe 通信。
 10. 认证通过后调用 `CredentialsChanged`。
-11. 在 `GetSerialization` 中调用 `CredPackAuthenticationBufferW`。
-12. 实现 `ReportResult`。
-13. 实现安装和卸载脚本。
+11. 在 `GetCredentialCount` 中区分普通展示状态和自动登录准备完成状态：
+   - 未准备好时可显示磁贴或隐藏磁贴。
+   - 凭据准备好时返回 `pdwdefault = 0`。
+   - 凭据准备好时返回 `pbautologonwithdefault = TRUE`。
+12. 在 `GetSerialization` 中调用 `CredPackAuthenticationBufferW`。
+13. 实现 `ReportResult`，避免密码错误或认证失败时无限重试。
+14. 实现安装和卸载脚本。
 
 验收：
 
@@ -365,13 +390,16 @@ policies:
 2. Provider 可注册。
 3. Provider 可卸载。
 4. Provider 崩溃后可恢复系统登录。
-5. 锁屏后键鼠触发可唤醒 Service。
-6. 认证成功后可解锁。
-7. 密码错误不会无限重试。
+5. 锁屏或登录界面加载后，不点击磁贴也能唤醒 Service 进行识别。
+6. 认证成功后自动登录或自动解锁。
+7. 用户仍可手动选择 PIN / 密码 fallback。
+8. 密码错误不会无限重试。
+9. 磁贴隐藏时，认证成功后仍能通过自动登录凭据完成提交。
+10. 卸载后 Windows 原登录方式恢复。
 
-## 十、Phase 6：开机未登录登录
+## 十、Phase 6：开机未登录自动登录强化
 
-目标：支持无人登录前的人脸登录。
+目标：在 Phase 5 自动登录链路稳定后，强化冷启动、无人登录、资源权限和多账户策略。
 
 任务：
 
@@ -387,10 +415,11 @@ policies:
 验收：
 
 1. 重启后未登录状态下 Service 已运行。
-2. 键鼠触发能开始识别。
-3. 认证成功能登录目标账户。
-4. 认证失败不影响手动密码登录。
-5. 可安全卸载恢复。
+2. 登录界面加载后可自动开始识别。
+3. 键鼠触发可作为额外唤醒和重试入口。
+4. 认证成功能登录目标账户。
+5. 认证失败不影响手动密码或 PIN 登录。
+6. 可安全卸载恢复。
 
 ## 十一、Phase 7：安装、卸载和恢复
 

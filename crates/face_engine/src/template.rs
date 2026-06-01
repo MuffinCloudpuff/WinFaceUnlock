@@ -1,4 +1,4 @@
-use crate::{FaceEmbedding, FaceMatch, FaceMatchDecision, cosine_similarity};
+use crate::{FaceEmbedding, FaceMatch, FaceMatchDecision, FaceModelDescriptor, cosine_similarity};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct FaceTemplateRef(pub String);
@@ -19,6 +19,11 @@ impl FaceTemplate {
 
     pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, FaceTemplateCodecError> {
         serde_json::from_slice(bytes).map_err(|_| FaceTemplateCodecError::DeserializeFailed)
+    }
+
+    pub fn is_compatible_with(&self, recognition_model: &FaceModelDescriptor) -> bool {
+        self.model_family == recognition_model.model_family
+            && self.model_version == recognition_model.model_version
     }
 }
 
@@ -67,6 +72,29 @@ impl FaceTemplateMatcher {
     ) -> Option<FaceTemplateMatch> {
         templates
             .iter()
+            .map(|template| {
+                let face_match = self.compare_embeddings(&template.embedding, candidate);
+                FaceTemplateMatch {
+                    template_ref: template.template_ref.clone(),
+                    user_id: template.user_id.clone(),
+                    score: face_match.score,
+                    decision: face_match.decision,
+                }
+            })
+            .max_by(|left, right| left.score.total_cmp(&right.score))
+    }
+
+    pub fn best_compatible_match(
+        &self,
+        templates: &[FaceTemplate],
+        recognition_model: &FaceModelDescriptor,
+        candidate: &FaceEmbedding,
+    ) -> Option<FaceTemplateMatch> {
+        let compatible_templates = templates
+            .iter()
+            .filter(|template| template.is_compatible_with(recognition_model));
+
+        compatible_templates
             .map(|template| {
                 let face_match = self.compare_embeddings(&template.embedding, candidate);
                 FaceTemplateMatch {
@@ -127,5 +155,32 @@ mod tests {
         assert_eq!(matched.decision, FaceMatchDecision::MatchAccepted);
         assert_eq!(matched.template_ref, FaceTemplateRef("face-1".to_owned()));
         Ok(())
+    }
+
+    #[test]
+    fn compatible_match_ignores_template_from_another_recognition_model() {
+        let matcher = FaceTemplateMatcher::new(0.82);
+        let templates = vec![FaceTemplate {
+            template_ref: FaceTemplateRef("face-1".to_owned()),
+            user_id: "user-1".to_owned(),
+            model_family: "other-recognizer".to_owned(),
+            model_version: "v2".to_owned(),
+            embedding: FaceEmbedding {
+                values: vec![1.0, 0.0, 1.0],
+            },
+        }];
+
+        let matched = matcher.best_compatible_match(
+            &templates,
+            &FaceModelDescriptor {
+                model_family: "sface".to_owned(),
+                model_version: "2021dec".to_owned(),
+            },
+            &FaceEmbedding {
+                values: vec![1.0, 0.0, 1.0],
+            },
+        );
+
+        assert_eq!(matched, None);
     }
 }

@@ -1,4 +1,5 @@
 mod codec;
+mod credential_material;
 mod grant_registry;
 #[cfg(windows)]
 mod named_pipe;
@@ -7,12 +8,16 @@ mod service_handler;
 use common_protocol::{ProtocolError, ServiceEvent, ServiceRequest};
 
 pub use codec::{decode_event, decode_request, encode_event, encode_request};
+pub use credential_material::{
+    CredentialMaterialProtector, CredentialMaterialSecret,
+    DpapiLocalMachineCredentialMaterialProtector,
+};
 pub use grant_registry::GrantRegistry;
 #[cfg(windows)]
 pub use named_pipe::{NamedPipeClient, NamedPipeServer, PipeSecurityDescriptor};
 pub use service_handler::{
-    AuthGrantIssuer, ProtectedCredentialResolver, ServiceRequestHandler, SystemUnixTimeMillisClock,
-    UnixTimeMillisClock,
+    AuthGrantIssuer, ProtectedCredentialMaterialResolver, ProtectedCredentialResolver,
+    ServiceRequestHandler, SystemUnixTimeMillisClock, UnixTimeMillisClock,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
