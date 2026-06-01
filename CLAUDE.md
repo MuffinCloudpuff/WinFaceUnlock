@@ -10,7 +10,7 @@ GitNexus 默认使用 CLI，不调用 MCP：
 
 ```powershell
 npx gitnexus status
-npx gitnexus analyze
+npx gitnexus analyze --skip-agents-md
 ```
 
 修改既有符号前用本地方式做影响分析：

@@ -39,9 +39,9 @@ WinFaceUnlock 的核心链路固定为 Rust 主线：
 
 ```powershell
 npx gitnexus status
-npx gitnexus analyze
-npx gitnexus analyze --force
-npx gitnexus analyze --embeddings
+npx gitnexus analyze --skip-agents-md
+npx gitnexus analyze --force --skip-agents-md
+npx gitnexus analyze --embeddings --skip-agents-md
 npx gitnexus clean --force
 npx gitnexus list
 ```

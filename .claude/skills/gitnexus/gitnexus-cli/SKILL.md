@@ -12,17 +12,18 @@ All commands work via `npx` — no global install required.
 ### analyze — Build or refresh the index
 
 ```bash
-npx gitnexus analyze
+npx gitnexus analyze --skip-agents-md
 ```
 
-Run from the project root. This parses all source files, builds the knowledge graph, writes it to `.gitnexus/`, and generates CLAUDE.md / AGENTS.md context files.
+Run from the project root. This parses all source files, builds the knowledge graph, and writes it to `.gitnexus/`. Use `--skip-agents-md` in this project so GitNexus does not inject MCP-oriented sections into `CLAUDE.md` / `AGENTS.md`.
 
 | Flag           | Effect                                                           |
 | -------------- | ---------------------------------------------------------------- |
 | `--force`      | Force full re-index even if up to date                           |
 | `--embeddings` | Enable embedding generation for semantic search (off by default) |
+| `--skip-agents-md` | Skip updating the GitNexus section in `AGENTS.md` and `CLAUDE.md` |
 
-**When to run:** First time in a project, after major code changes, or when `gitnexus://repo/{name}/context` reports the index is stale. In Claude Code, a PostToolUse hook runs `analyze` automatically after `git commit` and `git merge`, preserving embeddings if previously generated.
+**When to run:** First time in a project, after major code changes, or when `gitnexus status` reports the index is stale. In this project, prefer CLI checks and always include `--skip-agents-md`.
 
 ### status — Check index freshness
 
