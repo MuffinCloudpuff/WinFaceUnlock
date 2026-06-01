@@ -1,6 +1,6 @@
 #![allow(unsafe_code)]
 
-use std::{rc::Rc, sync::Mutex};
+use std::sync::{Arc, Mutex};
 
 use windows::Win32::{
     Foundation::{E_INVALIDARG, E_NOTIMPL, NTSTATUS},
@@ -18,7 +18,7 @@ use windows_core::{BOOL, PCWSTR, PWSTR, Ref, Result, implement};
 use crate::{
     auth_package::retrieve_negotiate_auth_package_id,
     fields::{FIELD_ID_STATUS, FIELD_ID_TITLE, allocate_wide_string, field_spec},
-    provider::request_wake_if_needed,
+    provider::request_wake_in_background,
     provider_log::{write_provider_event, write_provider_event_detail},
     provider_state::ProviderState,
     serialization::pack_credential_material,
@@ -26,12 +26,12 @@ use crate::{
 
 #[implement(ICredentialProviderCredential)]
 pub struct WinFaceUnlockCredential {
-    state: Rc<ProviderState>,
+    state: Arc<ProviderState>,
     credential_events: Mutex<Option<ICredentialProviderCredentialEvents>>,
 }
 
 impl WinFaceUnlockCredential {
-    pub fn new(state: Rc<ProviderState>) -> Self {
+    pub fn new(state: Arc<ProviderState>) -> Self {
         Self {
             state,
             credential_events: Mutex::new(None),
@@ -57,7 +57,7 @@ impl ICredentialProviderCredential_Impl for WinFaceUnlockCredential_Impl {
 
     fn SetSelected(&self) -> Result<BOOL> {
         write_provider_event("Credential.SetSelected");
-        request_wake_if_needed(&self.state, "Credential.SelectedWake");
+        request_wake_in_background(self.state.clone(), "Credential.SelectedWake");
         Ok(false.into())
     }
 
@@ -167,6 +167,7 @@ impl ICredentialProviderCredential_Impl for WinFaceUnlockCredential_Impl {
             );
             let auth_package_id = retrieve_negotiate_auth_package_id()?;
             let serialization = pack_credential_material(auth_package_id, &credential_material)?;
+            self.state.mark_credential_material_serialized();
             write_provider_event_detail(
                 "Credential.GetSerializationPacked",
                 format!(
@@ -221,7 +222,7 @@ impl ICredentialProviderCredential_Impl for WinFaceUnlockCredential_Impl {
     }
 }
 
-pub fn create_credential(state: Rc<ProviderState>) -> ICredentialProviderCredential {
+pub fn create_credential(state: Arc<ProviderState>) -> ICredentialProviderCredential {
     WinFaceUnlockCredential::new(state).into()
 }
 
@@ -233,7 +234,7 @@ mod tests {
 
     #[test]
     fn credential_can_be_created_as_com_interface() {
-        let state = Rc::new(ProviderState::new());
+        let state = Arc::new(ProviderState::new());
         let _credential = create_credential(state);
     }
 

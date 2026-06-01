@@ -1,4 +1,4 @@
-use std::{hash::Hash, time::Duration};
+use std::{fmt, hash::Hash, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -66,13 +66,26 @@ pub enum CredentialMaterialProtection {
     DpapiLocalMachineV1,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
 pub struct ProtectedCredentialMaterial {
     pub user_id: UserId,
     pub domain: String,
     pub username: String,
     pub protected_password: Vec<u8>,
     pub protection: CredentialMaterialProtection,
+}
+
+impl fmt::Debug for ProtectedCredentialMaterial {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProtectedCredentialMaterial")
+            .field("user_id", &self.user_id)
+            .field("domain", &self.domain)
+            .field("username", &self.username)
+            .field("protected_password_len", &self.protected_password.len())
+            .field("protection", &self.protection)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -181,5 +194,21 @@ mod tests {
         assert!(grant.has_valid_time_window());
         assert!(!grant.is_expired_at(5_999));
         assert!(grant.is_expired_at(6_000));
+    }
+
+    #[test]
+    fn protected_credential_material_debug_redacts_protected_password_bytes() {
+        let material = ProtectedCredentialMaterial {
+            user_id: UserId("user-1".to_owned()),
+            domain: ".".to_owned(),
+            username: "leo16".to_owned(),
+            protected_password: vec![1, 2, 3, 4],
+            protection: CredentialMaterialProtection::DpapiLocalMachineV1,
+        };
+
+        let debug = format!("{material:?}");
+
+        assert!(debug.contains("protected_password_len"));
+        assert!(!debug.contains("[1, 2, 3, 4]"));
     }
 }

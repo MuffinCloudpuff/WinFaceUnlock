@@ -1,15 +1,29 @@
 #![allow(unsafe_code)]
 
+use std::fmt;
+
 use common_protocol::{
     CredentialMaterialProtection, ProtectedCredentialMaterial, ProtocolError, UserId,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct CredentialMaterialSecret {
     pub user_id: UserId,
     pub domain: String,
     pub username: String,
     pub password: Vec<u8>,
+}
+
+impl fmt::Debug for CredentialMaterialSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CredentialMaterialSecret")
+            .field("user_id", &self.user_id)
+            .field("domain", &self.domain)
+            .field("username", &self.username)
+            .field("password_len", &self.password.len())
+            .finish()
+    }
 }
 
 pub trait CredentialMaterialProtector {
@@ -177,5 +191,20 @@ mod tests {
         assert_eq!(restored, secret);
         assert_ne!(protected.protected_password, b"correct horse battery");
         Ok(())
+    }
+
+    #[test]
+    fn credential_material_secret_debug_redacts_password_bytes() {
+        let secret = CredentialMaterialSecret {
+            user_id: UserId("user-1".to_owned()),
+            domain: ".".to_owned(),
+            username: "leo16".to_owned(),
+            password: b"secret".to_vec(),
+        };
+
+        let debug = format!("{secret:?}");
+
+        assert!(debug.contains("password_len"));
+        assert!(!debug.contains("secret"));
     }
 }

@@ -1,7 +1,8 @@
 #![allow(unsafe_code)]
 
-use std::{rc::Rc, sync::Mutex};
+use std::sync::{Arc, Mutex};
 
+use common_protocol::ProtocolError;
 use windows::Win32::{
     Foundation::E_INVALIDARG,
     UI::Shell::{
@@ -18,13 +19,13 @@ use crate::{
     credential::create_credential,
     fields::{FIELD_COUNT, allocate_field_descriptor},
     provider_config::ProviderRuntimeConfig,
-    provider_log::write_provider_event,
-    provider_state::ProviderState,
+    provider_log::{write_provider_event, write_provider_event_detail},
+    provider_state::{ProviderState, WakeRequestStart},
 };
 
 #[implement(ICredentialProvider)]
 pub struct WinFaceUnlockProvider {
-    state: Rc<ProviderState>,
+    state: Arc<ProviderState>,
     credential: Mutex<Option<ICredentialProviderCredential>>,
 }
 
@@ -32,7 +33,7 @@ impl WinFaceUnlockProvider {
     pub fn new() -> Self {
         let runtime_config = ProviderRuntimeConfig::from_registry_or_default();
         Self {
-            state: Rc::new(ProviderState::with_tile_visibility(
+            state: Arc::new(ProviderState::with_tile_visibility(
                 runtime_config.tile_visibility,
             )),
             credential: Mutex::new(None),
@@ -69,7 +70,7 @@ impl ICredentialProvider_Impl for WinFaceUnlockProvider_Impl {
         write_provider_event("Provider.Advise");
         self.state.set_events(pcpe.cloned(), upadvisecontext);
         if ProviderRuntimeConfig::from_registry_or_default().auto_wake_on_advise {
-            request_wake_if_needed(&self.state, "Provider.AutoWake");
+            request_wake_in_background(self.state.clone(), "Provider.AutoWake");
         }
         Ok(())
     }
@@ -131,24 +132,37 @@ pub fn create_provider() -> ICredentialProvider {
     WinFaceUnlockProvider::new().into()
 }
 
-pub(crate) fn request_wake_if_needed(state: &ProviderState, trigger_name: &'static str) {
-    let Some(session_id) = state.begin_wake_request() else {
-        write_provider_event("Provider.WakeSkipped");
-        return;
+pub(crate) fn request_wake_in_background(state: Arc<ProviderState>, trigger_name: &'static str) {
+    let session_id = match state.begin_wake_request() {
+        WakeRequestStart::Started { session_id } => session_id,
+        WakeRequestStart::Blocked { reason } => {
+            write_provider_event_detail("Provider.WakeSkipped", format!("reason={reason:?}"));
+            return;
+        }
     };
 
     write_provider_event(trigger_name);
-    let runtime_config = ProviderRuntimeConfig::from_registry_or_default();
-    let broker_client = ProviderBrokerClient::service_default(runtime_config.wake_auth_source);
-    match broker_client.wake_and_fetch_credential_material(session_id) {
-        Ok(outcome) => {
-            write_provider_event("Provider.WakeCompleted");
-            state.apply_wake_outcome(outcome);
-        }
-        Err(error) => {
-            write_provider_event("Provider.WakeTransportFailed");
-            state.apply_wake_transport_error(error);
-        }
+    let worker_state = state.clone();
+    let spawn_result = std::thread::Builder::new()
+        .name("winfaceunlock-provider-wake".to_owned())
+        .spawn(move || {
+            let runtime_config = ProviderRuntimeConfig::from_registry_or_default();
+            let broker_client =
+                ProviderBrokerClient::service_default(runtime_config.wake_auth_source);
+            match broker_client.wake_and_fetch_credential_material(session_id) {
+                Ok(outcome) => {
+                    write_provider_event("Provider.WakeCompleted");
+                    worker_state.apply_wake_outcome(outcome);
+                }
+                Err(error) => {
+                    write_provider_event("Provider.WakeTransportFailed");
+                    worker_state.apply_wake_transport_error(error);
+                }
+            }
+        });
+    if spawn_result.is_err() {
+        write_provider_event("Provider.WakeThreadSpawnFailed");
+        state.apply_wake_transport_error(ProtocolError::TransportUnavailable);
     }
 }
 

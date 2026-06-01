@@ -35,9 +35,13 @@ pub enum InstallerCommand {
     InstallProvider {
         provider_binary_path: PathBuf,
         wake_auth_source: &'static str,
+        auto_wake_on_advise: bool,
         dry_run: bool,
     },
     UninstallProvider {
+        dry_run: bool,
+    },
+    EmergencyDisableProvider {
         dry_run: bool,
     },
     ProviderStatus,
@@ -148,10 +152,12 @@ fn run_command(command: InstallerCommand) -> Result<(), InstallerError> {
         InstallerCommand::InstallProvider {
             provider_binary_path,
             wake_auth_source,
+            auto_wake_on_advise,
             dry_run,
         } => {
             let plan = ProviderInstallPlan::new(provider_binary_path)
-                .with_wake_auth_source(wake_auth_source);
+                .with_wake_auth_source(wake_auth_source)
+                .with_auto_wake_on_advise(auto_wake_on_advise);
             if dry_run {
                 print_provider_install_plan("install-provider dry-run", &plan);
                 return Ok(());
@@ -167,6 +173,16 @@ fn run_command(command: InstallerCommand) -> Result<(), InstallerError> {
             }
             ProviderRegistry::uninstall_provider()?;
             println!("uninstalled WinFaceUnlockProvider");
+        }
+        InstallerCommand::EmergencyDisableProvider { dry_run } => {
+            if dry_run {
+                println!(
+                    "emergency-disable-provider dry-run: credential provider enumeration key will be removed"
+                );
+                return Ok(());
+            }
+            ProviderRegistry::emergency_disable_provider()?;
+            println!("emergency disabled WinFaceUnlockProvider");
         }
         InstallerCommand::ProviderStatus => {
             let status = ProviderRegistry::provider_status();
@@ -225,9 +241,11 @@ fn parse_command(args: &[String]) -> Result<InstallerCommand, InstallerError> {
         "install-provider" => Ok(InstallerCommand::InstallProvider {
             provider_binary_path,
             wake_auth_source: wake_auth_source_argument(args)?,
+            auto_wake_on_advise: has_flag(args, "--auto-wake-on-advise"),
             dry_run,
         }),
         "uninstall-provider" => Ok(InstallerCommand::UninstallProvider { dry_run }),
+        "emergency-disable-provider" => Ok(InstallerCommand::EmergencyDisableProvider { dry_run }),
         "provider-status" => Ok(InstallerCommand::ProviderStatus),
         "help" | "--help" | "-h" => Ok(InstallerCommand::Help),
         other => Err(InstallerError::InvalidArguments(format!(
@@ -394,9 +412,10 @@ fn print_usage() {
     );
     println!("  installer_cli service-auth-status");
     println!(
-        "  installer_cli install-provider [--provider-binary <path>] [--wake-source local-camera|manual-test] [--dry-run]"
+        "  installer_cli install-provider [--provider-binary <path>] [--wake-source local-camera|manual-test] [--auto-wake-on-advise] [--dry-run]"
     );
     println!("  installer_cli uninstall-provider [--dry-run]");
+    println!("  installer_cli emergency-disable-provider [--dry-run]");
     println!("  installer_cli provider-status");
 }
 
@@ -468,6 +487,7 @@ mod tests {
             InstallerCommand::InstallProvider {
                 provider_binary_path: PathBuf::from(r"C:\WinFaceUnlock\windows_provider.dll"),
                 wake_auth_source: WAKE_AUTH_SOURCE_LOCAL_CAMERA,
+                auto_wake_on_advise: false,
                 dry_run: false,
             }
         );
@@ -490,8 +510,45 @@ mod tests {
             InstallerCommand::InstallProvider {
                 provider_binary_path: PathBuf::from(r"C:\WinFaceUnlock\windows_provider.dll"),
                 wake_auth_source: WAKE_AUTH_SOURCE_MANUAL_TEST,
+                auto_wake_on_advise: false,
                 dry_run: false,
             }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_install_provider_with_explicit_auto_wake() -> Result<(), InstallerError> {
+        let args = vec![
+            "installer_cli".to_owned(),
+            "install-provider".to_owned(),
+            "--provider-binary".to_owned(),
+            r"C:\WinFaceUnlock\windows_provider.dll".to_owned(),
+            "--auto-wake-on-advise".to_owned(),
+        ];
+
+        assert_eq!(
+            parse_command(&args)?,
+            InstallerCommand::InstallProvider {
+                provider_binary_path: PathBuf::from(r"C:\WinFaceUnlock\windows_provider.dll"),
+                wake_auth_source: WAKE_AUTH_SOURCE_LOCAL_CAMERA,
+                auto_wake_on_advise: true,
+                dry_run: false,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_emergency_disable_provider() -> Result<(), InstallerError> {
+        let args = vec![
+            "installer_cli".to_owned(),
+            "emergency-disable-provider".to_owned(),
+        ];
+
+        assert_eq!(
+            parse_command(&args)?,
+            InstallerCommand::EmergencyDisableProvider { dry_run: false }
         );
         Ok(())
     }

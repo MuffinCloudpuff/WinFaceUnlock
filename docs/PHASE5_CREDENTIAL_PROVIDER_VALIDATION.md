@@ -24,7 +24,8 @@ next `GetCredentialCount` pass.
   - Supports `CPUS_LOGON`.
   - Supports `CPUS_UNLOCK_WORKSTATION`.
   - Implements `Advise` / `UnAdvise`.
-  - Starts a Service wake request from `Advise` so LogonUI loading can trigger recognition without tile click.
+  - Can start a Service wake request from `Advise` only when `AutoWakeOnAdvise` is explicitly enabled.
+  - Runs Provider wake requests on a background worker so LogonUI enumeration and tile selection are not blocked by camera capture or face matching.
   - Computes `GetCredentialCount` from explicit tile visibility and credential readiness state.
   - Exposes one basic tile.
 - Credential tile:
@@ -41,9 +42,16 @@ next `GetCredentialCount` pass.
   - `service-auth-status`
 - Provider registry policy defaults:
   - `TileVisibility = visible`
-  - `AutoWakeOnAdvise = true`
+  - `AutoWakeOnAdvise = false`
+  - `WakeAuthSource = local-camera`
 
 ## Important Security Boundary
+
+WinFaceUnlock must never disable or replace Windows built-in sign-in fallback methods.
+PIN, password, Windows Hello, and standard Windows credential providers remain the recovery
+path in every phase. WinFaceUnlock Provider failures should only disable or degrade the
+WinFaceUnlock path itself; they must not modify Windows Hello, password sign-in, PIN
+configuration, or account policy.
 
 The Provider-to-Service IPC must not send a plaintext password as a normal protocol field.
 Phase 5 now has two credential retrieval contracts:
@@ -89,9 +97,11 @@ The Provider should follow this state model:
    infinite retry loops.
 
 Current implementation has the state boundaries for `ProviderLoaded`, `WakeRequested`,
-`CredentialMaterialReady`, `WakeFailed`, and `Completed`. Provider auto-wake now requests
+`CredentialMaterialReady`, `WakeFailed`, and `Completed`. Provider wake requests fetch
 `FetchCredentialMaterial`; receiving `CredentialMaterialReady` makes the next
-`GetCredentialCount` return the default auto-logon credential.
+`GetCredentialCount` return the default auto-logon credential. By default the wake request
+is triggered by selecting the visible WinFaceUnlock tile; `--auto-wake-on-advise` opts back
+into automatic wake during Provider enumeration.
 
 Tile visibility is a policy choice:
 
@@ -115,6 +125,26 @@ TileVisibility = visible | hidden-until-ready
 AutoWakeOnAdvise = true | false
 WakeAuthSource = local-camera | manual-test
 ```
+
+`AutoWakeOnAdvise` defaults to `false` for real-machine safety. This keeps the
+WinFaceUnlock tile visible but avoids running camera authentication synchronously while
+LogonUI is still enumerating providers. Use `--auto-wake-on-advise` only after the local
+camera path has been validated and the recovery path is known.
+
+Provider-side risk controls:
+
+- Credential material is consumed after a successful serialization attempt, so the same
+  in-memory Windows password cannot repeatedly trigger auto-logon.
+- `Advise` and `SetSelected` must return quickly; camera/auth work runs in a background
+  worker and uses an agile COM reference only to notify `CredentialsChanged` after the
+  Service returns.
+- Wake failures enter a short retry cooldown instead of immediately looping through
+  repeated `CredentialsChanged` / wake attempts.
+- Debug output for credential material redacts plaintext password bytes and protected
+  password blob contents.
+- Failure status text explicitly directs the user back to PIN or password fallback.
+- `emergency-disable-provider` removes only the Credential Provider enumeration key, so
+  Windows stops loading WinFaceUnlock while the original sign-in providers remain intact.
 
 `WakeAuthSource` defaults to `local-camera`. Use `manual-test` only in a VM that has no
 camera passthrough, so Credential Provider loading, `CredentialsChanged`, credential
@@ -188,6 +218,13 @@ If the VM has no camera, install the Provider with simulated wake auth:
 .\installer_cli.exe install-provider --provider-binary C:\WinFaceUnlock\windows_provider.dll --wake-source manual-test
 ```
 
+For no-click auto-logon experiments in a VM, add `--auto-wake-on-advise`. Do not use that
+flag as the first real-machine install mode:
+
+```powershell
+.\installer_cli.exe install-provider --provider-binary C:\WinFaceUnlock\windows_provider.dll --wake-source manual-test --auto-wake-on-advise
+```
+
 To inspect the protected material path without printing a password, use:
 
 ```powershell
@@ -204,7 +241,8 @@ Then validate:
 1. Lock screen still loads.
 2. WinFaceUnlock visible tile mode shows a tile.
 3. Selecting the tile does not crash LogonUI.
-4. Provider loading can trigger a Service wake request without selecting the tile.
+4. Provider loading can trigger a Service wake request without selecting the tile only when
+   `--auto-wake-on-advise` is explicitly enabled in the VM.
 5. Service receives the wake request.
 6. `CredentialsChanged` refreshes LogonUI after Service response.
 7. After credential material is ready, `GetCredentialCount` requests default auto-logon.
@@ -214,11 +252,14 @@ Then validate:
 11. Hidden tile mode can still auto-logon after authentication succeeds.
 12. Wrong password or rejected auth does not enter an infinite retry loop.
 13. Uninstall restores the default Windows login surface.
+14. `emergency-disable-provider` stops WinFaceUnlock Provider enumeration without touching
+    Windows PIN, password, or Windows Hello settings.
 
 Cleanup:
 
 ```powershell
 .\installer_cli.exe uninstall-provider
+.\installer_cli.exe emergency-disable-provider
 .\installer_cli.exe stop-service
 .\installer_cli.exe uninstall-service
 ```

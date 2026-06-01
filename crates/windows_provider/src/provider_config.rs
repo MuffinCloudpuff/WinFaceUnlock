@@ -33,7 +33,7 @@ impl ProviderRuntimeConfig {
             )
             .as_deref()
             .map(bool_from_config_value)
-            .unwrap_or(true),
+            .unwrap_or(false),
             wake_auth_source: registry::read_string_value(
                 PROVIDER_ROOT_REGISTRY_PATH,
                 REG_VALUE_WAKE_AUTH_SOURCE,
@@ -49,7 +49,7 @@ impl Default for ProviderRuntimeConfig {
     fn default() -> Self {
         Self {
             tile_visibility: ProviderTileVisibility::default(),
-            auto_wake_on_advise: true,
+            auto_wake_on_advise: false,
             wake_auth_source: AuthSource::LocalCamera,
         }
     }
@@ -168,14 +168,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_keeps_visible_tile_and_auto_wake() {
+    fn default_config_keeps_visible_tile_and_requires_explicit_auto_wake() {
         let config = ProviderRuntimeConfig::default();
 
         assert_eq!(
             config.tile_visibility,
             ProviderTileVisibility::VisibleBeforeCredentialReady
         );
-        assert!(config.auto_wake_on_advise);
+        assert!(!config.auto_wake_on_advise);
         assert_eq!(config.wake_auth_source, AuthSource::LocalCamera);
     }
 

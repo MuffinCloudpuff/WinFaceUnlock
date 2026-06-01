@@ -16,7 +16,7 @@ pub fn pack_credential_material(
 ) -> Result<CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION> {
     let username = credential_username(credential_material);
     let username_wide = to_wide_null(&username);
-    let password_wide = to_wide_null(&credential_material.password);
+    let mut password_wide = to_wide_null(&credential_material.password);
     let mut required_size = 0_u32;
 
     let size_probe = unsafe {
@@ -29,23 +29,27 @@ pub fn pack_credential_material(
         )
     };
     if required_size == 0 {
+        password_wide.fill(0);
         return size_probe.map(|()| CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION::default());
     }
 
     let buffer = unsafe { CoTaskMemAlloc(required_size as usize) as *mut u8 };
     if buffer.is_null() {
+        password_wide.fill(0);
         return Err(E_FAIL.into());
     }
 
-    unsafe {
+    let pack_result = unsafe {
         CredPackAuthenticationBufferW(
             CRED_PACK_FLAGS(0),
             PCWSTR(username_wide.as_ptr()),
             PCWSTR(password_wide.as_ptr()),
             Some(buffer),
             &mut required_size,
-        )?;
-    }
+        )
+    };
+    password_wide.fill(0);
+    pack_result?;
 
     Ok(CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION {
         ulAuthenticationPackage: auth_package_id,

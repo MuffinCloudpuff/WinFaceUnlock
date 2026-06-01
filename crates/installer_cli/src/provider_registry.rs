@@ -38,9 +38,14 @@ impl ProviderInstallPlan {
             com_inproc_server_registry_path: COM_INPROC_SERVER_REGISTRY_PATH,
             project_registry_path: PROVIDER_ROOT_REGISTRY_PATH,
             tile_visibility: TILE_VISIBILITY_VISIBLE,
-            auto_wake_on_advise: true,
+            auto_wake_on_advise: false,
             wake_auth_source: WAKE_AUTH_SOURCE_LOCAL_CAMERA,
         }
+    }
+
+    pub fn with_auto_wake_on_advise(mut self, auto_wake_on_advise: bool) -> Self {
+        self.auto_wake_on_advise = auto_wake_on_advise;
+        self
     }
 
     pub fn with_wake_auth_source(mut self, wake_auth_source: &'static str) -> Self {
@@ -122,6 +127,10 @@ impl ProviderRegistry {
         registry::delete_tree(COM_CLSID_REGISTRY_PATH)?;
         registry::delete_tree(PROVIDER_ROOT_REGISTRY_PATH)?;
         Ok(())
+    }
+
+    pub fn emergency_disable_provider() -> Result<(), ProviderRegistryError> {
+        registry::delete_tree(PROVIDER_CLSID_REGISTRY_PATH)
     }
 
     pub fn provider_status() -> ProviderRegistryStatus {

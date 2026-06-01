@@ -1,12 +1,19 @@
-use std::sync::Mutex;
+use std::{
+    fmt,
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use common_protocol::{ProtocolError, SessionId};
 use windows::Win32::UI::Shell::{
     CPUS_INVALID, CREDENTIAL_PROVIDER_NO_DEFAULT, CREDENTIAL_PROVIDER_USAGE_SCENARIO,
     ICredentialProviderEvents,
 };
+use windows_core::AgileReference;
 
 use crate::broker_client::ProviderWakeOutcome;
+
+const WAKE_RETRY_COOLDOWN_MS: i64 = 3_000;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ProviderTileVisibility {
@@ -20,6 +27,19 @@ pub struct CredentialCountPlan {
     pub credential_count: u32,
     pub default_credential_index: u32,
     pub auto_logon_with_default: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WakeRequestBlockReason {
+    CredentialAlreadyReady,
+    WakeAlreadyRunning,
+    RetryCooldownActive,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WakeRequestStart {
+    Started { session_id: SessionId },
+    Blocked { reason: WakeRequestBlockReason },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,11 +79,22 @@ impl Default for UnlockAttemptState {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct CredentialMaterial {
     pub domain: String,
     pub username: String,
     pub password: String,
+}
+
+impl fmt::Debug for CredentialMaterial {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CredentialMaterial")
+            .field("domain", &self.domain)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 pub struct ProviderState {
@@ -73,9 +104,10 @@ pub struct ProviderState {
 struct ProviderStateInner {
     usage_scenario: CREDENTIAL_PROVIDER_USAGE_SCENARIO,
     tile_visibility: ProviderTileVisibility,
-    events: Option<ICredentialProviderEvents>,
+    events: Option<AgileReference<ICredentialProviderEvents>>,
     advise_context: usize,
     unlock_attempt: UnlockAttemptState,
+    wake_retry_allowed_at_unix_ms: i64,
 }
 
 impl ProviderState {
@@ -91,6 +123,7 @@ impl ProviderState {
                 events: None,
                 advise_context: 0,
                 unlock_attempt: UnlockAttemptState::default(),
+                wake_retry_allowed_at_unix_ms: 0,
             }),
         }
     }
@@ -103,7 +136,9 @@ impl ProviderState {
 
     pub fn set_events(&self, events: Option<ICredentialProviderEvents>, advise_context: usize) {
         if let Ok(mut inner) = self.inner.lock() {
-            inner.events = events;
+            inner.events = events
+                .as_ref()
+                .and_then(|event_sink| AgileReference::new(event_sink).ok());
             inner.advise_context = advise_context;
         }
     }
@@ -166,93 +201,83 @@ impl ProviderState {
         self.inner
             .lock()
             .map(|inner| match &inner.unlock_attempt.phase {
-                ProviderUnlockPhase::ProviderLoaded => "Waiting for local face authentication",
+                ProviderUnlockPhase::ProviderLoaded => "Select WinFaceUnlock to try face sign-in",
                 ProviderUnlockPhase::WakeRequested => "Local face authentication is running",
                 ProviderUnlockPhase::CredentialMaterialReady => {
                     "Face authentication credential is ready"
                 }
                 ProviderUnlockPhase::WakeFailed(ProviderWakeFailure::AuthFailed { .. }) => {
-                    "Face authentication was rejected"
+                    "Face authentication failed. PIN and password sign-in remain available"
                 }
                 ProviderUnlockPhase::WakeFailed(ProviderWakeFailure::RequestRejected {
                     ..
-                }) => "Face authentication request was rejected",
+                }) => "Face sign-in request was rejected. Use PIN or password fallback",
                 ProviderUnlockPhase::WakeFailed(ProviderWakeFailure::TransportUnavailable {
                     ..
-                }) => "Face authentication service is unavailable",
+                }) => "Face service is unavailable. Use PIN or password fallback",
                 ProviderUnlockPhase::Completed => "Face authentication completed",
             })
-            .unwrap_or("Waiting for local face authentication")
+            .unwrap_or("Select WinFaceUnlock to try face sign-in")
     }
 
-    pub fn begin_wake_request(&self) -> Option<SessionId> {
-        self.inner.lock().ok().and_then(|mut inner| {
-            if !matches!(
-                inner.unlock_attempt.phase,
-                ProviderUnlockPhase::ProviderLoaded | ProviderUnlockPhase::WakeFailed(_)
-            ) || inner.unlock_attempt.credential_material.is_some()
-            {
-                return None;
-            }
-
-            inner.unlock_attempt.phase = ProviderUnlockPhase::WakeRequested;
-            Some(Self::session_id_for_current_process())
-        })
-    }
-
-    pub fn apply_wake_outcome(&self, outcome: ProviderWakeOutcome) {
-        if let Ok(mut inner) = self.inner.lock() {
-            match outcome {
-                ProviderWakeOutcome::CredentialMaterialReady {
-                    credential_material,
-                    ..
-                } => {
-                    inner.unlock_attempt.phase = ProviderUnlockPhase::CredentialMaterialReady;
-                    inner.unlock_attempt.credential_material = Some(credential_material);
+    pub fn begin_wake_request(&self) -> WakeRequestStart {
+        self.inner
+            .lock()
+            .map(|mut inner| {
+                if inner.unlock_attempt.credential_material.is_some() {
+                    return WakeRequestStart::Blocked {
+                        reason: WakeRequestBlockReason::CredentialAlreadyReady,
+                    };
                 }
-                ProviderWakeOutcome::AuthFailed {
-                    auth_failure_reason,
-                    ..
-                } => {
-                    inner.unlock_attempt.phase =
-                        ProviderUnlockPhase::WakeFailed(ProviderWakeFailure::AuthFailed {
-                            reason: auth_failure_reason,
-                        });
+
+                if matches!(
+                    inner.unlock_attempt.phase,
+                    ProviderUnlockPhase::WakeRequested
+                ) {
+                    return WakeRequestStart::Blocked {
+                        reason: WakeRequestBlockReason::WakeAlreadyRunning,
+                    };
                 }
-                ProviderWakeOutcome::RequestRejected { protocol_error, .. } => {
-                    inner.unlock_attempt.phase =
-                        ProviderUnlockPhase::WakeFailed(ProviderWakeFailure::RequestRejected {
-                            protocol_error,
-                        });
+
+                let now_unix_ms = current_time_unix_ms();
+                if matches!(
+                    inner.unlock_attempt.phase,
+                    ProviderUnlockPhase::WakeFailed(_)
+                ) && now_unix_ms < inner.wake_retry_allowed_at_unix_ms
+                {
+                    return WakeRequestStart::Blocked {
+                        reason: WakeRequestBlockReason::RetryCooldownActive,
+                    };
                 }
-            }
-        }
-        self.notify_credentials_changed();
+
+                inner.unlock_attempt.phase = ProviderUnlockPhase::WakeRequested;
+                WakeRequestStart::Started {
+                    session_id: Self::session_id_for_current_process(),
+                }
+            })
+            .unwrap_or(WakeRequestStart::Blocked {
+                reason: WakeRequestBlockReason::WakeAlreadyRunning,
+            })
     }
 
-    pub fn apply_wake_transport_error(&self, protocol_error: ProtocolError) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.unlock_attempt.phase =
-                ProviderUnlockPhase::WakeFailed(ProviderWakeFailure::TransportUnavailable {
-                    protocol_error,
-                });
-        }
-        self.notify_credentials_changed();
-    }
-
-    pub fn prepare_credential_material(&self, credential_material: CredentialMaterial) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.unlock_attempt.phase = ProviderUnlockPhase::CredentialMaterialReady;
-            inner.unlock_attempt.credential_material = Some(credential_material);
-        }
-        self.notify_credentials_changed();
-    }
-
-    pub fn mark_report_result_received(&self) {
+    pub fn mark_credential_material_serialized(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.unlock_attempt.phase = ProviderUnlockPhase::Completed;
             inner.unlock_attempt.credential_material = None;
         }
+    }
+
+    fn record_wake_failure_locked(inner: &mut ProviderStateInner) {
+        inner.wake_retry_allowed_at_unix_ms = current_time_unix_ms() + WAKE_RETRY_COOLDOWN_MS;
+    }
+
+    fn record_credential_material_ready_locked(
+        inner: &mut ProviderStateInner,
+        credential_material: CredentialMaterial,
+    ) {
+        inner.unlock_attempt.phase = ProviderUnlockPhase::CredentialMaterialReady;
+        inner.unlock_attempt.credential_material = Some(credential_material);
+        inner.wake_retry_allowed_at_unix_ms = 0;
     }
 
     fn session_id_for_current_process() -> SessionId {
@@ -265,12 +290,78 @@ impl ProviderState {
     pub fn notify_credentials_changed(&self) {
         if let Ok(inner) = self.inner.lock()
             && let Some(events) = &inner.events
+            && let Ok(resolved_events) = events.resolve()
         {
             unsafe {
-                let _ = events.CredentialsChanged(inner.advise_context);
+                let _ = resolved_events.CredentialsChanged(inner.advise_context);
             }
         }
     }
+
+    pub fn apply_wake_outcome(&self, outcome: ProviderWakeOutcome) {
+        if let Ok(mut inner) = self.inner.lock() {
+            match outcome {
+                ProviderWakeOutcome::CredentialMaterialReady {
+                    credential_material,
+                    ..
+                } => {
+                    Self::record_credential_material_ready_locked(&mut inner, credential_material);
+                }
+                ProviderWakeOutcome::AuthFailed {
+                    auth_failure_reason,
+                    ..
+                } => {
+                    inner.unlock_attempt.phase =
+                        ProviderUnlockPhase::WakeFailed(ProviderWakeFailure::AuthFailed {
+                            reason: auth_failure_reason,
+                        });
+                    Self::record_wake_failure_locked(&mut inner);
+                }
+                ProviderWakeOutcome::RequestRejected { protocol_error, .. } => {
+                    inner.unlock_attempt.phase =
+                        ProviderUnlockPhase::WakeFailed(ProviderWakeFailure::RequestRejected {
+                            protocol_error,
+                        });
+                    Self::record_wake_failure_locked(&mut inner);
+                }
+            }
+        }
+        self.notify_credentials_changed();
+    }
+
+    pub fn apply_wake_transport_error(&self, protocol_error: ProtocolError) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.unlock_attempt.phase =
+                ProviderUnlockPhase::WakeFailed(ProviderWakeFailure::TransportUnavailable {
+                    protocol_error,
+                });
+            Self::record_wake_failure_locked(&mut inner);
+        }
+        self.notify_credentials_changed();
+    }
+
+    pub fn prepare_credential_material(&self, credential_material: CredentialMaterial) {
+        if let Ok(mut inner) = self.inner.lock() {
+            Self::record_credential_material_ready_locked(&mut inner, credential_material);
+        }
+        self.notify_credentials_changed();
+    }
+
+    pub fn mark_report_result_received(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.unlock_attempt.phase = ProviderUnlockPhase::Completed;
+            inner.unlock_attempt.credential_material = None;
+            inner.wake_retry_allowed_at_unix_ms = 0;
+        }
+    }
+}
+
+fn current_time_unix_ms() -> i64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    millis.min(i64::MAX as u128) as i64
 }
 
 #[cfg(test)]
@@ -323,8 +414,16 @@ mod tests {
     fn wake_request_can_start_once_until_result_arrives() {
         let state = ProviderState::new();
 
-        assert!(state.begin_wake_request().is_some());
-        assert_eq!(state.begin_wake_request(), None);
+        assert!(matches!(
+            state.begin_wake_request(),
+            WakeRequestStart::Started { .. }
+        ));
+        assert_eq!(
+            state.begin_wake_request(),
+            WakeRequestStart::Blocked {
+                reason: WakeRequestBlockReason::WakeAlreadyRunning
+            }
+        );
         assert_eq!(
             state.credential_status_message(),
             "Local face authentication is running"
@@ -346,5 +445,54 @@ mod tests {
         assert_eq!(plan.credential_count, 1);
         assert_eq!(plan.default_credential_index, 0);
         assert!(plan.auto_logon_with_default);
+    }
+
+    #[test]
+    fn serialized_credential_material_is_consumed_after_use() {
+        let state = ProviderState::new();
+        state.prepare_credential_material(CredentialMaterial {
+            domain: ".".to_owned(),
+            username: "leo16".to_owned(),
+            password: "secret".to_owned(),
+        });
+
+        state.mark_credential_material_serialized();
+        let plan = state.credential_count_plan();
+
+        assert_eq!(plan.credential_count, 1);
+        assert_eq!(
+            plan.default_credential_index,
+            CREDENTIAL_PROVIDER_NO_DEFAULT
+        );
+        assert!(!plan.auto_logon_with_default);
+        assert_eq!(state.credential_material(), None);
+    }
+
+    #[test]
+    fn wake_failure_enforces_retry_cooldown() {
+        let state = ProviderState::new();
+
+        state.apply_wake_transport_error(ProtocolError::TransportUnavailable);
+
+        assert_eq!(
+            state.begin_wake_request(),
+            WakeRequestStart::Blocked {
+                reason: WakeRequestBlockReason::RetryCooldownActive
+            }
+        );
+    }
+
+    #[test]
+    fn credential_material_debug_redacts_password() {
+        let material = CredentialMaterial {
+            domain: ".".to_owned(),
+            username: "leo16".to_owned(),
+            password: "secret".to_owned(),
+        };
+
+        let debug = format!("{material:?}");
+
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("secret"));
     }
 }
