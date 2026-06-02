@@ -3,12 +3,94 @@ use crate::{FaceEmbedding, FaceMatch, FaceMatchDecision, FaceModelDescriptor, co
 #[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct FaceTemplateRef(pub String);
 
+#[derive(
+    Clone, Copy, Debug, Default, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize,
+)]
+pub enum FacePoseGroup {
+    #[default]
+    FrontalPrimary,
+    FrontalVariant,
+    YawLeftMild,
+    YawRightMild,
+    PitchDownMild,
+    PitchUpMild,
+    BlinkMotion,
+    HardPoseDiagnostic,
+    RejectedQuality,
+}
+
+impl FacePoseGroup {
+    pub fn selected_for_unlock_by_default(self) -> bool {
+        matches!(
+            self,
+            Self::FrontalPrimary
+                | Self::FrontalVariant
+                | Self::YawLeftMild
+                | Self::YawRightMild
+                | Self::PitchDownMild
+                | Self::PitchUpMild
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum FaceSampleRejectReason {
+    NoFaceDetected,
+    MultipleFacesDetected,
+    FaceTooSmall,
+    FaceTooLargeOrClipped,
+    BlurTooHigh,
+    UnderExposed,
+    OverExposed,
+    BacklightTooStrong,
+    LandmarkUnstable,
+    PoseOutOfExpectedRange,
+    AlignmentFailed,
+    EmbeddingInconsistentWithPrimary,
+    DuplicateTooSimilar,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct FaceTemplateQualityScores {
+    pub quality_score: f32,
+    pub blur_score: f32,
+    pub illumination_score: f32,
+    pub face_size_score: f32,
+    pub alignment_score: f32,
+    pub pose_fit_score: f32,
+    pub embedding_consistency_score: Option<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct FaceTemplateSampleMetadata {
+    pub sample_id: String,
+    pub pose_group: FacePoseGroup,
+    pub source_step: String,
+    pub frame_index: u32,
+    pub frame_timestamp_ms: i64,
+    pub face_box: crate::FaceBox,
+    pub landmarks: Vec<crate::FaceLandmark>,
+    pub detection_confidence: f32,
+    pub pose_yaw_deg: f32,
+    pub pose_pitch_deg: f32,
+    pub pose_roll_deg: f32,
+    pub quality: FaceTemplateQualityScores,
+    pub selected_for_unlock: bool,
+    pub reject_reason: Option<FaceSampleRejectReason>,
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct FaceTemplate {
     pub template_ref: FaceTemplateRef,
     pub user_id: String,
     pub model_family: String,
     pub model_version: String,
+    #[serde(default)]
+    pub pose_group: FacePoseGroup,
+    #[serde(default = "default_selected_for_unlock")]
+    pub selected_for_unlock: bool,
+    #[serde(default)]
+    pub quality_score: Option<f32>,
     pub embedding: FaceEmbedding,
 }
 
@@ -27,16 +109,70 @@ impl FaceTemplate {
     }
 }
 
+fn default_selected_for_unlock() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FaceTemplateCodecError {
     SerializeFailed,
     DeserializeFailed,
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct FaceTemplateThresholdProfile {
+    pub template_acceptance_threshold: f32,
+    pub frame_match_threshold: f32,
+    pub required_consecutive_match_count: u32,
+    pub min_quality_score: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct FaceTemplateSetQualitySummary {
+    pub selected_template_count: usize,
+    pub rejected_sample_count: usize,
+    pub average_selected_quality_score: Option<f32>,
+    pub minimum_selected_quality_score: Option<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct FaceTemplateSet {
+    pub user_id: String,
+    pub detector_model_family: String,
+    pub detector_model_version: String,
+    pub recognizer_model_family: String,
+    pub recognizer_model_version: String,
+    pub enrollment_id: String,
+    pub enrollment_created_at_unix_ms: i64,
+    pub threshold_profile: FaceTemplateThresholdProfile,
+    pub templates: Vec<FaceTemplate>,
+    pub sample_metadata: Vec<FaceTemplateSampleMetadata>,
+    pub quality_summary: FaceTemplateSetQualitySummary,
+}
+
+impl FaceTemplateSet {
+    pub fn to_json_bytes(&self) -> Result<Vec<u8>, FaceTemplateCodecError> {
+        serde_json::to_vec_pretty(self).map_err(|_| FaceTemplateCodecError::SerializeFailed)
+    }
+
+    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, FaceTemplateCodecError> {
+        serde_json::from_slice(bytes).map_err(|_| FaceTemplateCodecError::DeserializeFailed)
+    }
+
+    pub fn selected_templates(&self) -> Vec<FaceTemplate> {
+        self.templates
+            .iter()
+            .filter(|template| template.selected_for_unlock)
+            .cloned()
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FaceTemplateMatch {
     pub template_ref: FaceTemplateRef,
     pub user_id: String,
+    pub pose_group: FacePoseGroup,
     pub score: f32,
     pub decision: FaceMatchDecision,
 }
@@ -77,6 +213,7 @@ impl FaceTemplateMatcher {
                 FaceTemplateMatch {
                     template_ref: template.template_ref.clone(),
                     user_id: template.user_id.clone(),
+                    pose_group: template.pose_group,
                     score: face_match.score,
                     decision: face_match.decision,
                 }
@@ -100,6 +237,7 @@ impl FaceTemplateMatcher {
                 FaceTemplateMatch {
                     template_ref: template.template_ref.clone(),
                     user_id: template.user_id.clone(),
+                    pose_group: template.pose_group,
                     score: face_match.score,
                     decision: face_match.decision,
                 }
@@ -119,6 +257,9 @@ mod tests {
             user_id: "user-1".to_owned(),
             model_family: "sface".to_owned(),
             model_version: "2021dec".to_owned(),
+            pose_group: FacePoseGroup::FrontalPrimary,
+            selected_for_unlock: true,
+            quality_score: Some(0.95),
             embedding: FaceEmbedding {
                 values: vec![1.0, 0.0, 1.0],
             },
@@ -139,6 +280,9 @@ mod tests {
             user_id: "user-1".to_owned(),
             model_family: "sface".to_owned(),
             model_version: "2021dec".to_owned(),
+            pose_group: FacePoseGroup::FrontalPrimary,
+            selected_for_unlock: true,
+            quality_score: None,
             embedding: FaceEmbedding {
                 values: vec![1.0, 0.0, 1.0],
             },
@@ -165,6 +309,9 @@ mod tests {
             user_id: "user-1".to_owned(),
             model_family: "other-recognizer".to_owned(),
             model_version: "v2".to_owned(),
+            pose_group: FacePoseGroup::FrontalPrimary,
+            selected_for_unlock: true,
+            quality_score: None,
             embedding: FaceEmbedding {
                 values: vec![1.0, 0.0, 1.0],
             },

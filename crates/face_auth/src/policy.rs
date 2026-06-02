@@ -106,6 +106,10 @@ impl AttemptPolicy {
         }
     }
 
+    pub fn reset_consecutive_matches(&mut self) {
+        self.state.consecutive_match_count = 0;
+    }
+
     pub fn state(&self) -> AttemptPolicyState {
         self.state
     }
@@ -148,5 +152,26 @@ mod tests {
         );
         assert!(policy.cooldown_is_active(2_000));
         assert!(!policy.cooldown_is_active(6_001));
+    }
+
+    #[test]
+    fn interrupted_sequence_resets_consecutive_matches_without_recording_failure() {
+        let mut policy = AttemptPolicy::new(AttemptPolicyConfig {
+            required_consecutive_match_count: 2,
+            failure_limit_before_cooldown: 3,
+            cooldown_duration_ms: 30_000,
+        });
+
+        assert_eq!(
+            policy.record_match_result(true, 1_000),
+            AttemptPolicyDecision::NeedMoreConsecutiveMatches
+        );
+        policy.reset_consecutive_matches();
+
+        assert_eq!(
+            policy.record_match_result(true, 1_001),
+            AttemptPolicyDecision::NeedMoreConsecutiveMatches
+        );
+        assert_eq!(policy.state().consecutive_failure_count, 0);
     }
 }

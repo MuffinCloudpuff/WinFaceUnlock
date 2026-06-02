@@ -9,8 +9,11 @@ use common_protocol::{
 };
 use face_auth::{AttemptPolicy, AttemptPolicyConfig, FaceAuthenticator, RecognitionTemplates};
 use face_engine::{
-    FaceModelProvider, FaceTemplate, FaceTemplateCodecError, FaceTemplateMatcher,
+    FaceModelProvider, FaceTemplate, FaceTemplateCodecError, FaceTemplateMatcher, FaceTemplateSet,
     OpenCvFaceModelConfig, OpenCvFaceModelProvider,
+};
+use face_liveness::{
+    LivenessDecision, LivenessProviderError, LivenessResult, MiniFasNetLivenessProvider,
 };
 use ipc::AuthGrantIssuer;
 use video_provider::{
@@ -39,7 +42,7 @@ impl DevelopmentAuthGrantIssuer {
         let local_camera_issuer = match config.auth_mode {
             ServiceAuthMode::ManualTestOnly => None,
             ServiceAuthMode::LocalCamera(local_camera_config) => Some(
-                LocalCameraAuthGrantIssuer::from_config(local_camera_config)?,
+                LocalCameraAuthGrantIssuer::from_config(*local_camera_config)?,
             ),
         };
 
@@ -79,13 +82,19 @@ struct LocalCameraAuthGrantIssuer {
     max_auth_frames: u32,
     templates: RecognitionTemplates,
     authenticator: FaceAuthenticator<OpenCvFaceModelProvider>,
+    liveness_provider: MiniFasNetLivenessProvider,
+    max_spoof_frame_ratio: f32,
     next_grant_sequence: u64,
+}
+
+struct LocalCameraAuthenticationOutcome {
+    face_authentication: face_auth::AuthenticationOutcome,
+    liveness_score: f32,
 }
 
 impl LocalCameraAuthGrantIssuer {
     fn from_config(config: LocalCameraAuthConfig) -> Result<Self, ProtocolError> {
-        let template = read_face_template(&config.face_template_path)?;
-        let templates = RecognitionTemplates::new(vec![template]);
+        let templates = RecognitionTemplates::new(read_face_templates(&config.face_template_path)?);
 
         let mut model_config =
             OpenCvFaceModelConfig::new(config.yunet_model_path, config.sface_model_path);
@@ -102,6 +111,10 @@ impl LocalCameraAuthGrantIssuer {
             ..AttemptPolicyConfig::default()
         });
         let authenticator = FaceAuthenticator::new(model_provider, matcher, attempt_policy);
+        let mut liveness_provider = MiniFasNetLivenessProvider::new(config.minifasnet_config);
+        liveness_provider
+            .load_model()
+            .map_err(|_| ProtocolError::TransportUnavailable)?;
 
         Ok(Self {
             camera_id: config.camera_id,
@@ -109,6 +122,8 @@ impl LocalCameraAuthGrantIssuer {
             max_auth_frames: config.max_auth_frames,
             templates,
             authenticator,
+            liveness_provider,
+            max_spoof_frame_ratio: config.minifasnet_max_spoof_frame_ratio,
             next_grant_sequence: 1,
         })
     }
@@ -128,11 +143,11 @@ impl LocalCameraAuthGrantIssuer {
             grant_id: GrantId(format!("camera-grant-{grant_sequence}")),
             nonce: Nonce(format!("camera-nonce-{grant_sequence}")),
             session_id: session_id.clone(),
-            user_id: outcome.matched_user_id,
+            user_id: outcome.face_authentication.matched_user_id,
             source,
             score: AuthScore {
-                match_score: outcome.match_score,
-                liveness_score: None,
+                match_score: outcome.face_authentication.match_score,
+                liveness_score: Some(outcome.liveness_score),
             },
             issued_at_unix_ms,
             expires_at_unix_ms: issued_at_unix_ms + DEFAULT_GRANT_TTL.as_millis() as i64,
@@ -141,25 +156,54 @@ impl LocalCameraAuthGrantIssuer {
 
     fn authenticate_from_camera(
         &mut self,
-    ) -> Result<face_auth::AuthenticationOutcome, AuthFailureReason> {
+    ) -> Result<LocalCameraAuthenticationOutcome, AuthFailureReason> {
         let mut camera_provider = OpenCvCameraProvider::new(self.camera_config.clone());
         let auth_result = (|| {
             camera_provider
                 .open(&self.camera_id)
                 .map_err(video_error_to_auth_failure)?;
             let mut last_rejection = AuthFailureReason::Timeout;
+            let mut liveness_window = MiniFasNetWindowEvidence::new(self.max_spoof_frame_ratio);
 
             for _ in 0..self.max_auth_frames {
                 let frame = camera_provider
                     .read_frame()
                     .map_err(video_error_to_auth_failure)?;
-                match self.authenticator.authenticate_frame(
-                    &frame,
-                    &self.templates,
-                    current_time_unix_ms(),
-                ) {
-                    Ok(outcome) => return Ok(outcome),
-                    Err(reason) => last_rejection = reason,
+                let detected_face = match self.authenticator.detect_single_face(&frame) {
+                    Ok(detected_face) => detected_face,
+                    Err(reason) => {
+                        self.authenticator.reset_consecutive_matches();
+                        last_rejection = reason;
+                        continue;
+                    }
+                };
+                let liveness_result = self
+                    .liveness_provider
+                    .evaluate(&frame, Some(&detected_face))
+                    .map_err(liveness_error_to_auth_failure)?;
+                match liveness_window.record(&liveness_result)? {
+                    Some(liveness_score) => {
+                        match self.authenticator.authenticate_detected_face(
+                            &frame,
+                            &detected_face,
+                            &self.templates,
+                            current_time_unix_ms(),
+                        ) {
+                            Ok(face_authentication) => {
+                                liveness_window
+                                    .reject_unlock_candidate_if_spoof_ratio_exceeded()?;
+                                return Ok(LocalCameraAuthenticationOutcome {
+                                    face_authentication,
+                                    liveness_score,
+                                });
+                            }
+                            Err(reason) => last_rejection = reason,
+                        }
+                    }
+                    None => {
+                        self.authenticator.reset_consecutive_matches();
+                        last_rejection = AuthFailureReason::LivenessFailed;
+                    }
                 }
             }
 
@@ -170,9 +214,70 @@ impl LocalCameraAuthGrantIssuer {
     }
 }
 
-fn read_face_template(template_path: &std::path::Path) -> Result<FaceTemplate, ProtocolError> {
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MiniFasNetWindowEvidence {
+    evaluated_frame_count: u32,
+    spoof_frame_count: u32,
+    max_spoof_frame_ratio: f32,
+}
+
+impl MiniFasNetWindowEvidence {
+    fn new(max_spoof_frame_ratio: f32) -> Self {
+        Self {
+            evaluated_frame_count: 0,
+            spoof_frame_count: 0,
+            max_spoof_frame_ratio,
+        }
+    }
+
+    fn record(&mut self, result: &LivenessResult) -> Result<Option<f32>, AuthFailureReason> {
+        self.evaluated_frame_count = self.evaluated_frame_count.saturating_add(1);
+        match result.liveness_decision {
+            LivenessDecision::LiveAccepted => result
+                .liveness_score
+                .map(Some)
+                .ok_or(AuthFailureReason::InternalError),
+            LivenessDecision::SpoofRejected => {
+                self.spoof_frame_count = self.spoof_frame_count.saturating_add(1);
+                Ok(None)
+            }
+            LivenessDecision::Inconclusive => Ok(None),
+            LivenessDecision::ProviderUnavailable => Err(AuthFailureReason::InternalError),
+        }
+    }
+
+    fn spoof_frame_ratio(&self) -> f32 {
+        if self.evaluated_frame_count == 0 {
+            return 0.0;
+        }
+
+        self.spoof_frame_count as f32 / self.evaluated_frame_count as f32
+    }
+
+    fn reject_unlock_candidate_if_spoof_ratio_exceeded(&self) -> Result<(), AuthFailureReason> {
+        if self.spoof_frame_ratio() > self.max_spoof_frame_ratio {
+            return Err(AuthFailureReason::LivenessFailed);
+        }
+
+        Ok(())
+    }
+}
+
+fn liveness_error_to_auth_failure(_error: LivenessProviderError) -> AuthFailureReason {
+    AuthFailureReason::InternalError
+}
+
+fn read_face_templates(
+    template_path: &std::path::Path,
+) -> Result<Vec<FaceTemplate>, ProtocolError> {
     let bytes = fs::read(template_path).map_err(|_| ProtocolError::InvalidMessage)?;
-    FaceTemplate::from_json_bytes(&bytes).map_err(template_codec_to_protocol_error)
+    if let Ok(template_set) = FaceTemplateSet::from_json_bytes(&bytes) {
+        return Ok(template_set.selected_templates());
+    }
+
+    FaceTemplate::from_json_bytes(&bytes)
+        .map(|template| vec![template])
+        .map_err(template_codec_to_protocol_error)
 }
 
 fn template_codec_to_protocol_error(_error: FaceTemplateCodecError) -> ProtocolError {
@@ -197,4 +302,122 @@ fn current_time_unix_ms() -> i64 {
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
     millis.min(i64::MAX as u128) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_accepted_exposes_score_for_template_matching() {
+        let mut window = MiniFasNetWindowEvidence::new(0.40);
+        let result = LivenessResult {
+            liveness_decision: LivenessDecision::LiveAccepted,
+            liveness_score: Some(0.98),
+            evidence: Vec::new(),
+        };
+
+        assert_eq!(window.record(&result), Ok(Some(0.98)));
+    }
+
+    #[test]
+    fn single_spoof_frame_is_recorded_without_stopping_authentication_window() {
+        let mut window = MiniFasNetWindowEvidence::new(0.40);
+        let result = LivenessResult {
+            liveness_decision: LivenessDecision::SpoofRejected,
+            liveness_score: Some(0.01),
+            evidence: Vec::new(),
+        };
+
+        assert_eq!(window.record(&result), Ok(None));
+        assert_eq!(window.evaluated_frame_count, 1);
+        assert_eq!(window.spoof_frame_count, 1);
+    }
+
+    #[test]
+    fn inconclusive_collects_another_frame() {
+        let mut window = MiniFasNetWindowEvidence::new(0.40);
+        let result = LivenessResult {
+            liveness_decision: LivenessDecision::Inconclusive,
+            liveness_score: Some(0.50),
+            evidence: Vec::new(),
+        };
+
+        assert_eq!(window.record(&result), Ok(None));
+    }
+
+    #[test]
+    fn unlock_candidate_is_rejected_when_dynamic_spoof_ratio_exceeds_limit()
+    -> Result<(), AuthFailureReason> {
+        let mut window = MiniFasNetWindowEvidence::new(0.40);
+
+        for _ in 0..7 {
+            window.record(&spoof_result())?;
+        }
+        for _ in 0..5 {
+            window.record(&live_result())?;
+        }
+
+        assert_eq!(window.evaluated_frame_count, 12);
+        assert_eq!(window.spoof_frame_count, 7);
+        assert_eq!(
+            window.reject_unlock_candidate_if_spoof_ratio_exceeded(),
+            Err(AuthFailureReason::LivenessFailed)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unlock_candidate_passes_without_waiting_for_full_window_when_dynamic_ratio_is_allowed()
+    -> Result<(), AuthFailureReason> {
+        let mut window = MiniFasNetWindowEvidence::new(0.40);
+
+        window.record(&spoof_result())?;
+        for _ in 0..4 {
+            window.record(&live_result())?;
+        }
+
+        assert_eq!(window.evaluated_frame_count, 5);
+        assert_eq!(window.spoof_frame_count, 1);
+        assert_eq!(
+            window.reject_unlock_candidate_if_spoof_ratio_exceeded(),
+            Ok(())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn spoof_ratio_equal_to_limit_is_allowed() -> Result<(), AuthFailureReason> {
+        let mut window = MiniFasNetWindowEvidence::new(0.40);
+
+        for _ in 0..2 {
+            window.record(&spoof_result())?;
+        }
+        for _ in 0..3 {
+            window.record(&live_result())?;
+        }
+
+        assert_eq!(window.spoof_frame_ratio(), 0.40);
+        assert_eq!(
+            window.reject_unlock_candidate_if_spoof_ratio_exceeded(),
+            Ok(())
+        );
+        Ok(())
+    }
+
+    fn live_result() -> LivenessResult {
+        LivenessResult {
+            liveness_decision: LivenessDecision::LiveAccepted,
+            liveness_score: Some(0.98),
+            evidence: Vec::new(),
+        }
+    }
+
+    fn spoof_result() -> LivenessResult {
+        LivenessResult {
+            liveness_decision: LivenessDecision::SpoofRejected,
+            liveness_score: Some(0.01),
+            evidence: Vec::new(),
+        }
+    }
 }

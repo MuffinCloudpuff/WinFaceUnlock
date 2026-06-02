@@ -8,7 +8,7 @@ use crate::{
 };
 
 const DEFAULT_POLICY_ID: &str = "default";
-const DEFAULT_FACE_MATCH_THRESHOLD: f32 = 0.55;
+const DEFAULT_FACE_MATCH_THRESHOLD: f32 = 0.75;
 
 pub struct RepositoryCredentialStore<R: StoreRepository> {
     repository: R,

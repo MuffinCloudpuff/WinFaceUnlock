@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use opencv::{
-    core::{self, AlgorithmHint, Mat, MatTraitConst, Size},
+    core::{self, AlgorithmHint, Mat, MatTraitConst, Point, Rect, Scalar, Size, Vector},
     imgcodecs, imgproc,
     objdetect::{FaceDetectorYN, FaceDetectorYNTrait, FaceRecognizerSF, FaceRecognizerSFTrait},
     prelude::{FaceRecognizerSFTraitConst, MatTraitConstManual},
@@ -157,6 +157,25 @@ impl OpenCvSFaceRecognitionProvider {
             .as_mut()
             .ok_or(FaceEngineError::ModelNotLoaded)
     }
+
+    fn align_crop_mat(
+        &mut self,
+        frame: &VideoFrame,
+        face: &DetectedFace,
+    ) -> Result<Mat, FaceEngineError> {
+        frame
+            .validate()
+            .map_err(|_| FaceEngineError::InvalidFrame)?;
+        let image = video_frame_to_mat(frame)?;
+        let face_row = detected_face_to_mat(face)?;
+        let recognizer = self.recognizer_mut()?;
+
+        let mut aligned_face = Mat::default();
+        recognizer
+            .align_crop(&image, &face_row, &mut aligned_face)
+            .map_err(|_| FaceEngineError::InferenceFailed)?;
+        Ok(aligned_face)
+    }
 }
 
 impl FaceRecognitionModelProvider for OpenCvSFaceRecognitionProvider {
@@ -186,17 +205,8 @@ impl FaceRecognitionModelProvider for OpenCvSFaceRecognitionProvider {
         frame: &VideoFrame,
         face: &DetectedFace,
     ) -> Result<FaceEmbedding, FaceEngineError> {
-        frame
-            .validate()
-            .map_err(|_| FaceEngineError::InvalidFrame)?;
-        let image = video_frame_to_mat(frame)?;
-        let face_row = detected_face_to_mat(face)?;
+        let aligned_face = self.align_crop_mat(frame, face)?;
         let recognizer = self.recognizer_mut()?;
-
-        let mut aligned_face = Mat::default();
-        recognizer
-            .align_crop(&image, &face_row, &mut aligned_face)
-            .map_err(|_| FaceEngineError::InferenceFailed)?;
 
         let mut feature = Mat::default();
         recognizer
@@ -333,6 +343,28 @@ impl OpenCvFaceModelProvider {
         recognizer: OpenCvSFaceRecognitionProvider,
     ) -> Result<OpenCvSFaceRecognitionProvider, FaceEngineError> {
         self.pipeline.swap_recognizer(recognizer)
+    }
+
+    pub fn write_detection_debug_frame(
+        frame: &VideoFrame,
+        faces: &[DetectedFace],
+        image_path: &std::path::Path,
+    ) -> Result<(), FaceEngineError> {
+        let mut image = video_frame_to_mat(frame)?;
+        for face in faces {
+            draw_detected_face(&mut image, face)?;
+        }
+        write_mat(image_path, &image)
+    }
+
+    pub fn write_aligned_face(
+        &mut self,
+        frame: &VideoFrame,
+        face: &DetectedFace,
+        image_path: &std::path::Path,
+    ) -> Result<(), FaceEngineError> {
+        let aligned_face = self.pipeline.recognizer.align_crop_mat(frame, face)?;
+        write_mat(image_path, &aligned_face)
     }
 }
 
@@ -507,6 +539,47 @@ fn embedding_from_feature_mat(feature: &Mat) -> Result<FaceEmbedding, FaceEngine
         .map_err(|_| FaceEngineError::InferenceFailed)?
         .to_vec();
     FaceEmbedding::new(values)
+}
+
+fn draw_detected_face(image: &mut Mat, face: &DetectedFace) -> Result<(), FaceEngineError> {
+    let rectangle = Rect::new(
+        face.bounds.x.round().max(0.0) as i32,
+        face.bounds.y.round().max(0.0) as i32,
+        face.bounds.width.round().max(1.0) as i32,
+        face.bounds.height.round().max(1.0) as i32,
+    );
+    imgproc::rectangle(
+        image,
+        rectangle,
+        Scalar::new(0.0, 255.0, 0.0, 0.0),
+        2,
+        imgproc::LINE_8,
+        0,
+    )
+    .map_err(|_| FaceEngineError::InferenceFailed)?;
+
+    for landmark in &face.landmarks {
+        imgproc::circle(
+            image,
+            Point::new(landmark.x.round() as i32, landmark.y.round() as i32),
+            3,
+            Scalar::new(0.0, 0.0, 255.0, 0.0),
+            -1,
+            imgproc::LINE_8,
+            0,
+        )
+        .map_err(|_| FaceEngineError::InferenceFailed)?;
+    }
+
+    Ok(())
+}
+
+fn write_mat(image_path: &std::path::Path, image: &Mat) -> Result<(), FaceEngineError> {
+    let path = image_path.to_string_lossy();
+    imgcodecs::imwrite(&path, image, &Vector::new())
+        .map_err(|_| FaceEngineError::InferenceFailed)?
+        .then_some(())
+        .ok_or(FaceEngineError::InferenceFailed)
 }
 
 #[cfg(test)]

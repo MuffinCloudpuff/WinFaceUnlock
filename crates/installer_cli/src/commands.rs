@@ -7,7 +7,10 @@ use crate::{
     },
     service_registry::{ServiceAuthRegistry, ServiceAuthRegistryConfig},
 };
-use windows_provider::{WAKE_AUTH_SOURCE_LOCAL_CAMERA, WAKE_AUTH_SOURCE_MANUAL_TEST};
+use windows_provider::{
+    TILE_VISIBILITY_HIDDEN_UNTIL_READY, TILE_VISIBILITY_VISIBLE, WAKE_AUTH_SOURCE_LOCAL_CAMERA,
+    WAKE_AUTH_SOURCE_MANUAL_TEST,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum InstallerCommand {
@@ -35,6 +38,7 @@ pub enum InstallerCommand {
     InstallProvider {
         provider_binary_path: PathBuf,
         wake_auth_source: &'static str,
+        tile_visibility: &'static str,
         auto_wake_on_advise: bool,
         dry_run: bool,
     },
@@ -148,15 +152,28 @@ fn run_command(command: InstallerCommand) -> Result<(), InstallerError> {
                 "match_threshold: {}",
                 status.match_threshold.as_deref().unwrap_or("<unset>")
             );
+            println!(
+                "minifasnet_model_path: {}",
+                status.minifasnet_model_path.as_deref().unwrap_or("<unset>")
+            );
+            println!(
+                "minifasnet_max_spoof_frame_ratio: {}",
+                status
+                    .minifasnet_max_spoof_frame_ratio
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
         }
         InstallerCommand::InstallProvider {
             provider_binary_path,
             wake_auth_source,
+            tile_visibility,
             auto_wake_on_advise,
             dry_run,
         } => {
             let plan = ProviderInstallPlan::new(provider_binary_path)
                 .with_wake_auth_source(wake_auth_source)
+                .with_tile_visibility(tile_visibility)
                 .with_auto_wake_on_advise(auto_wake_on_advise);
             if dry_run {
                 print_provider_install_plan("install-provider dry-run", &plan);
@@ -241,7 +258,8 @@ fn parse_command(args: &[String]) -> Result<InstallerCommand, InstallerError> {
         "install-provider" => Ok(InstallerCommand::InstallProvider {
             provider_binary_path,
             wake_auth_source: wake_auth_source_argument(args)?,
-            auto_wake_on_advise: has_flag(args, "--auto-wake-on-advise"),
+            tile_visibility: tile_visibility_argument(args),
+            auto_wake_on_advise: !has_flag(args, "--no-auto-wake-on-advise"),
             dry_run,
         }),
         "uninstall-provider" => Ok(InstallerCommand::UninstallProvider { dry_run }),
@@ -251,6 +269,14 @@ fn parse_command(args: &[String]) -> Result<InstallerCommand, InstallerError> {
         other => Err(InstallerError::InvalidArguments(format!(
             "unknown command: {other}"
         ))),
+    }
+}
+
+fn tile_visibility_argument(args: &[String]) -> &'static str {
+    if has_flag(args, "--show-tile-before-ready") {
+        TILE_VISIBILITY_VISIBLE
+    } else {
+        TILE_VISIBILITY_HIDDEN_UNTIL_READY
     }
 }
 
@@ -281,6 +307,9 @@ fn parse_service_auth_config(args: &[String]) -> Result<ServiceAuthRegistryConfi
         yunet_model_path,
         sface_model_path,
     );
+    if let Some(minifasnet_model_path) = argument_value(args, "--minifasnet-model") {
+        config.minifasnet_model_path = PathBuf::from(minifasnet_model_path);
+    }
 
     if let Some(camera_id) = argument_value(args, "--camera-id") {
         config.camera_id = camera_id.to_owned();
@@ -295,6 +324,20 @@ fn parse_service_auth_config(args: &[String]) -> Result<ServiceAuthRegistryConfi
     }
     if let Some(match_threshold) = optional_f32(args, "--match-threshold")? {
         config.match_threshold = match_threshold;
+    }
+    if let Some(minifasnet_crop_scale) = optional_f32(args, "--minifasnet-crop-scale")? {
+        config.minifasnet_crop_scale = minifasnet_crop_scale;
+    }
+    if let Some(minifasnet_min_live_score) = optional_f32(args, "--minifasnet-min-live-score")? {
+        config.minifasnet_min_live_score = minifasnet_min_live_score;
+    }
+    if let Some(minifasnet_min_spoof_score) = optional_f32(args, "--minifasnet-min-spoof-score")? {
+        config.minifasnet_min_spoof_score = minifasnet_min_spoof_score;
+    }
+    if let Some(minifasnet_max_spoof_frame_ratio) =
+        optional_f32(args, "--minifasnet-max-spoof-frame-ratio")?
+    {
+        config.minifasnet_max_spoof_frame_ratio = minifasnet_max_spoof_frame_ratio;
     }
     Ok(config)
 }
@@ -377,6 +420,23 @@ fn print_service_auth_config(label: &str, config: &ServiceAuthRegistryConfig) {
     println!("yunet_model_path: {}", config.yunet_model_path.display());
     println!("sface_model_path: {}", config.sface_model_path.display());
     println!(
+        "minifasnet_model_path: {}",
+        config.minifasnet_model_path.display()
+    );
+    println!("minifasnet_crop_scale: {}", config.minifasnet_crop_scale);
+    println!(
+        "minifasnet_min_live_score: {}",
+        config.minifasnet_min_live_score
+    );
+    println!(
+        "minifasnet_min_spoof_score: {}",
+        config.minifasnet_min_spoof_score
+    );
+    println!(
+        "minifasnet_max_spoof_frame_ratio: {}",
+        config.minifasnet_max_spoof_frame_ratio
+    );
+    println!(
         "frame_width: {}",
         config
             .frame_width
@@ -408,11 +468,11 @@ fn print_usage() {
     println!("  installer_cli service-status");
     println!("  installer_cli repair-service [--service-binary <path>] [--dry-run]");
     println!(
-        "  installer_cli configure-service-auth --face-template <path> [--camera-id opencv-index:0] [--yunet-model <path>] [--sface-model <path>] [--match-threshold 0.55] [--dry-run]"
+        "  installer_cli configure-service-auth --face-template <path> [--camera-id opencv-index:0] [--yunet-model <path>] [--sface-model <path>] [--minifasnet-model <path>] [--minifasnet-crop-scale 2.7] [--minifasnet-min-live-score 0.80] [--minifasnet-min-spoof-score 0.70] [--minifasnet-max-spoof-frame-ratio 0.40] [--match-threshold 0.75] [--dry-run]"
     );
     println!("  installer_cli service-auth-status");
     println!(
-        "  installer_cli install-provider [--provider-binary <path>] [--wake-source local-camera|manual-test] [--auto-wake-on-advise] [--dry-run]"
+        "  installer_cli install-provider [--provider-binary <path>] [--wake-source local-camera|manual-test] [--show-tile-before-ready] [--no-auto-wake-on-advise] [--dry-run]"
     );
     println!("  installer_cli uninstall-provider [--dry-run]");
     println!("  installer_cli emergency-disable-provider [--dry-run]");
@@ -487,7 +547,8 @@ mod tests {
             InstallerCommand::InstallProvider {
                 provider_binary_path: PathBuf::from(r"C:\WinFaceUnlock\windows_provider.dll"),
                 wake_auth_source: WAKE_AUTH_SOURCE_LOCAL_CAMERA,
-                auto_wake_on_advise: false,
+                tile_visibility: TILE_VISIBILITY_HIDDEN_UNTIL_READY,
+                auto_wake_on_advise: true,
                 dry_run: false,
             }
         );
@@ -510,7 +571,8 @@ mod tests {
             InstallerCommand::InstallProvider {
                 provider_binary_path: PathBuf::from(r"C:\WinFaceUnlock\windows_provider.dll"),
                 wake_auth_source: WAKE_AUTH_SOURCE_MANUAL_TEST,
-                auto_wake_on_advise: false,
+                tile_visibility: TILE_VISIBILITY_HIDDEN_UNTIL_READY,
+                auto_wake_on_advise: true,
                 dry_run: false,
             }
         );
@@ -518,13 +580,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_install_provider_with_explicit_auto_wake() -> Result<(), InstallerError> {
+    fn parse_install_provider_with_visible_tile_for_debugging() -> Result<(), InstallerError> {
         let args = vec![
             "installer_cli".to_owned(),
             "install-provider".to_owned(),
             "--provider-binary".to_owned(),
             r"C:\WinFaceUnlock\windows_provider.dll".to_owned(),
-            "--auto-wake-on-advise".to_owned(),
+            "--show-tile-before-ready".to_owned(),
         ];
 
         assert_eq!(
@@ -532,7 +594,32 @@ mod tests {
             InstallerCommand::InstallProvider {
                 provider_binary_path: PathBuf::from(r"C:\WinFaceUnlock\windows_provider.dll"),
                 wake_auth_source: WAKE_AUTH_SOURCE_LOCAL_CAMERA,
+                tile_visibility: TILE_VISIBILITY_VISIBLE,
                 auto_wake_on_advise: true,
+                dry_run: false,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_install_provider_can_disable_auto_wake_for_manual_debugging()
+    -> Result<(), InstallerError> {
+        let args = vec![
+            "installer_cli".to_owned(),
+            "install-provider".to_owned(),
+            "--provider-binary".to_owned(),
+            r"C:\WinFaceUnlock\windows_provider.dll".to_owned(),
+            "--no-auto-wake-on-advise".to_owned(),
+        ];
+
+        assert_eq!(
+            parse_command(&args)?,
+            InstallerCommand::InstallProvider {
+                provider_binary_path: PathBuf::from(r"C:\WinFaceUnlock\windows_provider.dll"),
+                wake_auth_source: WAKE_AUTH_SOURCE_LOCAL_CAMERA,
+                tile_visibility: TILE_VISIBILITY_HIDDEN_UNTIL_READY,
+                auto_wake_on_advise: false,
                 dry_run: false,
             }
         );
@@ -574,6 +661,12 @@ mod tests {
             "0.6".to_owned(),
             "--required-consecutive".to_owned(),
             "1".to_owned(),
+            "--minifasnet-model".to_owned(),
+            r"D:\WinFaceUnlock\minifasnet.onnx".to_owned(),
+            "--minifasnet-crop-scale".to_owned(),
+            "1.3".to_owned(),
+            "--minifasnet-max-spoof-frame-ratio".to_owned(),
+            "0.45".to_owned(),
         ];
 
         let InstallerCommand::ConfigureServiceAuth { config, dry_run } = parse_command(&args)?
@@ -591,6 +684,12 @@ mod tests {
         assert_eq!(config.camera_id, "opencv-index:1");
         assert_eq!(config.match_threshold, 0.6);
         assert_eq!(config.required_consecutive_match_count, 1);
+        assert_eq!(
+            config.minifasnet_model_path,
+            PathBuf::from(r"D:\WinFaceUnlock\minifasnet.onnx")
+        );
+        assert_eq!(config.minifasnet_crop_scale, 1.3);
+        assert_eq!(config.minifasnet_max_spoof_frame_ratio, 0.45);
         Ok(())
     }
 }

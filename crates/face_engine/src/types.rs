@@ -6,7 +6,7 @@ pub struct FaceModelDescriptor {
     pub model_version: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct FaceBox {
     pub x: f32,
     pub y: f32,
@@ -14,13 +14,13 @@ pub struct FaceBox {
     pub height: f32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct FaceLandmark {
     pub x: f32,
     pub y: f32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct DetectedFace {
     pub bounds: FaceBox,
     pub landmarks: Vec<FaceLandmark>,
@@ -48,7 +48,7 @@ pub struct FaceMatch {
     pub decision: FaceMatchDecision,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum FaceMatchDecision {
     MatchAccepted,
     MatchRejectedBelowThreshold,

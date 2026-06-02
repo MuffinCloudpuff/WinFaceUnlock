@@ -84,11 +84,11 @@ impl ICredentialProviderCredential_Impl for WinFaceUnlockCredential_Impl {
 
     fn GetStringValue(&self, dwfieldid: u32) -> Result<PWSTR> {
         let value = match dwfieldid {
-            FIELD_ID_TITLE => "WinFaceUnlock",
+            FIELD_ID_TITLE => "WinFaceUnlock".to_owned(),
             FIELD_ID_STATUS => self.state.credential_status_message(),
             _ => return Err(E_INVALIDARG.into()),
         };
-        allocate_wide_string(value)
+        allocate_wide_string(&value)
     }
 
     fn GetBitmapValue(&self, dwfieldid: u32) -> Result<HBITMAP> {

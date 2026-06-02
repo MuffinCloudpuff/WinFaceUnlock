@@ -1,6 +1,7 @@
 use common_protocol::UserId;
 use face_engine::{
-    FaceEngineError, FaceModelProvider, FaceTemplate, FaceTemplateRef as EngineFaceTemplateRef,
+    FaceEngineError, FaceModelProvider, FacePoseGroup, FaceTemplate,
+    FaceTemplateRef as EngineFaceTemplateRef,
 };
 use video_provider::VideoFrame;
 
@@ -44,6 +45,9 @@ where
                 user_id: user_id.0,
                 model_family: recognition_model.model_family.clone(),
                 model_version: recognition_model.model_version.clone(),
+                pose_group: FacePoseGroup::FrontalPrimary,
+                selected_for_unlock: true,
+                quality_score: None,
                 embedding,
             },
             detected_face_count: faces.len(),

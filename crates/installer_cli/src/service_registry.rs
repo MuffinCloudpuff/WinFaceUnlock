@@ -9,6 +9,11 @@ const REG_FACE_TEMPLATE_PATH: &str = "FaceTemplatePath";
 const REG_CAMERA_ID: &str = "CameraId";
 const REG_YUNET_MODEL_PATH: &str = "YuNetModelPath";
 const REG_SFACE_MODEL_PATH: &str = "SFaceModelPath";
+const REG_MINIFASNET_MODEL_PATH: &str = "MiniFasNetModelPath";
+const REG_MINIFASNET_CROP_SCALE: &str = "MiniFasNetCropScale";
+const REG_MINIFASNET_MIN_LIVE_SCORE: &str = "MiniFasNetMinLiveScore";
+const REG_MINIFASNET_MIN_SPOOF_SCORE: &str = "MiniFasNetMinSpoofScore";
+const REG_MINIFASNET_MAX_SPOOF_FRAME_RATIO: &str = "MiniFasNetMaxSpoofFrameRatio";
 const REG_FRAME_WIDTH: &str = "FrameWidth";
 const REG_FRAME_HEIGHT: &str = "FrameHeight";
 const REG_MAX_AUTH_FRAMES: &str = "MaxAuthFrames";
@@ -16,6 +21,12 @@ const REG_REQUIRED_CONSECUTIVE: &str = "RequiredConsecutiveMatchCount";
 const REG_MATCH_THRESHOLD: &str = "MatchThreshold";
 
 const AUTH_MODE_LOCAL_CAMERA: &str = "local-camera";
+const DEFAULT_SERVICE_FACE_MATCH_THRESHOLD: f32 = 0.75;
+const DEFAULT_MINIFASNET_MODEL_PATH: &str = r"models\minifasnet_v2.onnx";
+const DEFAULT_MINIFASNET_CROP_SCALE: f32 = 2.7;
+const DEFAULT_MINIFASNET_MIN_LIVE_SCORE: f32 = 0.80;
+const DEFAULT_MINIFASNET_MIN_SPOOF_SCORE: f32 = 0.70;
+const DEFAULT_MINIFASNET_MAX_SPOOF_FRAME_RATIO: f32 = 0.40;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServiceAuthRegistryConfig {
@@ -24,6 +35,11 @@ pub struct ServiceAuthRegistryConfig {
     pub camera_id: String,
     pub yunet_model_path: PathBuf,
     pub sface_model_path: PathBuf,
+    pub minifasnet_model_path: PathBuf,
+    pub minifasnet_crop_scale: f32,
+    pub minifasnet_min_live_score: f32,
+    pub minifasnet_min_spoof_score: f32,
+    pub minifasnet_max_spoof_frame_ratio: f32,
     pub frame_width: Option<u32>,
     pub frame_height: Option<u32>,
     pub max_auth_frames: u32,
@@ -43,11 +59,16 @@ impl ServiceAuthRegistryConfig {
             camera_id: "opencv-index:0".to_owned(),
             yunet_model_path,
             sface_model_path,
+            minifasnet_model_path: PathBuf::from(DEFAULT_MINIFASNET_MODEL_PATH),
+            minifasnet_crop_scale: DEFAULT_MINIFASNET_CROP_SCALE,
+            minifasnet_min_live_score: DEFAULT_MINIFASNET_MIN_LIVE_SCORE,
+            minifasnet_min_spoof_score: DEFAULT_MINIFASNET_MIN_SPOOF_SCORE,
+            minifasnet_max_spoof_frame_ratio: DEFAULT_MINIFASNET_MAX_SPOOF_FRAME_RATIO,
             frame_width: None,
             frame_height: None,
             max_auth_frames: 30,
             required_consecutive_match_count: 2,
-            match_threshold: 0.55,
+            match_threshold: DEFAULT_SERVICE_FACE_MATCH_THRESHOLD,
         }
     }
 }
@@ -59,6 +80,8 @@ pub struct ServiceAuthRegistryStatus {
     pub face_template_path: Option<String>,
     pub camera_id: Option<String>,
     pub match_threshold: Option<String>,
+    pub minifasnet_model_path: Option<String>,
+    pub minifasnet_max_spoof_frame_ratio: Option<String>,
 }
 
 pub struct ServiceAuthRegistry;
@@ -92,6 +115,31 @@ impl ServiceAuthRegistry {
             REG_SFACE_MODEL_PATH,
             &config.sface_model_path.display().to_string(),
         )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_MINIFASNET_MODEL_PATH,
+            &config.minifasnet_model_path.display().to_string(),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_MINIFASNET_CROP_SCALE,
+            &config.minifasnet_crop_scale.to_string(),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_MINIFASNET_MIN_LIVE_SCORE,
+            &config.minifasnet_min_live_score.to_string(),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_MINIFASNET_MIN_SPOOF_SCORE,
+            &config.minifasnet_min_spoof_score.to_string(),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_MINIFASNET_MAX_SPOOF_FRAME_RATIO,
+            &config.minifasnet_max_spoof_frame_ratio.to_string(),
+        )?;
         set_optional_u32(REG_FRAME_WIDTH, config.frame_width)?;
         set_optional_u32(REG_FRAME_HEIGHT, config.frame_height)?;
         registry::set_string_value(
@@ -124,6 +172,14 @@ impl ServiceAuthRegistry {
             match_threshold: registry::read_string_value(
                 SERVICE_CONFIG_REGISTRY_PATH,
                 REG_MATCH_THRESHOLD,
+            ),
+            minifasnet_model_path: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_MINIFASNET_MODEL_PATH,
+            ),
+            minifasnet_max_spoof_frame_ratio: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_MINIFASNET_MAX_SPOOF_FRAME_RATIO,
             ),
         }
     }
@@ -365,6 +421,15 @@ mod tests {
         assert_eq!(config.auth_mode, "local-camera");
         assert_eq!(config.camera_id, "opencv-index:0");
         assert_eq!(config.required_consecutive_match_count, 2);
-        assert_eq!(config.match_threshold, 0.55);
+        assert_eq!(config.match_threshold, DEFAULT_SERVICE_FACE_MATCH_THRESHOLD);
+        assert_eq!(
+            config.minifasnet_model_path,
+            PathBuf::from(DEFAULT_MINIFASNET_MODEL_PATH)
+        );
+        assert_eq!(config.minifasnet_crop_scale, DEFAULT_MINIFASNET_CROP_SCALE);
+        assert_eq!(
+            config.minifasnet_max_spoof_frame_ratio,
+            DEFAULT_MINIFASNET_MAX_SPOOF_FRAME_RATIO
+        );
     }
 }

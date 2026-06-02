@@ -1,7 +1,8 @@
 use std::{
     fmt, fs,
     path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use common_protocol::{
@@ -10,11 +11,18 @@ use common_protocol::{
 };
 use face_auth::{
     AttemptPolicy, AttemptPolicyConfig, FaceAuthenticator, FaceEnrollmentService,
-    RecognitionTemplates,
+    FaceQualityPolicy, GuidedEnrollmentConfig, GuidedEnrollmentStep, GuidedFaceEnrollmentService,
+    GuidedFrameObservation, RecognitionTemplates, build_guided_enrollment_report,
 };
 use face_engine::{
     FaceEngineError, FaceModelProvider, FaceTemplate, FaceTemplateCodecError, FaceTemplateMatcher,
-    FaceTemplateRef, OpenCvFaceModelConfig, OpenCvFaceModelProvider, SFACE_COSINE_MATCH_THRESHOLD,
+    FaceTemplateRef, FaceTemplateSet, OpenCvFaceModelConfig, OpenCvFaceModelProvider,
+};
+use face_liveness::{MiniFasNetLivenessProviderConfig, ScreenReplayLivenessProviderConfig};
+use face_pose::{FacePoseProvider, LandmarkFacePoseProvider};
+#[cfg(feature = "mediapipe-pose")]
+use face_pose_mediapipe::{
+    MediaPipeFacePoseProvider, MediaPipeFacePoseProviderConfig, MediaPipeFacePoseProviderError,
 };
 use ipc::{IpcClient, NamedPipeClient};
 use video_provider::OpenCvCameraProviderConfig;
@@ -23,20 +31,51 @@ use win_service::credential_store_config::{
     ServiceCredentialStorePaths, WindowsCredentialEnrollment, enroll_windows_credential,
 };
 
+use crate::face_calibration::{FaceCalibrationConfig, FaceCalibrationError, run_face_calibration};
+use crate::face_debug_snapshot::{
+    FaceDebugSnapshotConfig, FaceDebugSnapshotError, run_face_debug_snapshot,
+};
+use crate::liveness_screen_debug::{
+    LivenessScreenDebugConfig, LivenessScreenDebugError, run_liveness_screen_debug,
+};
+use crate::threshold_preview::{
+    ThresholdPreviewConfig, ThresholdPreviewError, ThresholdPreviewMethod, run_threshold_preview,
+};
+
 const DEFAULT_YUNET_MODEL_PATH: &str = "models/face_detection_yunet_2023mar.onnx";
 const DEFAULT_SFACE_MODEL_PATH: &str = "models/face_recognition_sface_2021dec.onnx";
+const DEFAULT_MINIFASNET_MODEL_PATH: &str = "models/minifasnet_v2.onnx";
+const DEFAULT_PROJECT_FACE_MATCH_THRESHOLD: f32 = 0.75;
+#[cfg(feature = "mediapipe-pose")]
+const DEFAULT_MEDIAPIPE_BRIDGE_DLL_PATH: &str = "native/winfaceunlock_mediapipe_bridge.dll";
+#[cfg(feature = "mediapipe-pose")]
+const DEFAULT_MEDIAPIPE_FACE_LANDMARKER_TASK_PATH: &str = "models/face_landmarker.task";
 
 #[derive(Debug)]
 pub enum DiagnosticError {
     Protocol(ProtocolError),
     Video(VideoError),
     Face(FaceEngineError),
+    FaceCalibration(FaceCalibrationError),
+    FaceDebugSnapshot(FaceDebugSnapshotError),
+    LivenessScreenDebug(LivenessScreenDebugError),
+    ThresholdPreview(ThresholdPreviewError),
+    #[cfg(not(feature = "mediapipe-pose"))]
+    MediaPipeFeatureDisabled,
+    #[cfg(feature = "mediapipe-pose")]
+    FacePoseProvider(MediaPipeFacePoseProviderError),
     TemplateCodec(FaceTemplateCodecError),
     IoFailed,
     InvalidArgument,
     AuthRejected(AuthFailureReason),
     PasswordPromptFailed,
     PasswordConfirmationMismatch,
+    GuidedEnrollmentStepIncomplete {
+        step: String,
+        accepted_frame_count: u32,
+        required_frame_count: u32,
+        attempted_frame_count: u32,
+    },
 }
 
 impl fmt::Display for DiagnosticError {
@@ -45,6 +84,23 @@ impl fmt::Display for DiagnosticError {
             Self::Protocol(error) => write!(formatter, "protocol error: {error:?}"),
             Self::Video(error) => write!(formatter, "video error: {error:?}"),
             Self::Face(error) => write!(formatter, "face engine error: {error:?}"),
+            Self::FaceCalibration(error) => write!(formatter, "face calibration error: {error}"),
+            Self::FaceDebugSnapshot(error) => {
+                write!(formatter, "face debug snapshot error: {error}")
+            }
+            Self::LivenessScreenDebug(error) => {
+                write!(formatter, "liveness screen debug error: {error}")
+            }
+            Self::ThresholdPreview(error) => write!(formatter, "threshold preview error: {error}"),
+            #[cfg(not(feature = "mediapipe-pose"))]
+            Self::MediaPipeFeatureDisabled => write!(
+                formatter,
+                "mediapipe pose provider requires diagnostics_cli feature mediapipe-pose"
+            ),
+            #[cfg(feature = "mediapipe-pose")]
+            Self::FacePoseProvider(error) => {
+                write!(formatter, "face pose provider error: {error:?}")
+            }
             Self::TemplateCodec(error) => write!(formatter, "template codec error: {error:?}"),
             Self::IoFailed => write!(formatter, "I/O operation failed"),
             Self::InvalidArgument => write!(formatter, "invalid or missing argument"),
@@ -53,6 +109,15 @@ impl fmt::Display for DiagnosticError {
             Self::PasswordConfirmationMismatch => {
                 write!(formatter, "password confirmation mismatch")
             }
+            Self::GuidedEnrollmentStepIncomplete {
+                step,
+                accepted_frame_count,
+                required_frame_count,
+                attempted_frame_count,
+            } => write!(
+                formatter,
+                "guided enrollment step incomplete: step={step} accepted_frame_count={accepted_frame_count} required_frame_count={required_frame_count} attempted_frame_count={attempted_frame_count}"
+            ),
         }
     }
 }
@@ -72,6 +137,30 @@ impl From<VideoError> for DiagnosticError {
 impl From<FaceEngineError> for DiagnosticError {
     fn from(value: FaceEngineError) -> Self {
         Self::Face(value)
+    }
+}
+
+impl From<FaceCalibrationError> for DiagnosticError {
+    fn from(value: FaceCalibrationError) -> Self {
+        Self::FaceCalibration(value)
+    }
+}
+
+impl From<FaceDebugSnapshotError> for DiagnosticError {
+    fn from(value: FaceDebugSnapshotError) -> Self {
+        Self::FaceDebugSnapshot(value)
+    }
+}
+
+impl From<LivenessScreenDebugError> for DiagnosticError {
+    fn from(value: LivenessScreenDebugError) -> Self {
+        Self::LivenessScreenDebug(value)
+    }
+}
+
+impl From<ThresholdPreviewError> for DiagnosticError {
+    fn from(value: ThresholdPreviewError) -> Self {
+        Self::ThresholdPreview(value)
     }
 }
 
@@ -147,6 +236,20 @@ pub fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<(), Diagn
         run_enroll_face(&args)?;
     } else if args.iter().any(|arg| arg == "enroll-camera") {
         run_enroll_camera(&args)?;
+    } else if args.iter().any(|arg| arg == "guided-enroll") {
+        run_guided_enroll(&args)?;
+    } else if args.iter().any(|arg| arg == "enrollment-report") {
+        run_enrollment_report(&args)?;
+    } else if args.iter().any(|arg| arg == "face-debug-snapshot") {
+        run_face_debug_snapshot_command(&args)?;
+    } else if args.iter().any(|arg| arg == "face-calibrate") {
+        run_face_calibrate_command(&args)?;
+    } else if args.iter().any(|arg| arg == "liveness-screen-debug") {
+        run_liveness_screen_debug_command(&args)?;
+    } else if args.iter().any(|arg| arg == "threshold-preview") {
+        run_threshold_preview_command(&args)?;
+    } else if args.iter().any(|arg| arg == "face-auth-debug") {
+        run_face_auth_debug(&args)?;
     } else if args.iter().any(|arg| arg == "verify-face") {
         run_verify_face(&args)?;
     } else if args.iter().any(|arg| arg == "camera-auth") {
@@ -432,12 +535,587 @@ fn run_enroll_camera(args: &[String]) -> Result<(), DiagnosticError> {
     ))
 }
 
+fn run_guided_enroll(args: &[String]) -> Result<(), DiagnosticError> {
+    let output_dir =
+        PathBuf::from(argument_value(args, "--output-dir").unwrap_or("face-enrollment"));
+    fs::create_dir_all(&output_dir).map_err(|_| DiagnosticError::IoFailed)?;
+
+    let user_id = UserId(
+        argument_value(args, "--user-id")
+            .unwrap_or("dev-user")
+            .to_owned(),
+    );
+    let accepted_frames_per_step = optional_u32(args, "--accepted-frames-per-step")?.unwrap_or(6);
+    let max_frames_per_step = optional_u32(args, "--max-frames-per-step")?
+        .or(optional_u32(args, "--frames-per-step")?)
+        .unwrap_or(180);
+    let max_wait_frames_per_step =
+        optional_u32(args, "--max-wait-frames-per-step")?.unwrap_or(max_frames_per_step);
+    let pose_ready_consecutive = optional_u32(args, "--pose-ready-consecutive")?.unwrap_or(3);
+    let pose_ready_min_fit_score = optional_f32(args, "--pose-ready-min-fit")?.unwrap_or(0.25);
+    let frame_delay_ms = optional_u32(args, "--frame-delay-ms")?.unwrap_or(60);
+    let save_debug_images = args.iter().any(|arg| arg == "--save-debug-images");
+    let allow_partial_enrollment = args.iter().any(|arg| arg == "--allow-partial-enrollment");
+    let frame_match_threshold =
+        optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PROJECT_FACE_MATCH_THRESHOLD);
+    let enrollment_id = argument_value(args, "--enrollment-id")
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("guided-enrollment-{}", current_time_unix_ms()));
+
+    let mut provider = build_camera_provider(args)?;
+    let sources = provider.list_sources()?;
+    let camera_id = selected_camera_id(args, &sources)?;
+    provider.open(&camera_id)?;
+
+    let model_provider = build_loaded_model_provider(args)?;
+    let quality_policy = FaceQualityPolicy {
+        min_pose_fit_score: pose_ready_min_fit_score,
+        ..FaceQualityPolicy::default()
+    };
+    let config = GuidedEnrollmentConfig {
+        frames_per_step: max_frames_per_step,
+        frame_match_threshold,
+        quality_policy,
+        ..GuidedEnrollmentConfig::default()
+    };
+    let pose_provider = build_pose_provider(args)?;
+    let guided_steps = GuidedEnrollmentStep::supported_ordered_steps(pose_provider.capabilities());
+    if guided_steps.is_empty() {
+        provider.close();
+        return Err(DiagnosticError::InvalidArgument);
+    }
+    let mut enrollment = GuidedFaceEnrollmentService::new(model_provider, pose_provider, config);
+    let mut frame_index = 0_u32;
+    let debug_frames_dir = output_dir.join("debug_frames");
+    let aligned_faces_dir = output_dir.join("aligned_faces");
+    if save_debug_images {
+        fs::create_dir_all(&debug_frames_dir).map_err(|_| DiagnosticError::IoFailed)?;
+        fs::create_dir_all(&aligned_faces_dir).map_err(|_| DiagnosticError::IoFailed)?;
+    }
+
+    println!(
+        "pose_provider: {} capabilities={:?}",
+        enrollment.pose_provider_name(),
+        enrollment.pose_provider_capabilities()
+    );
+    let mut partial_enrollment_reasons = Vec::new();
+    for (step_index, step) in guided_steps.iter().enumerate() {
+        println!(
+            "[{}/{}] {}",
+            step_index + 1,
+            guided_steps.len(),
+            step.prompt()
+        );
+
+        let mut pose_ready_count = 0_u32;
+        let mut wait_attempted_frame_count = 0_u32;
+        while pose_ready_count < pose_ready_consecutive
+            && wait_attempted_frame_count < max_wait_frames_per_step
+        {
+            let frame = provider.read_frame()?;
+            let observation = enrollment.preview_frame_for_step(&frame, *step, frame_index)?;
+            if guided_observation_passes_pose_gate(&observation, pose_ready_min_fit_score) {
+                pose_ready_count = pose_ready_count.saturating_add(1);
+                println!(
+                    "step={} waiting_for_pose=false pose_ready_count={}/{} quality_score={} pose_fit_score={} pose_estimate={:?}",
+                    step.label(),
+                    pose_ready_count,
+                    pose_ready_consecutive,
+                    observation.quality_score,
+                    observation.pose_fit_score,
+                    observation.pose_estimate
+                );
+            } else {
+                pose_ready_count = 0;
+                if wait_attempted_frame_count.is_multiple_of(15) {
+                    println!(
+                        "step={} waiting_for_pose=true pose_ready_count=0/{} reject_reason={:?} quality_score={} pose_fit_score={} pose_estimate={:?}",
+                        step.label(),
+                        pose_ready_consecutive,
+                        observation.reject_reason,
+                        observation.quality_score,
+                        observation.pose_fit_score,
+                        observation.pose_estimate
+                    );
+                }
+            }
+
+            if save_debug_images {
+                save_guided_debug_images(
+                    &mut enrollment,
+                    &frame,
+                    &observation,
+                    &debug_frames_dir,
+                    &aligned_faces_dir,
+                )?;
+            }
+            frame_index = frame_index.saturating_add(1);
+            wait_attempted_frame_count = wait_attempted_frame_count.saturating_add(1);
+            if frame_delay_ms > 0 {
+                thread::sleep(Duration::from_millis(u64::from(frame_delay_ms)));
+            }
+        }
+        if pose_ready_count < pose_ready_consecutive {
+            let incomplete_step = DiagnosticError::GuidedEnrollmentStepIncomplete {
+                step: format!("{}:waiting_for_pose", step.label()),
+                accepted_frame_count: pose_ready_count,
+                required_frame_count: pose_ready_consecutive,
+                attempted_frame_count: wait_attempted_frame_count,
+            };
+            if allow_partial_enrollment {
+                println!("partial_enrollment_step_skipped: {incomplete_step}");
+                partial_enrollment_reasons.push(incomplete_step.to_string());
+                continue;
+            }
+            provider.close();
+            return Err(incomplete_step);
+        }
+
+        println!(
+            "step={} pose_confirmed=true recording_started=true",
+            step.label()
+        );
+
+        let mut accepted_frame_count = 0_u32;
+        let mut attempted_frame_count = 0_u32;
+        while accepted_frame_count < accepted_frames_per_step
+            && attempted_frame_count < max_frames_per_step
+        {
+            let frame = provider.read_frame()?;
+            let observation = enrollment.observe_frame(
+                &frame,
+                &user_id,
+                *step,
+                frame_index,
+                current_time_unix_ms(),
+            )?;
+            if guided_observation_passes_pose_gate(&observation, pose_ready_min_fit_score) {
+                accepted_frame_count = accepted_frame_count.saturating_add(1);
+                println!(
+                    "step={} recording_frame_count={}/{} quality_score={} pose_fit_score={} pose_estimate={:?}",
+                    step.label(),
+                    accepted_frame_count,
+                    accepted_frames_per_step,
+                    observation.quality_score,
+                    observation.pose_fit_score,
+                    observation.pose_estimate
+                );
+            } else if attempted_frame_count.is_multiple_of(15) {
+                println!(
+                    "step={} recording_waiting_for_valid_frame=true recording_frame_count={}/{} reject_reason={:?} quality_score={} pose_fit_score={} pose_estimate={:?}",
+                    step.label(),
+                    accepted_frame_count,
+                    accepted_frames_per_step,
+                    observation.reject_reason,
+                    observation.quality_score,
+                    observation.pose_fit_score,
+                    observation.pose_estimate
+                );
+            }
+            if save_debug_images {
+                save_guided_debug_images(
+                    &mut enrollment,
+                    &frame,
+                    &observation,
+                    &debug_frames_dir,
+                    &aligned_faces_dir,
+                )?;
+            }
+            frame_index = frame_index.saturating_add(1);
+            attempted_frame_count = attempted_frame_count.saturating_add(1);
+            if frame_delay_ms > 0 {
+                thread::sleep(Duration::from_millis(u64::from(frame_delay_ms)));
+            }
+        }
+        if accepted_frame_count < accepted_frames_per_step {
+            let incomplete_step = DiagnosticError::GuidedEnrollmentStepIncomplete {
+                step: step.label().to_owned(),
+                accepted_frame_count,
+                required_frame_count: accepted_frames_per_step,
+                attempted_frame_count,
+            };
+            if allow_partial_enrollment {
+                println!("partial_enrollment_step_incomplete: {incomplete_step}");
+                partial_enrollment_reasons.push(incomplete_step.to_string());
+                continue;
+            }
+            provider.close();
+            return Err(incomplete_step);
+        }
+    }
+
+    provider.close();
+    let template_set = enrollment.finish(
+        user_id.clone(),
+        enrollment_id,
+        "yunet".to_owned(),
+        "2023mar".to_owned(),
+        current_time_unix_ms(),
+    );
+    let report = build_guided_enrollment_report(&template_set);
+
+    let selected_templates_path = output_dir.join("selected_templates.json");
+    let report_path = output_dir.join("enrollment_report.json");
+    let partial_report_path = output_dir.join("partial_enrollment_reasons.json");
+    fs::write(&selected_templates_path, template_set.to_json_bytes()?)
+        .map_err(|_| DiagnosticError::IoFailed)?;
+    fs::write(
+        &report_path,
+        serde_json::to_vec_pretty(&report).map_err(|_| DiagnosticError::IoFailed)?,
+    )
+    .map_err(|_| DiagnosticError::IoFailed)?;
+    if allow_partial_enrollment {
+        fs::write(
+            &partial_report_path,
+            serde_json::to_vec_pretty(&partial_enrollment_reasons)
+                .map_err(|_| DiagnosticError::IoFailed)?,
+        )
+        .map_err(|_| DiagnosticError::IoFailed)?;
+    }
+
+    println!("guided_enrollment_completed: true");
+    println!(
+        "partial_enrollment_used: {}",
+        allow_partial_enrollment && !partial_enrollment_reasons.is_empty()
+    );
+    println!("user_id: {}", user_id.0);
+    println!(
+        "selected_template_count: {}",
+        report.selected_template_count
+    );
+    println!("rejected_sample_count: {}", report.rejected_sample_count);
+    println!(
+        "selected_templates_path: {}",
+        selected_templates_path.display()
+    );
+    println!("enrollment_report_path: {}", report_path.display());
+    if allow_partial_enrollment {
+        println!(
+            "partial_enrollment_reasons_path: {}",
+            partial_report_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn run_enrollment_report(args: &[String]) -> Result<(), DiagnosticError> {
+    let template_path =
+        argument_value(args, "--template").ok_or(DiagnosticError::InvalidArgument)?;
+    let template_set = read_template_set(template_path)?;
+    let report = build_guided_enrollment_report(&template_set);
+
+    println!("enrollment_id: {}", report.enrollment_id);
+    println!("user_id: {}", report.user_id);
+    println!(
+        "selected_template_count: {}",
+        report.selected_template_count
+    );
+    println!("rejected_sample_count: {}", report.rejected_sample_count);
+    println!(
+        "average_selected_quality_score: {:?}",
+        report.quality_summary.average_selected_quality_score
+    );
+    println!(
+        "minimum_selected_quality_score: {:?}",
+        report.quality_summary.minimum_selected_quality_score
+    );
+    for count in report.pose_group_counts {
+        println!(
+            "pose_group_count: {:?} {}",
+            count.pose_group, count.selected_template_count
+        );
+    }
+    for count in report.reject_reason_counts {
+        println!(
+            "reject_reason_count: {:?} {}",
+            count.reason, count.rejected_sample_count
+        );
+    }
+    Ok(())
+}
+
+fn run_face_debug_snapshot_command(args: &[String]) -> Result<(), DiagnosticError> {
+    let output_dir = PathBuf::from(argument_value(args, "--output-dir").unwrap_or("face-debug"));
+    let yunet_model_path = model_path(args, "--yunet-model", DEFAULT_YUNET_MODEL_PATH);
+    let sface_model_path = model_path(args, "--sface-model", DEFAULT_SFACE_MODEL_PATH);
+    let threshold =
+        optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PROJECT_FACE_MATCH_THRESHOLD);
+    let mut model_config = OpenCvFaceModelConfig::new(yunet_model_path, sface_model_path);
+    model_config.recognizer.match_threshold = threshold;
+
+    run_face_debug_snapshot(FaceDebugSnapshotConfig {
+        output_dir,
+        scenario: argument_value(args, "--scenario")
+            .unwrap_or("unlabeled")
+            .to_owned(),
+        start_delay_seconds: optional_u32(args, "--start-delay-seconds")?.unwrap_or(3),
+        camera_id: argument_value(args, "--camera-id").map(|value| CameraId(value.to_owned())),
+        max_camera_index: 8,
+        requested_frame_width: optional_u32(args, "--frame-width")?,
+        requested_frame_height: optional_u32(args, "--frame-height")?,
+        frames: optional_u32(args, "--frames")?.unwrap_or(30),
+        frame_delay_ms: optional_u32(args, "--frame-delay-ms")?.unwrap_or(60),
+        model_config,
+        save_aligned_faces: args.iter().any(|arg| arg == "--save-aligned-face"),
+    })?;
+
+    Ok(())
+}
+
+fn run_face_calibrate_command(args: &[String]) -> Result<(), DiagnosticError> {
+    let template_path =
+        argument_value(args, "--template").ok_or(DiagnosticError::InvalidArgument)?;
+    let output_dir =
+        PathBuf::from(argument_value(args, "--output-dir").unwrap_or("face-calibration"));
+    let yunet_model_path = model_path(args, "--yunet-model", DEFAULT_YUNET_MODEL_PATH);
+    let sface_model_path = model_path(args, "--sface-model", DEFAULT_SFACE_MODEL_PATH);
+    let threshold =
+        optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PROJECT_FACE_MATCH_THRESHOLD);
+    let mut model_config = OpenCvFaceModelConfig::new(yunet_model_path, sface_model_path);
+    model_config.recognizer.match_threshold = threshold;
+
+    run_face_calibration(FaceCalibrationConfig {
+        output_dir,
+        scenario: argument_value(args, "--scenario")
+            .unwrap_or("unlabeled")
+            .to_owned(),
+        start_delay_seconds: optional_u32(args, "--start-delay-seconds")?.unwrap_or(3),
+        camera_id: argument_value(args, "--camera-id").map(|value| CameraId(value.to_owned())),
+        max_camera_index: 8,
+        requested_frame_width: optional_u32(args, "--frame-width")?,
+        requested_frame_height: optional_u32(args, "--frame-height")?,
+        frames: optional_u32(args, "--frames")?.unwrap_or(100),
+        frame_delay_ms: optional_u32(args, "--frame-delay-ms")?.unwrap_or(60),
+        model_config,
+        templates: read_recognition_templates(template_path)?,
+        threshold_min: optional_f32(args, "--threshold-min")?.unwrap_or(0.40),
+        threshold_max: optional_f32(args, "--threshold-max")?.unwrap_or(0.80),
+        threshold_step: optional_f32(args, "--threshold-step")?.unwrap_or(0.05),
+        required_consecutive_match_count: optional_u32(args, "--required-consecutive")?
+            .unwrap_or(3),
+    })?;
+
+    Ok(())
+}
+
+fn run_liveness_screen_debug_command(args: &[String]) -> Result<(), DiagnosticError> {
+    let output_dir =
+        PathBuf::from(argument_value(args, "--output-dir").unwrap_or("liveness-debug\\screen"));
+    let yunet_model_path = model_path(args, "--yunet-model", DEFAULT_YUNET_MODEL_PATH);
+    let sface_model_path = model_path(args, "--sface-model", DEFAULT_SFACE_MODEL_PATH);
+    let threshold =
+        optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PROJECT_FACE_MATCH_THRESHOLD);
+    let mut model_config = OpenCvFaceModelConfig::new(yunet_model_path, sface_model_path);
+    model_config.recognizer.match_threshold = threshold;
+
+    run_liveness_screen_debug(LivenessScreenDebugConfig {
+        output_dir,
+        camera_id: argument_value(args, "--camera-id").map(|value| CameraId(value.to_owned())),
+        max_camera_index: 8,
+        requested_frame_width: optional_u32(args, "--frame-width")?,
+        requested_frame_height: optional_u32(args, "--frame-height")?,
+        frames: optional_u32(args, "--frames")?.unwrap_or(60),
+        frame_delay_ms: optional_u32(args, "--frame-delay-ms")?.unwrap_or(60),
+        model_config,
+        screen_replay_geometry_provider_config: screen_replay_geometry_config(args)?,
+        minifasnet_provider_config: minifasnet_liveness_config(args)?,
+        save_debug_images: args.iter().any(|arg| arg == "--save-debug-images"),
+        save_minifasnet_crops: args.iter().any(|arg| arg == "--save-minifasnet-crops"),
+    })?;
+
+    Ok(())
+}
+
+fn screen_replay_geometry_config(
+    args: &[String],
+) -> Result<Option<ScreenReplayLivenessProviderConfig>, DiagnosticError> {
+    if !args
+        .iter()
+        .any(|arg| arg == "--enable-screen-geometry-diagnostics")
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(ScreenReplayLivenessProviderConfig {
+        binary_threshold: optional_f64(args, "--binary-threshold")?.unwrap_or(150.0),
+        binary_mask_upper_threshold: optional_f64(args, "--binary-mask-upper-threshold")?
+            .unwrap_or(50.0),
+        min_screen_area_ratio: optional_f32(args, "--min-screen-area-ratio")?.unwrap_or(0.08),
+        max_screen_area_ratio: optional_f32(args, "--max-screen-area-ratio")?.unwrap_or(0.90),
+        min_rectangularity_score: optional_f32(args, "--min-rectangularity-score")?.unwrap_or(0.45),
+        min_brightness_contrast_score: optional_f32(args, "--min-brightness-contrast-score")?
+            .unwrap_or(0.05),
+        min_face_inside_screen_ratio: optional_f32(args, "--min-face-inside-screen-ratio")?
+            .unwrap_or(0.95),
+        min_screen_aspect_ratio: optional_f32(args, "--min-screen-aspect-ratio")?.unwrap_or(0.35),
+        max_screen_aspect_ratio: optional_f32(args, "--max-screen-aspect-ratio")?.unwrap_or(3.20),
+    }))
+}
+
+fn minifasnet_liveness_config(
+    args: &[String],
+) -> Result<Option<MiniFasNetLivenessProviderConfig>, DiagnosticError> {
+    if args.iter().any(|arg| arg == "--disable-minifasnet") {
+        return Ok(None);
+    }
+
+    let explicit_model_path = argument_value(args, "--minifasnet-model").map(PathBuf::from);
+    let model_path = explicit_model_path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MINIFASNET_MODEL_PATH));
+    if explicit_model_path.is_none() && !model_path.exists() {
+        return Ok(None);
+    }
+
+    Ok(Some(MiniFasNetLivenessProviderConfig {
+        model_path,
+        crop_scale: optional_f32(args, "--minifasnet-crop-scale")?.unwrap_or(2.7),
+        input_width: 80,
+        input_height: 80,
+        min_live_score: optional_f32(args, "--minifasnet-min-live-score")?.unwrap_or(0.80),
+        min_spoof_score: optional_f32(args, "--minifasnet-min-spoof-score")?.unwrap_or(0.70),
+        reject_on_model_spoof: !args.iter().any(|arg| arg == "--minifasnet-diagnostic-only"),
+    }))
+}
+
+fn run_threshold_preview_command(args: &[String]) -> Result<(), DiagnosticError> {
+    run_threshold_preview(ThresholdPreviewConfig {
+        camera_id: argument_value(args, "--camera-id").map(|value| CameraId(value.to_owned())),
+        max_camera_index: 8,
+        requested_frame_width: optional_u32(args, "--frame-width")?,
+        requested_frame_height: optional_u32(args, "--frame-height")?,
+        method: threshold_preview_method(args)?,
+        adaptive_block_size: optional_i32(args, "--adaptive-block-size")?.unwrap_or(31),
+        adaptive_c: optional_f64(args, "--adaptive-c")?.unwrap_or(5.0),
+        binary_threshold: optional_f64(args, "--binary-threshold")?.unwrap_or(150.0),
+        binary_mask_upper_threshold: optional_f64(args, "--binary-mask-upper-threshold")?
+            .unwrap_or(50.0),
+        frame_delay_ms: optional_u32(args, "--frame-delay-ms")?.unwrap_or(1),
+    })?;
+
+    Ok(())
+}
+
+fn build_pose_provider(args: &[String]) -> Result<Box<dyn FacePoseProvider>, DiagnosticError> {
+    match argument_value(args, "--pose-provider").unwrap_or("landmark") {
+        "landmark" => Ok(Box::new(LandmarkFacePoseProvider)),
+        #[cfg(feature = "mediapipe-pose")]
+        "mediapipe" => {
+            let bridge_dll_path = PathBuf::from(
+                argument_value(args, "--mediapipe-bridge")
+                    .unwrap_or(DEFAULT_MEDIAPIPE_BRIDGE_DLL_PATH),
+            );
+            let face_landmarker_task_path = PathBuf::from(
+                argument_value(args, "--mediapipe-model")
+                    .unwrap_or(DEFAULT_MEDIAPIPE_FACE_LANDMARKER_TASK_PATH),
+            );
+            let config =
+                MediaPipeFacePoseProviderConfig::new(bridge_dll_path, face_landmarker_task_path);
+            MediaPipeFacePoseProvider::load(config)
+                .map(|provider| Box::new(provider) as Box<dyn FacePoseProvider>)
+                .map_err(DiagnosticError::FacePoseProvider)
+        }
+        #[cfg(not(feature = "mediapipe-pose"))]
+        "mediapipe" => Err(DiagnosticError::MediaPipeFeatureDisabled),
+        _ => Err(DiagnosticError::InvalidArgument),
+    }
+}
+
+fn save_guided_debug_images(
+    enrollment: &mut GuidedFaceEnrollmentService<
+        OpenCvFaceModelProvider,
+        Box<dyn FacePoseProvider>,
+    >,
+    frame: &video_provider::VideoFrame,
+    observation: &GuidedFrameObservation,
+    debug_frames_dir: &std::path::Path,
+    aligned_faces_dir: &std::path::Path,
+) -> Result<(), DiagnosticError> {
+    let base_name = format!(
+        "{:05}_{}_{}",
+        observation.frame_index,
+        observation.step.label(),
+        if observation.accepted_for_step {
+            "accepted"
+        } else {
+            "rejected"
+        }
+    );
+    let debug_frame_path = debug_frames_dir.join(format!("{base_name}.jpg"));
+    OpenCvFaceModelProvider::write_detection_debug_frame(
+        frame,
+        &observation.detected_faces,
+        &debug_frame_path,
+    )?;
+
+    if let Some(face) = observation.detected_faces.first() {
+        let aligned_face_path = aligned_faces_dir.join(format!("{base_name}.jpg"));
+        enrollment
+            .model_provider_mut()
+            .write_aligned_face(frame, face, &aligned_face_path)?;
+    }
+
+    Ok(())
+}
+
+fn guided_observation_passes_pose_gate(
+    observation: &GuidedFrameObservation,
+    pose_ready_min_fit_score: f32,
+) -> bool {
+    observation.accepted_for_step
+        && observation.reject_reason.is_none()
+        && observation.pose_fit_score >= pose_ready_min_fit_score
+}
+
+fn run_face_auth_debug(args: &[String]) -> Result<(), DiagnosticError> {
+    let template_path =
+        argument_value(args, "--template").ok_or(DiagnosticError::InvalidArgument)?;
+    let threshold =
+        optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PROJECT_FACE_MATCH_THRESHOLD);
+    let max_frames = optional_u32(args, "--frames")?.unwrap_or(30);
+    let templates = read_recognition_templates(template_path)?;
+
+    let mut provider = build_camera_provider(args)?;
+    let sources = provider.list_sources()?;
+    let camera_id = selected_camera_id(args, &sources)?;
+    provider.open(&camera_id)?;
+
+    let model_provider = build_loaded_model_provider(args)?;
+    let matcher = FaceTemplateMatcher::new(threshold);
+    let policy = AttemptPolicy::new(AttemptPolicyConfig {
+        required_consecutive_match_count: 1,
+        ..AttemptPolicyConfig::default()
+    });
+    let mut authenticator = FaceAuthenticator::new(model_provider, matcher, policy);
+
+    for frame_index in 0..max_frames {
+        let frame = provider.read_frame()?;
+        match authenticator.authenticate_frame(&frame, &templates, current_time_unix_ms()) {
+            Ok(outcome) => {
+                println!(
+                    "frame_index={frame_index} auth_match_passed=true best_score={} best_template_id={} best_pose_group={:?}",
+                    outcome.match_score,
+                    outcome.matched_template.template_ref.0,
+                    outcome.matched_pose_group
+                );
+            }
+            Err(reason) => {
+                println!("frame_index={frame_index} auth_match_passed=false reason={reason:?}");
+            }
+        }
+    }
+
+    provider.close();
+    Ok(())
+}
+
 fn run_verify_face(args: &[String]) -> Result<(), DiagnosticError> {
     let image_path = argument_value(args, "--image").ok_or(DiagnosticError::InvalidArgument)?;
     let template_path =
         argument_value(args, "--template").ok_or(DiagnosticError::InvalidArgument)?;
-    let threshold = optional_f32(args, "--threshold")?.unwrap_or(SFACE_COSINE_MATCH_THRESHOLD);
-    let templates = RecognitionTemplates::new(vec![read_template(template_path)?]);
+    let threshold =
+        optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PROJECT_FACE_MATCH_THRESHOLD);
+    let templates = read_recognition_templates(template_path)?;
     let model_provider = build_loaded_model_provider(args)?;
     let matcher = FaceTemplateMatcher::new(threshold);
     let policy = AttemptPolicy::new(AttemptPolicyConfig {
@@ -457,17 +1135,19 @@ fn run_verify_face(args: &[String]) -> Result<(), DiagnosticError> {
         "matched_template_ref: {}",
         outcome.matched_template.template_ref.0
     );
+    println!("matched_pose_group: {:?}", outcome.matched_pose_group);
     Ok(())
 }
 
 fn run_camera_auth(args: &[String]) -> Result<(), DiagnosticError> {
     let template_path =
         argument_value(args, "--template").ok_or(DiagnosticError::InvalidArgument)?;
-    let threshold = optional_f32(args, "--threshold")?.unwrap_or(SFACE_COSINE_MATCH_THRESHOLD);
+    let threshold =
+        optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PROJECT_FACE_MATCH_THRESHOLD);
     let required_consecutive_match_count =
         optional_u32(args, "--required-consecutive")?.unwrap_or(2);
     let max_frames = optional_u32(args, "--max-frames")?.unwrap_or(30);
-    let templates = RecognitionTemplates::new(vec![read_template(template_path)?]);
+    let templates = read_recognition_templates(template_path)?;
 
     let mut provider = build_camera_provider(args)?;
     let sources = provider.list_sources()?;
@@ -491,6 +1171,7 @@ fn run_camera_auth(args: &[String]) -> Result<(), DiagnosticError> {
                 println!("camera_auth_passed: true");
                 println!("matched_user_id: {}", outcome.matched_user_id.0);
                 println!("match_score: {}", outcome.match_score);
+                println!("matched_pose_group: {:?}", outcome.matched_pose_group);
                 return Ok(());
             }
             Err(reason) => last_rejection = Some(reason),
@@ -604,6 +1285,10 @@ fn print_score_summary(scores: &[f32]) -> Result<(), DiagnosticError> {
         scores.iter().filter(|score| **score >= 0.60).count()
     );
     println!(
+        "threshold_0_75_pass_count: {}",
+        scores.iter().filter(|score| **score >= 0.75).count()
+    );
+    println!(
         "threshold_0_85_pass_count: {}",
         scores.iter().filter(|score| **score >= 0.85).count()
     );
@@ -626,7 +1311,8 @@ fn build_loaded_model_provider(
 ) -> Result<OpenCvFaceModelProvider, DiagnosticError> {
     let yunet_model_path = model_path(args, "--yunet-model", DEFAULT_YUNET_MODEL_PATH);
     let sface_model_path = model_path(args, "--sface-model", DEFAULT_SFACE_MODEL_PATH);
-    let threshold = optional_f32(args, "--threshold")?.unwrap_or(SFACE_COSINE_MATCH_THRESHOLD);
+    let threshold =
+        optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PROJECT_FACE_MATCH_THRESHOLD);
 
     let mut config = OpenCvFaceModelConfig::new(yunet_model_path, sface_model_path);
     config.recognizer.match_threshold = threshold;
@@ -669,6 +1355,23 @@ fn read_template(template_path: &str) -> Result<FaceTemplate, DiagnosticError> {
     FaceTemplate::from_json_bytes(&bytes).map_err(DiagnosticError::TemplateCodec)
 }
 
+fn read_template_set(template_path: &str) -> Result<FaceTemplateSet, DiagnosticError> {
+    let bytes = fs::read(template_path).map_err(|_| DiagnosticError::IoFailed)?;
+    FaceTemplateSet::from_json_bytes(&bytes).map_err(DiagnosticError::TemplateCodec)
+}
+
+fn read_recognition_templates(
+    template_path: &str,
+) -> Result<RecognitionTemplates, DiagnosticError> {
+    let bytes = fs::read(template_path).map_err(|_| DiagnosticError::IoFailed)?;
+    if let Ok(template_set) = FaceTemplateSet::from_json_bytes(&bytes) {
+        return Ok(RecognitionTemplates::new(template_set.selected_templates()));
+    }
+
+    let template = FaceTemplate::from_json_bytes(&bytes).map_err(DiagnosticError::TemplateCodec)?;
+    Ok(RecognitionTemplates::new(vec![template]))
+}
+
 fn model_path(args: &[String], argument_name: &str, default_path: &str) -> PathBuf {
     argument_value(args, argument_name)
         .map(PathBuf::from)
@@ -687,6 +1390,30 @@ fn optional_u32(args: &[String], argument_name: &str) -> Result<Option<u32>, Dia
         .map(|value| value.parse::<u32>())
         .transpose()
         .map_err(|_| DiagnosticError::InvalidArgument)
+}
+
+fn optional_i32(args: &[String], argument_name: &str) -> Result<Option<i32>, DiagnosticError> {
+    argument_value(args, argument_name)
+        .map(|value| value.parse::<i32>())
+        .transpose()
+        .map_err(|_| DiagnosticError::InvalidArgument)
+}
+
+fn optional_f64(args: &[String], argument_name: &str) -> Result<Option<f64>, DiagnosticError> {
+    argument_value(args, argument_name)
+        .map(|value| value.parse::<f64>())
+        .transpose()
+        .map_err(|_| DiagnosticError::InvalidArgument)
+}
+
+fn threshold_preview_method(args: &[String]) -> Result<ThresholdPreviewMethod, DiagnosticError> {
+    match argument_value(args, "--method").unwrap_or("binary-inv-mask") {
+        "binary-inv-mask" | "screen-contour" => Ok(ThresholdPreviewMethod::BinaryInvertedMask),
+        "adaptive-gaussian" | "gaussian" => Ok(ThresholdPreviewMethod::AdaptiveGaussian),
+        "adaptive-mean" | "mean" => Ok(ThresholdPreviewMethod::AdaptiveMean),
+        "otsu" => Ok(ThresholdPreviewMethod::Otsu),
+        _ => Err(DiagnosticError::InvalidArgument),
+    }
 }
 
 fn wake_auth_source(args: &[String]) -> Result<AuthSource, DiagnosticError> {
@@ -781,6 +1508,25 @@ fn print_usage() {
     println!(
         "Usage: diagnostics_cli enroll-camera --template-out <path> [--camera-id opencv-index:0] [--frame-width 640 --frame-height 480] [--user-id <id>]"
     );
+    println!(
+        "Usage: diagnostics_cli guided-enroll --output-dir <dir> [--camera-id opencv-index:0] [--accepted-frames-per-step 6] [--max-wait-frames-per-step 180] [--max-frames-per-step 180] [--pose-ready-consecutive 3] [--pose-ready-min-fit 0.25] [--allow-partial-enrollment] [--save-debug-images] [--pose-provider landmark|mediapipe] [--mediapipe-bridge <dll>] [--mediapipe-model <task>] [--user-id <id>]"
+    );
+    println!("Usage: diagnostics_cli enrollment-report --template <selected_templates.json>");
+    println!(
+        "Usage: diagnostics_cli face-debug-snapshot --output-dir <dir> [--scenario front|yaw-left-30|yaw-right-30|pitch-up-15|pitch-down-15] [--start-delay-seconds 3] [--camera-id opencv-index:0] [--frames 30] [--frame-width 640 --frame-height 480] [--save-aligned-face]"
+    );
+    println!(
+        "Usage: diagnostics_cli face-calibrate --template <path> --output-dir <dir> [--scenario front|yaw-left-30|yaw-right-30|pitch-up-15|pitch-down-15] [--start-delay-seconds 3] [--camera-id opencv-index:0] [--frames 100] [--threshold-min 0.40 --threshold-max 0.80 --threshold-step 0.05] [--required-consecutive 3]"
+    );
+    println!(
+        "Usage: diagnostics_cli liveness-screen-debug --output-dir <dir> [--camera-id opencv-index:0] [--frames 60] [--frame-width 640 --frame-height 480] [--save-debug-images] [--save-minifasnet-crops] [--minifasnet-model models/minifasnet_v2.onnx] [--minifasnet-diagnostic-only] [--disable-minifasnet] [--enable-screen-geometry-diagnostics]"
+    );
+    println!(
+        "Usage: diagnostics_cli threshold-preview [--camera-id opencv-index:0] [--frame-width 640 --frame-height 480] [--method binary-inv-mask|adaptive-gaussian|adaptive-mean|otsu] [--binary-threshold 150 --binary-mask-upper-threshold 50] [--adaptive-block-size 31] [--adaptive-c 5.0]"
+    );
+    println!(
+        "Usage: diagnostics_cli face-auth-debug --template <path> [--frames 30] [--camera-id opencv-index:0]"
+    );
     println!("Usage: diagnostics_cli verify-face --image <path> --template <path>");
     println!(
         "Usage: diagnostics_cli camera-auth --template <path> [--camera-id opencv-index:0] [--frame-width 640 --frame-height 480]"
@@ -855,6 +1601,29 @@ mod tests {
         ];
 
         assert_eq!(wake_auth_source(&args)?, AuthSource::LocalCamera);
+        Ok(())
+    }
+
+    #[test]
+    fn screen_geometry_diagnostics_are_disabled_by_default() -> Result<(), DiagnosticError> {
+        let args = vec![
+            "diagnostics_cli".to_owned(),
+            "liveness-screen-debug".to_owned(),
+        ];
+
+        assert_eq!(screen_replay_geometry_config(&args)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn screen_geometry_diagnostics_require_explicit_opt_in() -> Result<(), DiagnosticError> {
+        let args = vec![
+            "diagnostics_cli".to_owned(),
+            "liveness-screen-debug".to_owned(),
+            "--enable-screen-geometry-diagnostics".to_owned(),
+        ];
+
+        assert!(screen_replay_geometry_config(&args)?.is_some());
         Ok(())
     }
 

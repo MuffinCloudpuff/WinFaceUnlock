@@ -28,11 +28,10 @@ fn copy_vcpkg_runtime_dlls(vcpkg_triplet_dir: &Path) {
     };
 
     let profile = profile.to_string_lossy();
-    let source_bin_dir = if profile == "debug" {
-        vcpkg_triplet_dir.join("debug").join("bin")
-    } else {
-        vcpkg_triplet_dir.join("bin")
-    };
+    // The repository links the release vcpkg import libraries from x64-windows/lib
+    // for every Rust profile. Copy the matching release runtime DLLs as well.
+    // Mixing x64-windows/debug/bin with release OpenCV DLLs corrupts the process heap.
+    let source_bin_dir = vcpkg_triplet_dir.join("bin");
     if !source_bin_dir.exists() {
         return;
     }

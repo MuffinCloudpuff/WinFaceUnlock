@@ -1,7 +1,9 @@
 /target/
 /vcpkg_installed/
 /models/*.onnx
+/models/*.task
 /node_modules/
+/.external/
 /.idea/
 /.vscode/
 *.pdb
@@ -14,3 +16,9 @@
 *.log
 .gitnexus
 .claude/skills/gitnexus/
+/face-debug/
+/face-calibration/
+/face-enrollment/
+/face-enrollment-*/
+/liveness-debug/
+/vm-package/

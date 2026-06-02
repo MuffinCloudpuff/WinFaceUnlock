@@ -14,7 +14,6 @@ use windows_core::AgileReference;
 use crate::broker_client::ProviderWakeOutcome;
 
 const WAKE_RETRY_COOLDOWN_MS: i64 = 3_000;
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ProviderTileVisibility {
     #[default]
@@ -58,9 +57,17 @@ pub enum ProviderWakeFailure {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderUnlockPhase {
     ProviderLoaded,
-    WakeRequested,
+    WakeRequested {
+        attempt_number: u32,
+        attempt_limit: u32,
+    },
     CredentialMaterialReady,
-    WakeFailed(ProviderWakeFailure),
+    WakeFailed {
+        failure: ProviderWakeFailure,
+        attempt_number: u32,
+        attempt_limit: u32,
+        automatic_retry_pending: bool,
+    },
     Completed,
 }
 
@@ -197,30 +204,50 @@ impl ProviderState {
             })
     }
 
-    pub fn credential_status_message(&self) -> &'static str {
+    pub fn credential_status_message(&self) -> String {
         self.inner
             .lock()
             .map(|inner| match &inner.unlock_attempt.phase {
-                ProviderUnlockPhase::ProviderLoaded => "Select WinFaceUnlock to try face sign-in",
-                ProviderUnlockPhase::WakeRequested => "Local face authentication is running",
+                ProviderUnlockPhase::ProviderLoaded => {
+                    "Select WinFaceUnlock to try face sign-in".to_owned()
+                }
+                ProviderUnlockPhase::WakeRequested {
+                    attempt_number,
+                    attempt_limit,
+                } => format!(
+                    "Local face authentication is running ({attempt_number}/{attempt_limit})"
+                ),
                 ProviderUnlockPhase::CredentialMaterialReady => {
-                    "Face authentication credential is ready"
+                    "Face authentication credential is ready".to_owned()
                 }
-                ProviderUnlockPhase::WakeFailed(ProviderWakeFailure::AuthFailed { .. }) => {
-                    "Face authentication failed. PIN and password sign-in remain available"
+                ProviderUnlockPhase::WakeFailed {
+                    failure: ProviderWakeFailure::AuthFailed { .. },
+                    attempt_number,
+                    attempt_limit,
+                    automatic_retry_pending: true,
+                } => format!(
+                    "Face authentication failed. Retrying automatically ({attempt_number}/{attempt_limit})"
+                ),
+                ProviderUnlockPhase::WakeFailed {
+                    failure: ProviderWakeFailure::AuthFailed { .. },
+                    ..
+                } => {
+                    "Face authentication failed. Use PIN or password fallback".to_owned()
                 }
-                ProviderUnlockPhase::WakeFailed(ProviderWakeFailure::RequestRejected {
+                ProviderUnlockPhase::WakeFailed {
+                    failure: ProviderWakeFailure::RequestRejected { .. },
                     ..
-                }) => "Face sign-in request was rejected. Use PIN or password fallback",
-                ProviderUnlockPhase::WakeFailed(ProviderWakeFailure::TransportUnavailable {
+                } => "Face sign-in request was rejected. Use PIN or password fallback".to_owned(),
+                ProviderUnlockPhase::WakeFailed {
+                    failure: ProviderWakeFailure::TransportUnavailable { .. },
                     ..
-                }) => "Face service is unavailable. Use PIN or password fallback",
-                ProviderUnlockPhase::Completed => "Face authentication completed",
+                } => "Face service is unavailable. Use PIN or password fallback".to_owned(),
+                ProviderUnlockPhase::Completed => "Face authentication completed".to_owned(),
             })
-            .unwrap_or("Select WinFaceUnlock to try face sign-in")
+            .unwrap_or_else(|_| "Select WinFaceUnlock to try face sign-in".to_owned())
     }
 
-    pub fn begin_wake_request(&self) -> WakeRequestStart {
+    pub fn begin_wake_request(&self, attempt_limit: u32) -> WakeRequestStart {
         self.inner
             .lock()
             .map(|mut inner| {
@@ -230,19 +257,19 @@ impl ProviderState {
                     };
                 }
 
+                let now_unix_ms = current_time_unix_ms();
                 if matches!(
                     inner.unlock_attempt.phase,
-                    ProviderUnlockPhase::WakeRequested
+                    ProviderUnlockPhase::WakeRequested { .. }
                 ) {
                     return WakeRequestStart::Blocked {
                         reason: WakeRequestBlockReason::WakeAlreadyRunning,
                     };
                 }
 
-                let now_unix_ms = current_time_unix_ms();
                 if matches!(
                     inner.unlock_attempt.phase,
-                    ProviderUnlockPhase::WakeFailed(_)
+                    ProviderUnlockPhase::WakeFailed { .. }
                 ) && now_unix_ms < inner.wake_retry_allowed_at_unix_ms
                 {
                     return WakeRequestStart::Blocked {
@@ -250,7 +277,10 @@ impl ProviderState {
                     };
                 }
 
-                inner.unlock_attempt.phase = ProviderUnlockPhase::WakeRequested;
+                inner.unlock_attempt.phase = ProviderUnlockPhase::WakeRequested {
+                    attempt_number: 1,
+                    attempt_limit,
+                };
                 WakeRequestStart::Started {
                     session_id: Self::session_id_for_current_process(),
                 }
@@ -258,6 +288,16 @@ impl ProviderState {
             .unwrap_or(WakeRequestStart::Blocked {
                 reason: WakeRequestBlockReason::WakeAlreadyRunning,
             })
+    }
+
+    pub fn mark_automatic_retry_started(&self, attempt_number: u32, attempt_limit: u32) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.unlock_attempt.phase = ProviderUnlockPhase::WakeRequested {
+                attempt_number,
+                attempt_limit,
+            };
+        }
+        self.notify_credentials_changed();
     }
 
     pub fn mark_credential_material_serialized(&self) {
@@ -298,7 +338,13 @@ impl ProviderState {
         }
     }
 
-    pub fn apply_wake_outcome(&self, outcome: ProviderWakeOutcome) {
+    pub fn apply_wake_outcome(
+        &self,
+        outcome: ProviderWakeOutcome,
+        attempt_number: u32,
+        attempt_limit: u32,
+        automatic_retry_pending: bool,
+    ) {
         if let Ok(mut inner) = self.inner.lock() {
             match outcome {
                 ProviderWakeOutcome::CredentialMaterialReady {
@@ -311,17 +357,23 @@ impl ProviderState {
                     auth_failure_reason,
                     ..
                 } => {
-                    inner.unlock_attempt.phase =
-                        ProviderUnlockPhase::WakeFailed(ProviderWakeFailure::AuthFailed {
+                    inner.unlock_attempt.phase = ProviderUnlockPhase::WakeFailed {
+                        failure: ProviderWakeFailure::AuthFailed {
                             reason: auth_failure_reason,
-                        });
+                        },
+                        attempt_number,
+                        attempt_limit,
+                        automatic_retry_pending,
+                    };
                     Self::record_wake_failure_locked(&mut inner);
                 }
                 ProviderWakeOutcome::RequestRejected { protocol_error, .. } => {
-                    inner.unlock_attempt.phase =
-                        ProviderUnlockPhase::WakeFailed(ProviderWakeFailure::RequestRejected {
-                            protocol_error,
-                        });
+                    inner.unlock_attempt.phase = ProviderUnlockPhase::WakeFailed {
+                        failure: ProviderWakeFailure::RequestRejected { protocol_error },
+                        attempt_number,
+                        attempt_limit,
+                        automatic_retry_pending: false,
+                    };
                     Self::record_wake_failure_locked(&mut inner);
                 }
             }
@@ -329,12 +381,19 @@ impl ProviderState {
         self.notify_credentials_changed();
     }
 
-    pub fn apply_wake_transport_error(&self, protocol_error: ProtocolError) {
+    pub fn apply_wake_transport_error(
+        &self,
+        protocol_error: ProtocolError,
+        attempt_number: u32,
+        attempt_limit: u32,
+    ) {
         if let Ok(mut inner) = self.inner.lock() {
-            inner.unlock_attempt.phase =
-                ProviderUnlockPhase::WakeFailed(ProviderWakeFailure::TransportUnavailable {
-                    protocol_error,
-                });
+            inner.unlock_attempt.phase = ProviderUnlockPhase::WakeFailed {
+                failure: ProviderWakeFailure::TransportUnavailable { protocol_error },
+                attempt_number,
+                attempt_limit,
+                automatic_retry_pending: false,
+            };
             Self::record_wake_failure_locked(&mut inner);
         }
         self.notify_credentials_changed();
@@ -415,18 +474,18 @@ mod tests {
         let state = ProviderState::new();
 
         assert!(matches!(
-            state.begin_wake_request(),
+            state.begin_wake_request(3),
             WakeRequestStart::Started { .. }
         ));
         assert_eq!(
-            state.begin_wake_request(),
+            state.begin_wake_request(3),
             WakeRequestStart::Blocked {
                 reason: WakeRequestBlockReason::WakeAlreadyRunning
             }
         );
         assert_eq!(
             state.credential_status_message(),
-            "Local face authentication is running"
+            "Local face authentication is running (1/3)"
         );
     }
 
@@ -472,14 +531,84 @@ mod tests {
     fn wake_failure_enforces_retry_cooldown() {
         let state = ProviderState::new();
 
-        state.apply_wake_transport_error(ProtocolError::TransportUnavailable);
+        state.apply_wake_transport_error(ProtocolError::TransportUnavailable, 1, 3);
 
         assert_eq!(
-            state.begin_wake_request(),
+            state.begin_wake_request(3),
             WakeRequestStart::Blocked {
                 reason: WakeRequestBlockReason::RetryCooldownActive
             }
         );
+    }
+
+    #[test]
+    fn intermediate_auth_failure_reports_automatic_retry() {
+        let state = ProviderState::new();
+
+        state.apply_wake_outcome(
+            ProviderWakeOutcome::AuthFailed {
+                session_id: SessionId("session-1".to_owned()),
+                auth_failure_reason: common_protocol::AuthFailureReason::LivenessFailed,
+            },
+            1,
+            3,
+            true,
+        );
+
+        assert_eq!(
+            state.credential_status_message(),
+            "Face authentication failed. Retrying automatically (1/3)"
+        );
+
+        state.mark_automatic_retry_started(2, 3);
+        assert_eq!(
+            state.credential_status_message(),
+            "Local face authentication is running (2/3)"
+        );
+    }
+
+    #[test]
+    fn final_auth_failure_reports_pin_or_password_fallback() {
+        let state = ProviderState::new();
+
+        state.apply_wake_outcome(
+            ProviderWakeOutcome::AuthFailed {
+                session_id: SessionId("session-1".to_owned()),
+                auth_failure_reason: common_protocol::AuthFailureReason::LivenessFailed,
+            },
+            3,
+            3,
+            false,
+        );
+
+        assert_eq!(
+            state.credential_status_message(),
+            "Face authentication failed. Use PIN or password fallback"
+        );
+    }
+
+    #[test]
+    fn intermediate_auth_failure_keeps_face_tile_visible_during_retry() {
+        let state = ProviderState::new();
+
+        state.apply_wake_outcome(
+            ProviderWakeOutcome::AuthFailed {
+                session_id: SessionId("session-1".to_owned()),
+                auth_failure_reason: common_protocol::AuthFailureReason::MatchBelowThreshold,
+            },
+            1,
+            3,
+            true,
+        );
+
+        let plan = state.credential_count_plan();
+
+        assert_eq!(plan.credential_count, 1);
+        assert_eq!(
+            plan.default_credential_index,
+            CREDENTIAL_PROVIDER_NO_DEFAULT
+        );
+        assert!(!plan.auto_logon_with_default);
     }
 
     #[test]

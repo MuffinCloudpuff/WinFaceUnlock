@@ -10,7 +10,9 @@ pub use opencv_model::{
     OpenCvYuNetDetectorConfig, OpenCvYuNetDetectorProvider, SFACE_COSINE_MATCH_THRESHOLD,
 };
 pub use template::{
-    FaceTemplate, FaceTemplateCodecError, FaceTemplateMatch, FaceTemplateMatcher, FaceTemplateRef,
+    FacePoseGroup, FaceSampleRejectReason, FaceTemplate, FaceTemplateCodecError, FaceTemplateMatch,
+    FaceTemplateMatcher, FaceTemplateQualityScores, FaceTemplateRef, FaceTemplateSampleMetadata,
+    FaceTemplateSet, FaceTemplateSetQualitySummary, FaceTemplateThresholdProfile,
 };
 pub use types::{
     DetectedFace, FaceBox, FaceDetectionModelProvider, FaceEmbedding, FaceEngineError,

@@ -88,7 +88,7 @@ $env:WINFACEUNLOCK_MAX_AUTH_FRAMES = "30"
 $env:WINFACEUNLOCK_REQUIRED_CONSECUTIVE = "2"
 ```
 
-OpenCV SFace 示例常用 cosine 阈值是 `0.363`，但本项目 Service 主链路当前默认阈值先提高到 `0.55`。如果当前摄像头角度、光照或旧模板导致 Service 链路验收无法通过，可以临时设置较低阈值来验证 IPC 和 Service 编排链路，例如：
+OpenCV SFace 示例常用 cosine 阈值是 `0.363`，但本项目 Service 主链路当前默认阈值已经根据 Phase 5.5 初步校准提高到 `0.75`。如果当前摄像头角度、光照或旧模板导致 Service 链路验收无法通过，可以临时设置较低阈值来验证 IPC 和 Service 编排链路，例如：
 
 ```powershell
 $env:WINFACEUNLOCK_REQUIRED_CONSECUTIVE = "1"
@@ -103,7 +103,7 @@ $env:WINFACEUNLOCK_MATCH_THRESHOLD = "0.10"
 .\target\x86_64-pc-windows-msvc\debug\diagnostics_cli.exe calibrate-threshold --template .\target\phase4-face-template.json --camera-id opencv-index:0 --samples 20 --max-frames 120
 ```
 
-输出会包含 `score_min`、`score_avg`、`score_max`、`score_p10`、`score_p50`、`score_p90`，以及 `0.55`、`0.60`、`0.85` 三个候选阈值的通过帧数。
+输出会包含 `score_min`、`score_avg`、`score_max`、`score_p10`、`score_p50`、`score_p90`，以及 `0.55`、`0.60`、`0.75`、`0.85` 四个候选阈值的通过帧数。
 
 启动一次性 Service IPC host，并让它至少处理 `WakeAuth` 和 `FetchCredential` 两个请求：
 
@@ -162,4 +162,4 @@ opencv-index:1
 8. `calibrate-threshold` 能输出有效分数分布，用于后续阈值收紧。
 9. 命令结束后摄像头被释放；没有常驻占用。
 
-OpenCV SFace 官方示例阈值是 `0.363`，本项目 Service 主链路当前默认使用 `0.55` 作为初步收紧值。如果后续切换量化模型或采集环境变化，需要重新做阈值校准。
+OpenCV SFace 官方示例阈值是 `0.363`，本项目 Service 主链路当前默认使用 `0.75` 作为初步收紧值。如果后续切换量化模型或采集环境变化，需要重新做阈值校准。

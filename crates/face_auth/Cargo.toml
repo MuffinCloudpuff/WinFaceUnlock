@@ -5,9 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = ["enrollment"]
+enrollment = ["dep:face_pose"]
+
 [dependencies]
 common_protocol = { path = "../common_protocol" }
 face_engine = { path = "../face_engine" }
+face_pose = { path = "../face_pose", optional = true }
+serde = { version = "1.0.228", features = ["derive"] }
 video_provider = { path = "../video_provider" }
 
 [lints]

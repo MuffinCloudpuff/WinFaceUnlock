@@ -401,6 +401,22 @@ Phase 4 必须先于 Credential Provider 自动登录实现完成。摄像头、
 
 目标：在 Phase 5 自动登录链路稳定后，强化冷启动、无人登录、资源权限和多账户策略。
 
+进入 Phase 6 前增加 Phase 5.5：Face Auth 可观测性、校准与模型路线复评。原因是 Phase 6 会把真实人脸识别放到更敏感的“开机未登录 / LogonUI 自动登录”场景中，如果当前识别模型、阈值、摄像头分辨率和头部姿态边界没有量化，后续问题会混在 Windows 登录生命周期里难以定位。
+
+Phase 5.5 目标：
+
+1. 给人脸检测和识别链路增加可视化标注输出。
+2. 统计检测成功率、匹配分数分布、连续成功策略和耗时。
+3. 建立正脸、左右偏头、低头抬头、背光、低像素摄像头等场景 sweep。
+4. 复评 YuNet + SFace 是否继续作为 baseline。
+5. 保持 detector 和 recognizer 独立热插拔。
+
+详见：
+
+```text
+docs/PHASE5_5_FACE_AUTH_CALIBRATION.md
+```
+
 任务：
 
 1. Service 设置为开机自动启动。

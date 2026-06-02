@@ -5,12 +5,22 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+mediapipe-pose = ["dep:face_pose_mediapipe", "face_pose_mediapipe/native-bridge"]
+
 [dependencies]
 common_protocol = { path = "../common_protocol" }
-face_auth = { path = "../face_auth" }
+face_auth = { path = "../face_auth", features = ["enrollment"] }
 face_engine = { path = "../face_engine" }
+face_liveness = { path = "../face_liveness" }
+face_pose = { path = "../face_pose" }
+face_pose_mediapipe = { path = "../face_pose_mediapipe", optional = true }
 ipc = { path = "../ipc" }
+minifb = "0.27.0"
+opencv = { version = "0.98.2", default-features = false, features = ["clang-runtime", "imgproc"] }
 rpassword = "7.4.0"
+serde_json = "1.0.145"
 video_provider = { path = "../video_provider" }
 win_service = { path = "../win_service" }
 

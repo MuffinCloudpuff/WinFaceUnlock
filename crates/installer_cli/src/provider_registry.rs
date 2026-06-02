@@ -9,7 +9,7 @@ use std::{
 use windows_provider::{
     COM_CLSID_REGISTRY_PATH, COM_INPROC_SERVER_REGISTRY_PATH, PROVIDER_CLSID_BRACED,
     PROVIDER_CLSID_REGISTRY_PATH, PROVIDER_ROOT_REGISTRY_PATH, REG_VALUE_AUTO_WAKE_ON_ADVISE,
-    REG_VALUE_TILE_VISIBILITY, REG_VALUE_WAKE_AUTH_SOURCE, TILE_VISIBILITY_VISIBLE,
+    REG_VALUE_TILE_VISIBILITY, REG_VALUE_WAKE_AUTH_SOURCE, TILE_VISIBILITY_HIDDEN_UNTIL_READY,
     WAKE_AUTH_SOURCE_LOCAL_CAMERA, WINDOWS_PROVIDER_NAME,
 };
 
@@ -37,10 +37,15 @@ impl ProviderInstallPlan {
             com_clsid_registry_path: COM_CLSID_REGISTRY_PATH,
             com_inproc_server_registry_path: COM_INPROC_SERVER_REGISTRY_PATH,
             project_registry_path: PROVIDER_ROOT_REGISTRY_PATH,
-            tile_visibility: TILE_VISIBILITY_VISIBLE,
-            auto_wake_on_advise: false,
+            tile_visibility: TILE_VISIBILITY_HIDDEN_UNTIL_READY,
+            auto_wake_on_advise: true,
             wake_auth_source: WAKE_AUTH_SOURCE_LOCAL_CAMERA,
         }
+    }
+
+    pub fn with_tile_visibility(mut self, tile_visibility: &'static str) -> Self {
+        self.tile_visibility = tile_visibility;
+        self
     }
 
     pub fn with_auto_wake_on_advise(mut self, auto_wake_on_advise: bool) -> Self {
@@ -373,6 +378,8 @@ mod tests {
 
         assert_eq!(plan.provider_name, WINDOWS_PROVIDER_NAME);
         assert_eq!(plan.provider_clsid, PROVIDER_CLSID_BRACED);
+        assert_eq!(plan.tile_visibility, TILE_VISIBILITY_HIDDEN_UNTIL_READY);
+        assert!(plan.auto_wake_on_advise);
         assert!(
             plan.credential_provider_registry_path
                 .contains(PROVIDER_CLSID_BRACED)

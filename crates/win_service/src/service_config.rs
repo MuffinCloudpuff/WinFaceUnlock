@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use common_protocol::ProtocolError;
+use face_liveness::MiniFasNetLivenessProviderConfig;
 use video_provider::{CameraId, OpenCvCameraProviderConfig};
 
 const ENV_AUTH_MODE: &str = "WINFACEUNLOCK_AUTH_MODE";
@@ -8,6 +9,11 @@ const ENV_FACE_TEMPLATE_PATH: &str = "WINFACEUNLOCK_FACE_TEMPLATE_PATH";
 const ENV_CAMERA_ID: &str = "WINFACEUNLOCK_CAMERA_ID";
 const ENV_YUNET_MODEL_PATH: &str = "WINFACEUNLOCK_YUNET_MODEL_PATH";
 const ENV_SFACE_MODEL_PATH: &str = "WINFACEUNLOCK_SFACE_MODEL_PATH";
+const ENV_MINIFASNET_MODEL_PATH: &str = "WINFACEUNLOCK_MINIFASNET_MODEL_PATH";
+const ENV_MINIFASNET_CROP_SCALE: &str = "WINFACEUNLOCK_MINIFASNET_CROP_SCALE";
+const ENV_MINIFASNET_MIN_LIVE_SCORE: &str = "WINFACEUNLOCK_MINIFASNET_MIN_LIVE_SCORE";
+const ENV_MINIFASNET_MIN_SPOOF_SCORE: &str = "WINFACEUNLOCK_MINIFASNET_MIN_SPOOF_SCORE";
+const ENV_MINIFASNET_MAX_SPOOF_FRAME_RATIO: &str = "WINFACEUNLOCK_MINIFASNET_MAX_SPOOF_FRAME_RATIO";
 const ENV_FRAME_WIDTH: &str = "WINFACEUNLOCK_FRAME_WIDTH";
 const ENV_FRAME_HEIGHT: &str = "WINFACEUNLOCK_FRAME_HEIGHT";
 const ENV_MAX_AUTH_FRAMES: &str = "WINFACEUNLOCK_MAX_AUTH_FRAMES";
@@ -19,6 +25,11 @@ const REG_FACE_TEMPLATE_PATH: &str = "FaceTemplatePath";
 const REG_CAMERA_ID: &str = "CameraId";
 const REG_YUNET_MODEL_PATH: &str = "YuNetModelPath";
 const REG_SFACE_MODEL_PATH: &str = "SFaceModelPath";
+const REG_MINIFASNET_MODEL_PATH: &str = "MiniFasNetModelPath";
+const REG_MINIFASNET_CROP_SCALE: &str = "MiniFasNetCropScale";
+const REG_MINIFASNET_MIN_LIVE_SCORE: &str = "MiniFasNetMinLiveScore";
+const REG_MINIFASNET_MIN_SPOOF_SCORE: &str = "MiniFasNetMinSpoofScore";
+const REG_MINIFASNET_MAX_SPOOF_FRAME_RATIO: &str = "MiniFasNetMaxSpoofFrameRatio";
 const REG_FRAME_WIDTH: &str = "FrameWidth";
 const REG_FRAME_HEIGHT: &str = "FrameHeight";
 const REG_MAX_AUTH_FRAMES: &str = "MaxAuthFrames";
@@ -29,10 +40,15 @@ const AUTH_MODE_MANUAL_TEST: &str = "manual-test";
 const AUTH_MODE_LOCAL_CAMERA: &str = "local-camera";
 const DEFAULT_YUNET_MODEL_PATH: &str = "models/face_detection_yunet_2023mar.onnx";
 const DEFAULT_SFACE_MODEL_PATH: &str = "models/face_recognition_sface_2021dec.onnx";
+const DEFAULT_MINIFASNET_MODEL_PATH: &str = "models/minifasnet_v2.onnx";
+const DEFAULT_MINIFASNET_CROP_SCALE: f32 = 2.7;
+const DEFAULT_MINIFASNET_MIN_LIVE_SCORE: f32 = 0.80;
+const DEFAULT_MINIFASNET_MIN_SPOOF_SCORE: f32 = 0.70;
+const DEFAULT_MINIFASNET_MAX_SPOOF_FRAME_RATIO: f32 = 0.40;
 const DEFAULT_MAX_AUTH_FRAMES: u32 = 30;
 const DEFAULT_REQUIRED_CONSECUTIVE_MATCH_COUNT: u32 = 2;
 const DEFAULT_MAX_CAMERA_INDEX: u32 = 8;
-const DEFAULT_SERVICE_FACE_MATCH_THRESHOLD: f32 = 0.55;
+const DEFAULT_SERVICE_FACE_MATCH_THRESHOLD: f32 = 0.75;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServiceAuthConfig {
@@ -42,7 +58,7 @@ pub struct ServiceAuthConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ServiceAuthMode {
     ManualTestOnly,
-    LocalCamera(LocalCameraAuthConfig),
+    LocalCamera(Box<LocalCameraAuthConfig>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -52,6 +68,8 @@ pub struct LocalCameraAuthConfig {
     pub camera_config: OpenCvCameraProviderConfig,
     pub yunet_model_path: PathBuf,
     pub sface_model_path: PathBuf,
+    pub minifasnet_config: MiniFasNetLivenessProviderConfig,
+    pub minifasnet_max_spoof_frame_ratio: f32,
     pub max_auth_frames: u32,
     pub required_consecutive_match_count: u32,
     pub match_threshold: f32,
@@ -75,7 +93,7 @@ impl ServiceAuthConfig {
                 auth_mode: ServiceAuthMode::ManualTestOnly,
             }),
             AUTH_MODE_LOCAL_CAMERA => Ok(Self {
-                auth_mode: ServiceAuthMode::LocalCamera(LocalCameraAuthConfig {
+                auth_mode: ServiceAuthMode::LocalCamera(Box::new(LocalCameraAuthConfig {
                     face_template_path: required_path(&mut lookup, ENV_FACE_TEMPLATE_PATH)?,
                     camera_id: CameraId(
                         lookup(ENV_CAMERA_ID).unwrap_or_else(|| CameraId::from_index(0).0),
@@ -95,6 +113,27 @@ impl ServiceAuthConfig {
                         ENV_SFACE_MODEL_PATH,
                         DEFAULT_SFACE_MODEL_PATH,
                     ),
+                    minifasnet_config: MiniFasNetLivenessProviderConfig {
+                        model_path: optional_path_or_default(
+                            &mut lookup,
+                            ENV_MINIFASNET_MODEL_PATH,
+                            DEFAULT_MINIFASNET_MODEL_PATH,
+                        ),
+                        crop_scale: optional_f32(&mut lookup, ENV_MINIFASNET_CROP_SCALE)?
+                            .unwrap_or(DEFAULT_MINIFASNET_CROP_SCALE),
+                        input_width: 80,
+                        input_height: 80,
+                        min_live_score: optional_f32(&mut lookup, ENV_MINIFASNET_MIN_LIVE_SCORE)?
+                            .unwrap_or(DEFAULT_MINIFASNET_MIN_LIVE_SCORE),
+                        min_spoof_score: optional_f32(&mut lookup, ENV_MINIFASNET_MIN_SPOOF_SCORE)?
+                            .unwrap_or(DEFAULT_MINIFASNET_MIN_SPOOF_SCORE),
+                        reject_on_model_spoof: true,
+                    },
+                    minifasnet_max_spoof_frame_ratio: optional_f32(
+                        &mut lookup,
+                        ENV_MINIFASNET_MAX_SPOOF_FRAME_RATIO,
+                    )?
+                    .unwrap_or(DEFAULT_MINIFASNET_MAX_SPOOF_FRAME_RATIO),
                     max_auth_frames: optional_u32(&mut lookup, ENV_MAX_AUTH_FRAMES)?
                         .unwrap_or(DEFAULT_MAX_AUTH_FRAMES),
                     required_consecutive_match_count: optional_u32(
@@ -104,7 +143,7 @@ impl ServiceAuthConfig {
                     .unwrap_or(DEFAULT_REQUIRED_CONSECUTIVE_MATCH_COUNT),
                     match_threshold: optional_f32(&mut lookup, ENV_MATCH_THRESHOLD)?
                         .unwrap_or(DEFAULT_SERVICE_FACE_MATCH_THRESHOLD),
-                }),
+                })),
             }),
             _ => Err(ProtocolError::InvalidMessage),
         }
@@ -125,6 +164,11 @@ fn registry_value_name(env_name: &'static str) -> Option<&'static str> {
         ENV_CAMERA_ID => Some(REG_CAMERA_ID),
         ENV_YUNET_MODEL_PATH => Some(REG_YUNET_MODEL_PATH),
         ENV_SFACE_MODEL_PATH => Some(REG_SFACE_MODEL_PATH),
+        ENV_MINIFASNET_MODEL_PATH => Some(REG_MINIFASNET_MODEL_PATH),
+        ENV_MINIFASNET_CROP_SCALE => Some(REG_MINIFASNET_CROP_SCALE),
+        ENV_MINIFASNET_MIN_LIVE_SCORE => Some(REG_MINIFASNET_MIN_LIVE_SCORE),
+        ENV_MINIFASNET_MIN_SPOOF_SCORE => Some(REG_MINIFASNET_MIN_SPOOF_SCORE),
+        ENV_MINIFASNET_MAX_SPOOF_FRAME_RATIO => Some(REG_MINIFASNET_MAX_SPOOF_FRAME_RATIO),
         ENV_FRAME_WIDTH => Some(REG_FRAME_WIDTH),
         ENV_FRAME_HEIGHT => Some(REG_FRAME_HEIGHT),
         ENV_MAX_AUTH_FRAMES => Some(REG_MAX_AUTH_FRAMES),
@@ -207,6 +251,11 @@ mod tests {
             (ENV_CAMERA_ID, "opencv-index:2"),
             (ENV_YUNET_MODEL_PATH, r"D:\models\yunet.onnx"),
             (ENV_SFACE_MODEL_PATH, r"D:\models\sface.onnx"),
+            (ENV_MINIFASNET_MODEL_PATH, r"D:\models\minifasnet.onnx"),
+            (ENV_MINIFASNET_CROP_SCALE, "1.3"),
+            (ENV_MINIFASNET_MIN_LIVE_SCORE, "0.81"),
+            (ENV_MINIFASNET_MIN_SPOOF_SCORE, "0.71"),
+            (ENV_MINIFASNET_MAX_SPOOF_FRAME_RATIO, "0.45"),
             (ENV_FRAME_WIDTH, "640"),
             (ENV_FRAME_HEIGHT, "480"),
             (ENV_MAX_AUTH_FRAMES, "12"),
@@ -234,6 +283,15 @@ mod tests {
         assert_eq!(local_camera.max_auth_frames, 12);
         assert_eq!(local_camera.required_consecutive_match_count, 3);
         assert_eq!(local_camera.match_threshold, 0.42);
+        assert_eq!(
+            local_camera.minifasnet_config.model_path,
+            PathBuf::from(r"D:\models\minifasnet.onnx")
+        );
+        assert_eq!(local_camera.minifasnet_config.crop_scale, 1.3);
+        assert_eq!(local_camera.minifasnet_config.min_live_score, 0.81);
+        assert_eq!(local_camera.minifasnet_config.min_spoof_score, 0.71);
+        assert_eq!(local_camera.minifasnet_max_spoof_frame_ratio, 0.45);
+        assert!(local_camera.minifasnet_config.reject_on_model_spoof);
         Ok(())
     }
 
@@ -265,6 +323,18 @@ mod tests {
         assert_eq!(
             local_camera.match_threshold,
             DEFAULT_SERVICE_FACE_MATCH_THRESHOLD
+        );
+        assert_eq!(
+            local_camera.minifasnet_config.model_path,
+            PathBuf::from(DEFAULT_MINIFASNET_MODEL_PATH)
+        );
+        assert_eq!(
+            local_camera.minifasnet_config.crop_scale,
+            DEFAULT_MINIFASNET_CROP_SCALE
+        );
+        assert_eq!(
+            local_camera.minifasnet_max_spoof_frame_ratio,
+            DEFAULT_MINIFASNET_MAX_SPOOF_FRAME_RATIO
         );
         Ok(())
     }

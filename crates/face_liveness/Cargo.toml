@@ -1,0 +1,15 @@
+[package]
+name = "face_liveness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+face_engine = { path = "../face_engine" }
+opencv = { version = "0.98.2", default-features = false, features = ["clang-runtime", "dnn", "imgcodecs", "imgproc"] }
+serde = { version = "1.0.228", features = ["derive"] }
+video_provider = { path = "../video_provider" }
+
+[lints]
+workspace = true

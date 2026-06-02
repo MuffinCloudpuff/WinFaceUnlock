@@ -1,7 +1,7 @@
 use common_protocol::{AuthFailureReason, UserId};
 use face_engine::{
-    FaceEngineError, FaceMatchDecision, FaceModelDescriptor, FaceModelProvider, FaceTemplate,
-    FaceTemplateMatch, FaceTemplateMatcher,
+    DetectedFace, FaceEngineError, FaceMatchDecision, FaceModelDescriptor, FaceModelProvider,
+    FaceTemplate, FaceTemplateMatch, FaceTemplateMatcher,
 };
 use video_provider::VideoFrame;
 
@@ -37,6 +37,7 @@ pub struct AuthenticationOutcome {
     pub matched_user_id: UserId,
     pub match_score: f32,
     pub matched_template: FaceTemplateMatch,
+    pub matched_pose_group: face_engine::FacePoseGroup,
 }
 
 pub struct FaceAuthenticator<M> {
@@ -67,6 +68,59 @@ where
         templates: &RecognitionTemplates,
         current_time_unix_ms: i64,
     ) -> Result<AuthenticationOutcome, AuthFailureReason> {
+        self.validate_authentication_preconditions(templates, current_time_unix_ms)?;
+        let detected_face = self.detect_single_face(frame)?;
+        self.authenticate_detected_face_after_preconditions(
+            frame,
+            &detected_face,
+            templates,
+            current_time_unix_ms,
+        )
+    }
+
+    pub fn detect_single_face(
+        &mut self,
+        frame: &VideoFrame,
+    ) -> Result<DetectedFace, AuthFailureReason> {
+        let faces = self
+            .model_provider
+            .detect(frame)
+            .map_err(face_engine_error_to_auth_failure)?;
+        if faces.is_empty() {
+            return Err(AuthFailureReason::NoFaceDetected);
+        }
+        if faces.len() > 1 {
+            return Err(AuthFailureReason::MultipleFacesDetected);
+        }
+
+        Ok(faces[0].clone())
+    }
+
+    pub fn authenticate_detected_face(
+        &mut self,
+        frame: &VideoFrame,
+        detected_face: &DetectedFace,
+        templates: &RecognitionTemplates,
+        current_time_unix_ms: i64,
+    ) -> Result<AuthenticationOutcome, AuthFailureReason> {
+        self.validate_authentication_preconditions(templates, current_time_unix_ms)?;
+        self.authenticate_detected_face_after_preconditions(
+            frame,
+            detected_face,
+            templates,
+            current_time_unix_ms,
+        )
+    }
+
+    pub fn reset_consecutive_matches(&mut self) {
+        self.attempt_policy.reset_consecutive_matches();
+    }
+
+    fn validate_authentication_preconditions(
+        &mut self,
+        templates: &RecognitionTemplates,
+        current_time_unix_ms: i64,
+    ) -> Result<(), AuthFailureReason> {
         if templates.is_empty() {
             return Err(AuthFailureReason::InternalError);
         }
@@ -77,9 +131,20 @@ where
         if !templates.has_compatible_template(&recognition_model) {
             return Err(AuthFailureReason::TemplateModelMismatch);
         }
+        Ok(())
+    }
 
+    fn authenticate_detected_face_after_preconditions(
+        &mut self,
+        frame: &VideoFrame,
+        detected_face: &DetectedFace,
+        templates: &RecognitionTemplates,
+        current_time_unix_ms: i64,
+    ) -> Result<AuthenticationOutcome, AuthFailureReason> {
+        let recognition_model = self.model_provider.recognition_model().clone();
         let candidate = self
-            .extract_single_face_embedding(frame)
+            .model_provider
+            .extract(frame, detected_face)
             .map_err(face_engine_error_to_auth_failure)?;
         let Some(best_match) = self.matcher.best_compatible_match(
             templates.as_slice(),
@@ -104,6 +169,7 @@ where
             AttemptPolicyDecision::AuthenticationAccepted => Ok(AuthenticationOutcome {
                 matched_user_id: UserId(best_match.user_id.clone()),
                 match_score: best_match.score,
+                matched_pose_group: best_match.pose_group,
                 matched_template: best_match,
             }),
             AttemptPolicyDecision::NeedMoreConsecutiveMatches => {
@@ -114,21 +180,6 @@ where
             }
             AttemptPolicyDecision::CooldownActivated => Err(AuthFailureReason::CooldownActive),
         }
-    }
-
-    fn extract_single_face_embedding(
-        &mut self,
-        frame: &VideoFrame,
-    ) -> Result<face_engine::FaceEmbedding, FaceEngineError> {
-        let faces = self.model_provider.detect(frame)?;
-        if faces.is_empty() {
-            return Err(FaceEngineError::NoFaceDetected);
-        }
-        if faces.len() > 1 {
-            return Err(FaceEngineError::MultipleFacesDetected);
-        }
-
-        self.model_provider.extract(frame, &faces[0])
     }
 }
 
@@ -204,6 +255,9 @@ mod tests {
             user_id: "user-1".to_owned(),
             model_family: "other-recognizer".to_owned(),
             model_version: "v2".to_owned(),
+            pose_group: face_engine::FacePoseGroup::FrontalPrimary,
+            selected_for_unlock: true,
+            quality_score: None,
             embedding: FaceEmbedding { values: vec![1.0] },
         }]);
         let matcher = FaceTemplateMatcher::new(0.55);
