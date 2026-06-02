@@ -419,11 +419,11 @@ docs/PHASE5_5_FACE_AUTH_CALIBRATION.md
 
 任务：
 
-1. Service 设置为开机自动启动。
+1. Service 设置为开机非延迟自动启动，避免 LogonUI 已加载但 Service 仍未就绪。
 2. 验证 LocalSystem 下可访问 Credential Store。
 3. 验证登录界面可使用本地摄像头。
 4. 验证模型资源路径在未登录时可读。
-5. 验证 Provider 与 Service 的会话绑定。
+5. 验证 Provider 与 Service 的会话绑定；Provider 在 Service 尚未就绪时必须后台重试，而不是直接放弃本次开机自动登录。
 6. 实现多账户选择策略。
 7. 实现失败后回退手动密码。
 8. 实现开机后首次必须手动密码的可选策略。

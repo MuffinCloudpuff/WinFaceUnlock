@@ -29,6 +29,8 @@ use crate::{
 
 const AUTOMATIC_WAKE_ATTEMPT_LIMIT: u32 = 3;
 const AUTOMATIC_WAKE_RETRY_DELAY_MS: u64 = 600;
+const TRANSPORT_WAKE_ATTEMPT_LIMIT: u32 = 20;
+const TRANSPORT_WAKE_RETRY_DELAY_MS: u64 = 1_000;
 
 #[implement(ICredentialProvider)]
 pub struct WinFaceUnlockProvider {
@@ -163,7 +165,11 @@ pub(crate) fn request_wake_in_background(state: Arc<ProviderState>, trigger_name
                         .mark_automatic_retry_started(attempt_number, AUTOMATIC_WAKE_ATTEMPT_LIMIT);
                 }
 
-                match broker_client.wake_and_fetch_credential_material(session_id.clone()) {
+                match wake_and_fetch_with_transport_retry(
+                    &broker_client,
+                    session_id.clone(),
+                    TRANSPORT_WAKE_ATTEMPT_LIMIT,
+                ) {
                     Ok(outcome) => {
                         let automatic_retry_pending =
                             matches!(&outcome, ProviderWakeOutcome::AuthFailed { .. })
@@ -199,6 +205,30 @@ pub(crate) fn request_wake_in_background(state: Arc<ProviderState>, trigger_name
             AUTOMATIC_WAKE_ATTEMPT_LIMIT,
         );
     }
+}
+
+fn wake_and_fetch_with_transport_retry(
+    broker_client: &ProviderBrokerClient,
+    session_id: common_protocol::SessionId,
+    transport_attempt_limit: u32,
+) -> std::result::Result<ProviderWakeOutcome, ProtocolError> {
+    for transport_attempt_number in 1..=transport_attempt_limit {
+        match broker_client.wake_and_fetch_credential_material(session_id.clone()) {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) if transport_attempt_number < transport_attempt_limit => {
+                write_provider_event_detail(
+                    "Provider.WakeTransportRetry",
+                    format!(
+                        "attempt={transport_attempt_number}/{transport_attempt_limit} error={error:?}"
+                    ),
+                );
+                thread::sleep(Duration::from_millis(TRANSPORT_WAKE_RETRY_DELAY_MS));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(ProtocolError::TransportUnavailable)
 }
 
 #[cfg(test)]

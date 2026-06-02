@@ -141,6 +141,9 @@ Provider-side risk controls:
 - `Advise` and `SetSelected` must return quickly; camera/auth work runs in a background
   worker and uses an agile COM reference only to notify `CredentialsChanged` after the
   Service returns.
+- Cold boot can load LogonUI before the Service pipe is ready. Provider transport failures
+  therefore retry in the background for a short window instead of failing the first wake
+  immediately.
 - Wake failures enter a short retry cooldown instead of immediately looping through
   repeated `CredentialsChanged` / wake attempts.
 - Debug output for credential material redacts plaintext password bytes and protected
@@ -228,6 +231,21 @@ failure it stops retrying and leaves Windows PIN or password sign-in available.
 .\installer_cli.exe install-service --start
 .\installer_cli.exe install-provider --provider-binary C:\WinFaceUnlock\windows_provider.dll
 .\installer_cli.exe provider-status
+```
+
+For Phase 6 cold-boot validation, the Service must be normal `AUTO_START`, not delayed
+auto-start. `repair-service` writes this metadata. Verify with:
+
+```powershell
+sc.exe qc WinFaceUnlockService
+reg query HKLM\SYSTEM\CurrentControlSet\Services\WinFaceUnlockService /v DelayedAutoStart
+```
+
+Expected:
+
+```text
+START_TYPE         : 2   AUTO_START
+DelayedAutoStart   REG_DWORD    0x0
 ```
 
 If the VM has no camera, install the Provider with simulated wake auth:

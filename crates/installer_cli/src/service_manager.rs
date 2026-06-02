@@ -170,7 +170,7 @@ fn configure_service_metadata(
     service: &windows_service::service::Service,
 ) -> Result<(), InstallerError> {
     service.set_description(SERVICE_DESCRIPTION)?;
-    service.set_delayed_auto_start(true)?;
+    service.set_delayed_auto_start(false)?;
     service.update_failure_actions(ServiceFailureActions {
         reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 60 * 60)),
         reboot_msg: None,
