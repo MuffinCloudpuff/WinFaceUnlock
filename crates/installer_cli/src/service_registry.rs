@@ -19,9 +19,12 @@ const REG_FRAME_HEIGHT: &str = "FrameHeight";
 const REG_MAX_AUTH_FRAMES: &str = "MaxAuthFrames";
 const REG_REQUIRED_CONSECUTIVE: &str = "RequiredConsecutiveMatchCount";
 const REG_MATCH_THRESHOLD: &str = "MatchThreshold";
+const REG_PRESENCE_LOCK_ENABLED: &str = "PresenceLockEnabled";
+const REG_PRESENCE_OWNER_MATCH_THRESHOLD: &str = "PresenceOwnerMatchThreshold";
 
 const AUTH_MODE_LOCAL_CAMERA: &str = "local-camera";
 const DEFAULT_SERVICE_FACE_MATCH_THRESHOLD: f32 = 0.75;
+const DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD: f32 = 0.50;
 const DEFAULT_MINIFASNET_MODEL_PATH: &str = r"models\minifasnet_v2.onnx";
 const DEFAULT_MINIFASNET_CROP_SCALE: f32 = 2.7;
 const DEFAULT_MINIFASNET_MIN_LIVE_SCORE: f32 = 0.80;
@@ -45,6 +48,8 @@ pub struct ServiceAuthRegistryConfig {
     pub max_auth_frames: u32,
     pub required_consecutive_match_count: u32,
     pub match_threshold: f32,
+    pub presence_lock_enabled: bool,
+    pub presence_owner_match_threshold: f32,
 }
 
 impl ServiceAuthRegistryConfig {
@@ -69,6 +74,8 @@ impl ServiceAuthRegistryConfig {
             max_auth_frames: 30,
             required_consecutive_match_count: 2,
             match_threshold: DEFAULT_SERVICE_FACE_MATCH_THRESHOLD,
+            presence_lock_enabled: true,
+            presence_owner_match_threshold: DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD,
         }
     }
 }
@@ -82,6 +89,8 @@ pub struct ServiceAuthRegistryStatus {
     pub match_threshold: Option<String>,
     pub minifasnet_model_path: Option<String>,
     pub minifasnet_max_spoof_frame_ratio: Option<String>,
+    pub presence_lock_enabled: Option<String>,
+    pub presence_owner_match_threshold: Option<String>,
 }
 
 pub struct ServiceAuthRegistry;
@@ -157,6 +166,16 @@ impl ServiceAuthRegistry {
             REG_MATCH_THRESHOLD,
             &config.match_threshold.to_string(),
         )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_LOCK_ENABLED,
+            bool_registry_value(config.presence_lock_enabled),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_OWNER_MATCH_THRESHOLD,
+            &config.presence_owner_match_threshold.to_string(),
+        )?;
         Ok(())
     }
 
@@ -181,8 +200,20 @@ impl ServiceAuthRegistry {
                 SERVICE_CONFIG_REGISTRY_PATH,
                 REG_MINIFASNET_MAX_SPOOF_FRAME_RATIO,
             ),
+            presence_lock_enabled: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_LOCK_ENABLED,
+            ),
+            presence_owner_match_threshold: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_OWNER_MATCH_THRESHOLD,
+            ),
         }
     }
+}
+
+fn bool_registry_value(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
 }
 
 fn set_optional_u32(
@@ -422,6 +453,11 @@ mod tests {
         assert_eq!(config.camera_id, "opencv-index:0");
         assert_eq!(config.required_consecutive_match_count, 2);
         assert_eq!(config.match_threshold, DEFAULT_SERVICE_FACE_MATCH_THRESHOLD);
+        assert!(config.presence_lock_enabled);
+        assert_eq!(
+            config.presence_owner_match_threshold,
+            DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD
+        );
         assert_eq!(
             config.minifasnet_model_path,
             PathBuf::from(DEFAULT_MINIFASNET_MODEL_PATH)

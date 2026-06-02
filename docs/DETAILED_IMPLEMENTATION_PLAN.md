@@ -437,6 +437,28 @@ docs/PHASE5_5_FACE_AUTH_CALIBRATION.md
 5. 认证失败不影响手动密码或 PIN 登录。
 6. 可安全卸载恢复。
 
+### Phase 6.5：Presence Lock 离座自动锁屏
+
+目标：用户已登录桌面后，低频检测当前用户是否仍在电脑前；连续无脸或连续检测到非本人时自动锁屏。
+
+这个阶段不属于登录认证链路，不触碰 Credential Provider、Credential Store、Windows 密码或 `AuthGrant`。它只在已登录桌面阶段运行，通过独立的 `presence_monitor`、`presence_policy`、`presence_audit`、`session_lock` 和 `camera_lease` 模块实现。
+
+默认策略：
+
+1. 检测到本人时，采样间隔从 10 秒逐步拉长到 30 秒和 60 秒。
+2. 连续 3 次无脸时自动锁屏，无脸检测间隔为 10 秒。
+3. 首次检测到人脸但低于 Presence 阈值时立即保存本地审计记录。
+4. 屏幕截图审计使用独立开关，默认开启；首次未知人脸低匹配时保存一次当前屏幕截图，用户可显式关闭。
+5. 进入未知人脸怀疑状态后，按 1 秒间隔检测；连续 3 次低匹配时自动锁屏。
+6. 摄像头不可用时不锁屏，避免和视频会议或诊断工具冲突。
+7. 第一版默认关闭，通过 CLI 和配置显式开启。
+
+详见：
+
+```text
+docs/PHASE6_5_PRESENCE_LOCK.md
+```
+
 ## 十一、Phase 7：安装、卸载和恢复
 
 目标：避免系统进不去。

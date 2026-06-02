@@ -62,6 +62,14 @@ where
         }
     }
 
+    pub fn load_models(&mut self) -> Result<(), FaceEngineError> {
+        self.model_provider.load_models()
+    }
+
+    pub fn unload_models(&mut self) {
+        self.model_provider.unload_models();
+    }
+
     pub fn authenticate_frame(
         &mut self,
         frame: &VideoFrame,
@@ -198,6 +206,8 @@ fn face_engine_error_to_auth_failure(error: FaceEngineError) -> AuthFailureReaso
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, rc::Rc};
+
     use face_engine::{
         DetectedFace, FaceEmbedding, FaceMatch, FaceMatchDecision, FaceModelDescriptor,
         FaceTemplateRef,
@@ -209,14 +219,20 @@ mod tests {
 
     struct StubModelProvider {
         recognition_model: FaceModelDescriptor,
+        load_count: Rc<Cell<u32>>,
+        unload_count: Rc<Cell<u32>>,
     }
 
     impl FaceModelProvider for StubModelProvider {
         fn load_models(&mut self) -> Result<(), FaceEngineError> {
+            self.load_count.set(self.load_count.get().saturating_add(1));
             Ok(())
         }
 
-        fn unload_models(&mut self) {}
+        fn unload_models(&mut self) {
+            self.unload_count
+                .set(self.unload_count.get().saturating_add(1));
+        }
 
         fn recognition_model(&self) -> &FaceModelDescriptor {
             &self.recognition_model
@@ -244,12 +260,10 @@ mod tests {
 
     #[test]
     fn rejects_template_from_another_recognition_model_before_inference() {
-        let provider = StubModelProvider {
-            recognition_model: FaceModelDescriptor {
-                model_family: "sface".to_owned(),
-                model_version: "2021dec".to_owned(),
-            },
-        };
+        let (provider, _, _) = stub_model_provider(FaceModelDescriptor {
+            model_family: "sface".to_owned(),
+            model_version: "2021dec".to_owned(),
+        });
         let templates = RecognitionTemplates::new(vec![FaceTemplate {
             template_ref: FaceTemplateRef("face-1".to_owned()),
             user_id: "user-1".to_owned(),
@@ -273,5 +287,40 @@ mod tests {
         let result = authenticator.authenticate_frame(&frame, &templates, 1_000);
 
         assert_eq!(result, Err(AuthFailureReason::TemplateModelMismatch));
+    }
+
+    #[test]
+    fn load_and_unload_delegate_to_model_provider() -> Result<(), FaceEngineError> {
+        let (provider, load_count, unload_count) = stub_model_provider(FaceModelDescriptor {
+            model_family: "sface".to_owned(),
+            model_version: "2021dec".to_owned(),
+        });
+        let matcher = FaceTemplateMatcher::new(0.55);
+        let policy = AttemptPolicy::new(AttemptPolicyConfig::default());
+        let mut authenticator = FaceAuthenticator::new(provider, matcher, policy);
+
+        authenticator.load_models()?;
+        authenticator.unload_models();
+
+        assert_eq!(load_count.get(), 1);
+        assert_eq!(unload_count.get(), 1);
+
+        Ok(())
+    }
+
+    fn stub_model_provider(
+        recognition_model: FaceModelDescriptor,
+    ) -> (StubModelProvider, Rc<Cell<u32>>, Rc<Cell<u32>>) {
+        let load_count = Rc::new(Cell::new(0));
+        let unload_count = Rc::new(Cell::new(0));
+        (
+            StubModelProvider {
+                recognition_model,
+                load_count: Rc::clone(&load_count),
+                unload_count: Rc::clone(&unload_count),
+            },
+            load_count,
+            unload_count,
+        )
     }
 }

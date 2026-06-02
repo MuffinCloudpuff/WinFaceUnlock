@@ -15,8 +15,9 @@ use face_auth::{
     GuidedFrameObservation, RecognitionTemplates, build_guided_enrollment_report,
 };
 use face_engine::{
-    FaceEngineError, FaceModelProvider, FaceTemplate, FaceTemplateCodecError, FaceTemplateMatcher,
-    FaceTemplateRef, FaceTemplateSet, OpenCvFaceModelConfig, OpenCvFaceModelProvider,
+    FaceEngineError, FaceMatchDecision, FaceModelProvider, FaceTemplate, FaceTemplateCodecError,
+    FaceTemplateMatcher, FaceTemplateRef, FaceTemplateSet, OpenCvFaceModelConfig,
+    OpenCvFaceModelProvider,
 };
 use face_liveness::{MiniFasNetLivenessProviderConfig, ScreenReplayLivenessProviderConfig};
 use face_pose::{FacePoseProvider, LandmarkFacePoseProvider};
@@ -30,6 +31,21 @@ use video_provider::{CameraId, OpenCvCameraProvider, VideoError, VideoFrameProvi
 use win_service::credential_store_config::{
     ServiceCredentialStorePaths, WindowsCredentialEnrollment, enroll_windows_credential,
 };
+use win_service::presence_audit::{PresenceAuditConfig, PresenceAuditStore, UnknownFaceAuditEvent};
+use win_service::presence_camera::{
+    CameraPresenceObservationConfig, CameraPresenceObservationSource,
+};
+use win_service::presence_helper::{
+    LocalProcessPresenceHelper, PresenceHelperClient, PresenceHelperRequest, PresenceHelperResponse,
+};
+use win_service::presence_monitor::{
+    PresenceMonitor, PresenceMonitorConfig, PresenceMonitorError, PresenceObservationSource,
+    UnknownFaceAuditSink,
+};
+use win_service::presence_policy::{
+    PresenceObservation, PresencePolicy, PresencePolicyConfig, PresencePolicyDecision,
+};
+use win_service::session_lock::{SessionLockError, SessionLocker};
 
 use crate::face_calibration::{FaceCalibrationConfig, FaceCalibrationError, run_face_calibration};
 use crate::face_debug_snapshot::{
@@ -46,6 +62,7 @@ const DEFAULT_YUNET_MODEL_PATH: &str = "models/face_detection_yunet_2023mar.onnx
 const DEFAULT_SFACE_MODEL_PATH: &str = "models/face_recognition_sface_2021dec.onnx";
 const DEFAULT_MINIFASNET_MODEL_PATH: &str = "models/minifasnet_v2.onnx";
 const DEFAULT_PROJECT_FACE_MATCH_THRESHOLD: f32 = 0.75;
+const DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD: f32 = 0.50;
 #[cfg(feature = "mediapipe-pose")]
 const DEFAULT_MEDIAPIPE_BRIDGE_DLL_PATH: &str = "native/winfaceunlock_mediapipe_bridge.dll";
 #[cfg(feature = "mediapipe-pose")]
@@ -248,6 +265,19 @@ pub fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<(), Diagn
         run_liveness_screen_debug_command(&args)?;
     } else if args.iter().any(|arg| arg == "threshold-preview") {
         run_threshold_preview_command(&args)?;
+    } else if args.iter().any(|arg| arg == "presence-check-once") {
+        run_presence_check_once(&args)?;
+    } else if args.iter().any(|arg| arg == "presence-policy-simulate") {
+        run_presence_policy_simulate(&args)?;
+    } else if args.iter().any(|arg| arg == "presence-monitor-simulate") {
+        run_presence_monitor_simulate(&args)?;
+    } else if args
+        .iter()
+        .any(|arg| arg == "presence-monitor-camera-debug")
+    {
+        run_presence_monitor_camera_debug(&args)?;
+    } else if args.iter().any(|arg| arg == "screen-snapshot-debug") {
+        run_screen_snapshot_debug(&args)?;
     } else if args.iter().any(|arg| arg == "face-auth-debug") {
         run_face_auth_debug(&args)?;
     } else if args.iter().any(|arg| arg == "verify-face") {
@@ -1067,6 +1097,428 @@ fn guided_observation_passes_pose_gate(
         && observation.pose_fit_score >= pose_ready_min_fit_score
 }
 
+fn run_presence_check_once(args: &[String]) -> Result<(), DiagnosticError> {
+    let template_path =
+        argument_value(args, "--template").ok_or(DiagnosticError::InvalidArgument)?;
+    let threshold =
+        optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD);
+    let templates = read_recognition_templates(template_path)?;
+
+    let mut camera_provider = build_camera_provider(args)?;
+    let sources = camera_provider.list_sources()?;
+    let camera_id = selected_camera_id(args, &sources)?;
+    camera_provider.open(&camera_id)?;
+    let frame = camera_provider.read_frame();
+    camera_provider.close();
+    let frame = frame?;
+
+    let mut model_provider = build_loaded_model_provider_with_threshold(args, threshold)?;
+    let faces = model_provider.detect(&frame)?;
+    println!("presence_frame_captured: true");
+    println!("camera_id: {}", camera_id.0);
+    println!("detected_face_count: {}", faces.len());
+
+    if faces.is_empty() {
+        print_presence_observation_and_decision(
+            PresenceObservation::NoFaceDetected,
+            threshold,
+            None,
+        );
+        return Ok(());
+    }
+
+    if faces.len() > 1 {
+        print_presence_observation_and_decision(
+            PresenceObservation::UnknownFace {
+                owner_match_score: 0.0,
+            },
+            threshold,
+            None,
+        );
+        return Ok(());
+    }
+
+    let detected_face = &faces[0];
+    let candidate = model_provider.extract(&frame, detected_face)?;
+    let matcher = FaceTemplateMatcher::new(threshold);
+    let recognition_model = model_provider.recognition_model().clone();
+    let best_match =
+        matcher.best_compatible_match(templates.as_slice(), &recognition_model, &candidate);
+    let Some(best_match) = best_match else {
+        println!("presence_owner_match_threshold: {threshold}");
+        println!("presence_owner_match_passed: false");
+        println!("presence_decision: TemplateModelMismatch");
+        return Ok(());
+    };
+
+    let observation = match best_match.decision {
+        FaceMatchDecision::MatchAccepted => PresenceObservation::OwnerPresent {
+            owner_match_score: best_match.score,
+        },
+        FaceMatchDecision::MatchRejectedBelowThreshold => PresenceObservation::UnknownFace {
+            owner_match_score: best_match.score,
+        },
+    };
+
+    let decision =
+        print_presence_observation_and_decision(observation, threshold, Some(&best_match));
+    if decision.unknown_face_audit_capture_requested {
+        save_presence_unknown_face_audit(
+            args,
+            &mut model_provider,
+            &frame,
+            detected_face,
+            best_match.score,
+            threshold,
+        )?;
+    }
+    Ok(())
+}
+
+fn print_presence_observation_and_decision(
+    observation: PresenceObservation,
+    threshold: f32,
+    best_match: Option<&face_engine::FaceTemplateMatch>,
+) -> PresencePolicyDecision {
+    let mut policy = PresencePolicy::new(PresencePolicyConfig {
+        presence_owner_match_threshold: threshold,
+        ..PresencePolicyConfig::default()
+    });
+    let decision = policy.record_observation(observation);
+    let owner_match_score = match observation {
+        PresenceObservation::OwnerPresent { owner_match_score }
+        | PresenceObservation::UnknownFace { owner_match_score } => Some(owner_match_score),
+        PresenceObservation::NoFaceDetected | PresenceObservation::CameraUnavailable => None,
+    };
+
+    println!("presence_owner_match_threshold: {threshold}");
+    println!(
+        "presence_owner_match_score: {}",
+        optional_score_text(owner_match_score)
+    );
+    println!(
+        "presence_owner_match_passed: {}",
+        matches!(observation, PresenceObservation::OwnerPresent { .. })
+    );
+    if let Some(best_match) = best_match {
+        println!("best_template_ref: {}", best_match.template_ref.0);
+        println!("best_template_pose_group: {:?}", best_match.pose_group);
+    }
+    print_presence_policy_decision(&decision);
+    decision
+}
+
+fn save_presence_unknown_face_audit(
+    args: &[String],
+    model_provider: &mut OpenCvFaceModelProvider,
+    frame: &video_provider::VideoFrame,
+    detected_face: &face_engine::DetectedFace,
+    match_score: f32,
+    threshold: f32,
+) -> Result<(), DiagnosticError> {
+    let audit_dir = argument_value(args, "--audit-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PresenceAuditConfig::program_data_default().audit_dir);
+    let screen_snapshot_disabled = args.iter().any(|arg| arg == "--disable-screen-snapshot");
+    let config = PresenceAuditConfig {
+        audit_dir: audit_dir.clone(),
+        presence_audit_enabled: true,
+        presence_audit_save_full_frame_thumbnail: false,
+        presence_audit_save_screen_snapshot: !screen_snapshot_disabled,
+        presence_audit_max_record_count: 50,
+    };
+    fs::create_dir_all(&audit_dir).map_err(|_| DiagnosticError::IoFailed)?;
+
+    let event_id = format!("unknown-face-{}", current_time_unix_ms());
+    let face_crop_path = audit_dir.join(format!("{event_id}-face.jpg"));
+    model_provider.write_aligned_face(frame, detected_face, &face_crop_path)?;
+
+    let store = PresenceAuditStore::new(config);
+    let screen_snapshot_path = if store.screen_snapshot_enabled() {
+        let path = audit_dir.join(format!("{event_id}-screen.bmp"));
+        let helper = LocalProcessPresenceHelper;
+        match helper.handle_request(PresenceHelperRequest::CaptureScreenSnapshot {
+            event_id: event_id.clone(),
+            output_path: path,
+        }) {
+            PresenceHelperResponse::ScreenSnapshotCaptured { image_path, .. } => {
+                println!(
+                    "presence_audit_screen_snapshot_path: {}",
+                    image_path.display()
+                );
+                Some(image_path)
+            }
+            PresenceHelperResponse::ScreenSnapshotUnavailable { reason, .. } => {
+                println!("presence_audit_screen_snapshot_failed: {reason:?}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let metadata_path = store
+        .save_unknown_face_event(&UnknownFaceAuditEvent {
+            event_id,
+            captured_at_unix_ms: current_time_unix_ms(),
+            decision: "unknown_face_detected".to_owned(),
+            match_score,
+            presence_owner_match_threshold: threshold,
+            face_crop_path: Some(face_crop_path.clone()),
+            optional_frame_thumbnail_path: None,
+            optional_screen_snapshot_path: screen_snapshot_path,
+            lock_requested: false,
+        })
+        .map_err(|_| DiagnosticError::IoFailed)?;
+
+    println!(
+        "presence_audit_face_crop_path: {}",
+        face_crop_path.display()
+    );
+    println!("presence_audit_metadata_path: {}", metadata_path.display());
+    Ok(())
+}
+
+fn run_presence_policy_simulate(args: &[String]) -> Result<(), DiagnosticError> {
+    let events = argument_value(args, "--events").ok_or(DiagnosticError::InvalidArgument)?;
+    let threshold =
+        optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD);
+    let mut policy = PresencePolicy::new(PresencePolicyConfig {
+        presence_owner_match_threshold: threshold,
+        ..PresencePolicyConfig::default()
+    });
+
+    for (event_index, event_name) in events.split(',').enumerate() {
+        let observation = presence_observation_from_name(event_name.trim())?;
+        let decision = policy.record_observation(observation);
+        println!("event_index: {event_index}");
+        println!("presence_observation: {}", event_name.trim());
+        print_presence_policy_decision(&decision);
+    }
+    Ok(())
+}
+
+fn run_presence_monitor_simulate(args: &[String]) -> Result<(), DiagnosticError> {
+    let events = argument_value(args, "--events").ok_or(DiagnosticError::InvalidArgument)?;
+    let observations = events
+        .split(',')
+        .map(|event| presence_observation_from_name(event.trim()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let threshold =
+        optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD);
+    let mut monitor = PresenceMonitor::new(
+        PresenceMonitorConfig {
+            presence_lock_enabled: true,
+            max_monitor_iteration_count: optional_u32(args, "--max-iterations")?,
+            sleep_between_checks: false,
+            stop_requested: None,
+        },
+        PresencePolicyConfig {
+            presence_owner_match_threshold: threshold,
+            ..PresencePolicyConfig::default()
+        },
+        DiagnosticRecordingLocker,
+        DiagnosticRecordingAuditSink,
+        DiagnosticSequenceObservationSource { observations },
+    );
+    let summary = monitor
+        .run()
+        .map_err(|_| DiagnosticError::InvalidArgument)?;
+
+    println!("presence_monitor_completed: true");
+    println!(
+        "presence_monitor_iteration_count: {}",
+        summary.iteration_count
+    );
+    println!(
+        "presence_monitor_unknown_face_audit_request_count: {}",
+        summary.unknown_face_audit_request_count
+    );
+    println!(
+        "presence_monitor_lock_request_count: {}",
+        summary.lock_request_count
+    );
+    println!("presence_monitor_stop_reason: {:?}", summary.stop_reason);
+    Ok(())
+}
+
+fn run_presence_monitor_camera_debug(args: &[String]) -> Result<(), DiagnosticError> {
+    let template_path =
+        argument_value(args, "--template").ok_or(DiagnosticError::InvalidArgument)?;
+    let threshold =
+        optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD);
+    let max_iterations = optional_u32(args, "--iterations")?.unwrap_or(3);
+    let templates = read_recognition_templates(template_path)?;
+    let camera_id = CameraId(
+        argument_value(args, "--camera-id")
+            .unwrap_or("opencv-index:0")
+            .to_owned(),
+    );
+    let mut model_config = OpenCvFaceModelConfig::new(
+        model_path(args, "--yunet-model", DEFAULT_YUNET_MODEL_PATH),
+        model_path(args, "--sface-model", DEFAULT_SFACE_MODEL_PATH),
+    );
+    model_config.recognizer.match_threshold = threshold;
+
+    let source = CameraPresenceObservationSource::new(CameraPresenceObservationConfig {
+        camera_id,
+        camera_config: OpenCvCameraProviderConfig {
+            max_camera_index: 8,
+            requested_frame_width: optional_u32(args, "--frame-width")?,
+            requested_frame_height: optional_u32(args, "--frame-height")?,
+        },
+        model_config,
+        templates,
+        presence_owner_match_threshold: threshold,
+        pending_unknown_face_crop_path: None,
+    })
+    .map_err(|_| DiagnosticError::InvalidArgument)?;
+    let mut monitor = PresenceMonitor::new(
+        PresenceMonitorConfig {
+            presence_lock_enabled: true,
+            max_monitor_iteration_count: Some(max_iterations),
+            sleep_between_checks: false,
+            stop_requested: None,
+        },
+        PresencePolicyConfig {
+            presence_owner_match_threshold: threshold,
+            ..PresencePolicyConfig::default()
+        },
+        DiagnosticRecordingLocker,
+        DiagnosticRecordingAuditSink,
+        source,
+    );
+    let summary = monitor
+        .run()
+        .map_err(|_| DiagnosticError::InvalidArgument)?;
+
+    println!("presence_monitor_camera_debug_completed: true");
+    println!(
+        "presence_monitor_iteration_count: {}",
+        summary.iteration_count
+    );
+    println!(
+        "presence_monitor_unknown_face_audit_request_count: {}",
+        summary.unknown_face_audit_request_count
+    );
+    println!(
+        "presence_monitor_lock_request_count: {}",
+        summary.lock_request_count
+    );
+    println!("presence_monitor_stop_reason: {:?}", summary.stop_reason);
+    Ok(())
+}
+
+struct DiagnosticSequenceObservationSource {
+    observations: Vec<PresenceObservation>,
+}
+
+impl PresenceObservationSource for DiagnosticSequenceObservationSource {
+    fn next_observation(&mut self) -> Result<Option<PresenceObservation>, PresenceMonitorError> {
+        if self.observations.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(self.observations.remove(0)))
+    }
+}
+
+#[derive(Default)]
+struct DiagnosticRecordingAuditSink;
+
+impl UnknownFaceAuditSink for DiagnosticRecordingAuditSink {
+    fn capture_unknown_face_audit(
+        &mut self,
+        _decision: &PresencePolicyDecision,
+    ) -> Result<(), PresenceMonitorError> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct DiagnosticRecordingLocker;
+
+impl SessionLocker for DiagnosticRecordingLocker {
+    fn request_lock_workstation(&self) -> Result<(), SessionLockError> {
+        Ok(())
+    }
+}
+
+fn run_screen_snapshot_debug(args: &[String]) -> Result<(), DiagnosticError> {
+    let output_path =
+        PathBuf::from(argument_value(args, "--output").ok_or(DiagnosticError::InvalidArgument)?);
+    if let Some(parent) = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|_| DiagnosticError::IoFailed)?;
+    }
+    let helper = LocalProcessPresenceHelper;
+    match helper.handle_request(PresenceHelperRequest::CaptureScreenSnapshot {
+        event_id: "screen-snapshot-debug".to_owned(),
+        output_path,
+    }) {
+        PresenceHelperResponse::ScreenSnapshotCaptured {
+            image_path,
+            width,
+            height,
+            ..
+        } => {
+            println!("screen_snapshot_completed: true");
+            println!("screen_snapshot_path: {}", image_path.display());
+            println!("screen_snapshot_width: {width}");
+            println!("screen_snapshot_height: {height}");
+            Ok(())
+        }
+        PresenceHelperResponse::ScreenSnapshotUnavailable { reason, .. } => {
+            println!("screen_snapshot_completed: false");
+            println!("screen_snapshot_failure_reason: {reason:?}");
+            Err(DiagnosticError::IoFailed)
+        }
+    }
+}
+
+fn presence_observation_from_name(name: &str) -> Result<PresenceObservation, DiagnosticError> {
+    match name {
+        "owner" | "owner-present" => Ok(PresenceObservation::OwnerPresent {
+            owner_match_score: 0.70,
+        }),
+        "no-face" => Ok(PresenceObservation::NoFaceDetected),
+        "unknown" | "unknown-face" => Ok(PresenceObservation::UnknownFace {
+            owner_match_score: 0.20,
+        }),
+        "camera-unavailable" => Ok(PresenceObservation::CameraUnavailable),
+        _ => Err(DiagnosticError::InvalidArgument),
+    }
+}
+
+fn print_presence_policy_decision(decision: &PresencePolicyDecision) {
+    println!("presence_monitor_state: {:?}", decision.monitor_state);
+    println!(
+        "presence_next_check_interval_ms: {}",
+        decision.next_check_interval_ms
+    );
+    println!(
+        "presence_no_face_consecutive_count: {}",
+        decision.no_face_consecutive_count
+    );
+    println!(
+        "presence_unknown_face_consecutive_count: {}",
+        decision.unknown_face_consecutive_count
+    );
+    println!(
+        "presence_unknown_face_audit_capture_requested: {}",
+        decision.unknown_face_audit_capture_requested
+    );
+    println!("presence_lock_requested: {}", decision.lock_requested);
+    println!("presence_lock_reason: {:?}", decision.lock_reason);
+}
+
+fn optional_score_text(score: Option<f32>) -> String {
+    score
+        .map(|score| score.to_string())
+        .unwrap_or_else(|| "None".to_owned())
+}
+
 fn run_face_auth_debug(args: &[String]) -> Result<(), DiagnosticError> {
     let template_path =
         argument_value(args, "--template").ok_or(DiagnosticError::InvalidArgument)?;
@@ -1321,6 +1773,20 @@ fn build_loaded_model_provider(
     Ok(model_provider)
 }
 
+fn build_loaded_model_provider_with_threshold(
+    args: &[String],
+    threshold: f32,
+) -> Result<OpenCvFaceModelProvider, DiagnosticError> {
+    let yunet_model_path = model_path(args, "--yunet-model", DEFAULT_YUNET_MODEL_PATH);
+    let sface_model_path = model_path(args, "--sface-model", DEFAULT_SFACE_MODEL_PATH);
+
+    let mut config = OpenCvFaceModelConfig::new(yunet_model_path, sface_model_path);
+    config.recognizer.match_threshold = threshold;
+    let mut model_provider = OpenCvFaceModelProvider::new(config);
+    model_provider.load_models()?;
+    Ok(model_provider)
+}
+
 fn selected_camera_id(
     args: &[String],
     sources: &[video_provider::CameraInfo],
@@ -1524,6 +1990,19 @@ fn print_usage() {
     println!(
         "Usage: diagnostics_cli threshold-preview [--camera-id opencv-index:0] [--frame-width 640 --frame-height 480] [--method binary-inv-mask|adaptive-gaussian|adaptive-mean|otsu] [--binary-threshold 150 --binary-mask-upper-threshold 50] [--adaptive-block-size 31] [--adaptive-c 5.0]"
     );
+    println!(
+        "Usage: diagnostics_cli presence-check-once --template <selected_templates.json> [--camera-id opencv-index:0] [--threshold 0.50] [--frame-width 640 --frame-height 480] [--audit-dir <dir>] [--disable-screen-snapshot]"
+    );
+    println!(
+        "Usage: diagnostics_cli presence-policy-simulate --events owner,no-face,unknown,camera-unavailable [--threshold 0.50]"
+    );
+    println!(
+        "Usage: diagnostics_cli presence-monitor-simulate --events owner,no-face,unknown,camera-unavailable [--threshold 0.50] [--max-iterations 10]"
+    );
+    println!(
+        "Usage: diagnostics_cli presence-monitor-camera-debug --template <selected_templates.json> [--camera-id opencv-index:0] [--threshold 0.50] [--iterations 3] [--frame-width 640 --frame-height 480]"
+    );
+    println!("Usage: diagnostics_cli screen-snapshot-debug --output <path.bmp>");
     println!(
         "Usage: diagnostics_cli face-auth-debug --template <path> [--frames 30] [--camera-id opencv-index:0]"
     );

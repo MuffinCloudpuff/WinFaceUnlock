@@ -21,4 +21,5 @@
 /face-enrollment/
 /face-enrollment-*/
 /liveness-debug/
+/presence-audit-debug/
 /vm-package/

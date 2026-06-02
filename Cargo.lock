@@ -1184,6 +1184,8 @@ dependencies = [
  "face_liveness",
  "hardware_binding",
  "ipc",
+ "serde",
+ "serde_json",
  "video_provider",
  "windows-service",
  "windows-sys 0.61.2",

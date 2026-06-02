@@ -9,7 +9,7 @@ use common_protocol::{
 };
 use face_auth::{AttemptPolicy, AttemptPolicyConfig, FaceAuthenticator, RecognitionTemplates};
 use face_engine::{
-    FaceModelProvider, FaceTemplate, FaceTemplateCodecError, FaceTemplateMatcher, FaceTemplateSet,
+    FaceTemplate, FaceTemplateCodecError, FaceTemplateMatcher, FaceTemplateSet,
     OpenCvFaceModelConfig, OpenCvFaceModelProvider,
 };
 use face_liveness::{
@@ -100,21 +100,14 @@ impl LocalCameraAuthGrantIssuer {
             OpenCvFaceModelConfig::new(config.yunet_model_path, config.sface_model_path);
         model_config.recognizer.match_threshold = config.match_threshold;
 
-        let mut model_provider = OpenCvFaceModelProvider::new(model_config);
-        model_provider
-            .load_models()
-            .map_err(|_| ProtocolError::TransportUnavailable)?;
-
+        let model_provider = OpenCvFaceModelProvider::new(model_config);
         let matcher = FaceTemplateMatcher::new(config.match_threshold);
         let attempt_policy = AttemptPolicy::new(AttemptPolicyConfig {
             required_consecutive_match_count: config.required_consecutive_match_count,
             ..AttemptPolicyConfig::default()
         });
         let authenticator = FaceAuthenticator::new(model_provider, matcher, attempt_policy);
-        let mut liveness_provider = MiniFasNetLivenessProvider::new(config.minifasnet_config);
-        liveness_provider
-            .load_model()
-            .map_err(|_| ProtocolError::TransportUnavailable)?;
+        let liveness_provider = MiniFasNetLivenessProvider::new(config.minifasnet_config);
 
         Ok(Self {
             camera_id: config.camera_id,
@@ -155,6 +148,25 @@ impl LocalCameraAuthGrantIssuer {
     }
 
     fn authenticate_from_camera(
+        &mut self,
+    ) -> Result<LocalCameraAuthenticationOutcome, AuthFailureReason> {
+        self.authenticator
+            .load_models()
+            .map_err(|_| AuthFailureReason::InternalError)?;
+        if self.liveness_provider.load_model().is_err() {
+            self.authenticator.unload_models();
+            return Err(AuthFailureReason::InternalError);
+        }
+
+        let auth_result = self.authenticate_from_camera_with_loaded_runtime();
+
+        self.liveness_provider.unload_model();
+        self.authenticator.unload_models();
+
+        auth_result
+    }
+
+    fn authenticate_from_camera_with_loaded_runtime(
         &mut self,
     ) -> Result<LocalCameraAuthenticationOutcome, AuthFailureReason> {
         let mut camera_provider = OpenCvCameraProvider::new(self.camera_config.clone());

@@ -13,13 +13,16 @@ use windows_service::{
     define_windows_service,
     service::{
         ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
-        ServiceType,
+        ServiceType, SessionChangeReason,
     },
     service_control_handler::{self, ServiceControlHandlerResult},
     service_dispatcher,
 };
 
-use crate::named_pipe_host::{run_named_pipe_until_shutdown, wake_named_pipe_host};
+use crate::{
+    named_pipe_host::{run_named_pipe_until_shutdown, wake_named_pipe_host},
+    presence_service::{PresenceServiceCommand, spawn_presence_service_controller},
+};
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -37,6 +40,8 @@ fn run_service_main() -> windows_service::Result<()> {
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     let handler_shutdown = Arc::clone(&shutdown_requested);
     let pipe_name = PIPE_NAME.to_owned();
+    let presence_command_sender = spawn_presence_service_controller();
+    let handler_presence_sender = presence_command_sender.clone();
 
     let status_handle =
         service_control_handler::register(
@@ -52,6 +57,26 @@ fn run_service_main() -> windows_service::Result<()> {
                         });
                     ServiceControlHandlerResult::NoError
                 }
+                ServiceControl::SessionChange(session_change) => {
+                    let session_id = session_change.notification.session_id;
+                    let command = match session_change.reason {
+                        SessionChangeReason::SessionLogon | SessionChangeReason::SessionUnlock => {
+                            Some(PresenceServiceCommand::StartForUserSession { session_id })
+                        }
+                        SessionChangeReason::SessionLock
+                        | SessionChangeReason::SessionLogoff
+                        | SessionChangeReason::ConsoleDisconnect
+                        | SessionChangeReason::RemoteDisconnect
+                        | SessionChangeReason::SessionTerminate => {
+                            Some(PresenceServiceCommand::StopForUserSession { session_id })
+                        }
+                        _ => None,
+                    };
+                    if let Some(command) = command {
+                        let _ = handler_presence_sender.send(command);
+                    }
+                    ServiceControlHandlerResult::NoError
+                }
                 ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
                 _ => ServiceControlHandlerResult::NotImplemented,
             },
@@ -65,12 +90,13 @@ fn run_service_main() -> windows_service::Result<()> {
     ))?;
     status_handle.set_service_status(service_status(
         ServiceState::Running,
-        ServiceControlAccept::STOP,
+        ServiceControlAccept::STOP | ServiceControlAccept::SESSION_CHANGE,
         0,
         Duration::default(),
     ))?;
 
     let service_result = run_named_pipe_until_shutdown(PIPE_NAME, &shutdown_requested);
+    let _ = presence_command_sender.send(PresenceServiceCommand::Shutdown);
 
     status_handle.set_service_status(service_status(
         ServiceState::StopPending,

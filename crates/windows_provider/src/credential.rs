@@ -18,7 +18,7 @@ use windows_core::{BOOL, PCWSTR, PWSTR, Ref, Result, implement};
 use crate::{
     auth_package::retrieve_negotiate_auth_package_id,
     fields::{FIELD_ID_STATUS, FIELD_ID_TITLE, allocate_wide_string, field_spec},
-    provider::request_wake_in_background,
+    provider::{WakeStartPolicy, request_wake_in_background},
     provider_log::{write_provider_event, write_provider_event_detail},
     provider_state::ProviderState,
     serialization::pack_credential_material,
@@ -57,7 +57,11 @@ impl ICredentialProviderCredential_Impl for WinFaceUnlockCredential_Impl {
 
     fn SetSelected(&self) -> Result<BOOL> {
         write_provider_event("Credential.SetSelected");
-        request_wake_in_background(self.state.clone(), "Credential.SelectedWake");
+        request_wake_in_background(
+            self.state.clone(),
+            "Credential.SelectedWake",
+            WakeStartPolicy::Immediate,
+        );
         Ok(false.into())
     }
 

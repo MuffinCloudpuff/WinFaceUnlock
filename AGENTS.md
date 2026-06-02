@@ -33,6 +33,13 @@ WinFaceUnlock 的核心链路固定为 Rust 主线：
 - 不依赖外层 `D:\study` 的 Git 仓库状态。
 - 查看状态、提交、分析索引时都必须在本目录执行。
 
+## VM Operations
+
+- 操作 Windows VM 时默认使用全局 skill `winfaceunlock-vm`：`C:\Users\Liu\.codex\skills\winfaceunlock-vm`。
+- VM 服务状态、资源占用、`diagnostics_cli` 远程触发和 WinRM 故障排查见 `docs/VM_WINRM_OPERATIONS.md`。
+- 首选 WinRM 命令行：`Invoke-Command -ComputerName 192.168.204.129 -Credential $cred ...`。
+- 不要默认通过 VMware 窗口点击、键盘注入或截图操作 VM；只有 WinRM 不可用且用户明确同意时才走 GUI 兜底。
+
 ## GitNexus CLI
 
 当前环境默认不使用 GitNexus MCP 工具。所有 GitNexus 操作默认使用 CLI：

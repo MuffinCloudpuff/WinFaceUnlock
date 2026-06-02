@@ -19,6 +19,8 @@ const ENV_FRAME_HEIGHT: &str = "WINFACEUNLOCK_FRAME_HEIGHT";
 const ENV_MAX_AUTH_FRAMES: &str = "WINFACEUNLOCK_MAX_AUTH_FRAMES";
 const ENV_REQUIRED_CONSECUTIVE: &str = "WINFACEUNLOCK_REQUIRED_CONSECUTIVE";
 const ENV_MATCH_THRESHOLD: &str = "WINFACEUNLOCK_MATCH_THRESHOLD";
+const ENV_PRESENCE_LOCK_ENABLED: &str = "WINFACEUNLOCK_PRESENCE_LOCK_ENABLED";
+const ENV_PRESENCE_OWNER_MATCH_THRESHOLD: &str = "WINFACEUNLOCK_PRESENCE_OWNER_MATCH_THRESHOLD";
 const SERVICE_CONFIG_REGISTRY_PATH: &str = r"SOFTWARE\WinFaceUnlock\Service";
 const REG_AUTH_MODE: &str = "AuthMode";
 const REG_FACE_TEMPLATE_PATH: &str = "FaceTemplatePath";
@@ -35,6 +37,8 @@ const REG_FRAME_HEIGHT: &str = "FrameHeight";
 const REG_MAX_AUTH_FRAMES: &str = "MaxAuthFrames";
 const REG_REQUIRED_CONSECUTIVE: &str = "RequiredConsecutiveMatchCount";
 const REG_MATCH_THRESHOLD: &str = "MatchThreshold";
+const REG_PRESENCE_LOCK_ENABLED: &str = "PresenceLockEnabled";
+const REG_PRESENCE_OWNER_MATCH_THRESHOLD: &str = "PresenceOwnerMatchThreshold";
 
 const AUTH_MODE_MANUAL_TEST: &str = "manual-test";
 const AUTH_MODE_LOCAL_CAMERA: &str = "local-camera";
@@ -49,6 +53,7 @@ const DEFAULT_MAX_AUTH_FRAMES: u32 = 30;
 const DEFAULT_REQUIRED_CONSECUTIVE_MATCH_COUNT: u32 = 2;
 const DEFAULT_MAX_CAMERA_INDEX: u32 = 8;
 const DEFAULT_SERVICE_FACE_MATCH_THRESHOLD: f32 = 0.75;
+const DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD: f32 = 0.50;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServiceAuthConfig {
@@ -73,6 +78,36 @@ pub struct LocalCameraAuthConfig {
     pub max_auth_frames: u32,
     pub required_consecutive_match_count: u32,
     pub match_threshold: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServicePresenceConfig {
+    pub presence_lock_enabled: bool,
+    pub presence_owner_match_threshold: f32,
+}
+
+impl ServicePresenceConfig {
+    pub fn from_environment() -> Result<Self, ProtocolError> {
+        Self::from_lookup(|env_name| {
+            std::env::var(env_name)
+                .ok()
+                .or_else(|| registry_value_for_env_name(env_name))
+        })
+    }
+
+    fn from_lookup(
+        mut lookup: impl FnMut(&'static str) -> Option<String>,
+    ) -> Result<Self, ProtocolError> {
+        Ok(Self {
+            presence_lock_enabled: optional_bool(&mut lookup, ENV_PRESENCE_LOCK_ENABLED)?
+                .unwrap_or(false),
+            presence_owner_match_threshold: optional_f32(
+                &mut lookup,
+                ENV_PRESENCE_OWNER_MATCH_THRESHOLD,
+            )?
+            .unwrap_or(DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD),
+        })
+    }
 }
 
 impl ServiceAuthConfig {
@@ -174,8 +209,23 @@ fn registry_value_name(env_name: &'static str) -> Option<&'static str> {
         ENV_MAX_AUTH_FRAMES => Some(REG_MAX_AUTH_FRAMES),
         ENV_REQUIRED_CONSECUTIVE => Some(REG_REQUIRED_CONSECUTIVE),
         ENV_MATCH_THRESHOLD => Some(REG_MATCH_THRESHOLD),
+        ENV_PRESENCE_LOCK_ENABLED => Some(REG_PRESENCE_LOCK_ENABLED),
+        ENV_PRESENCE_OWNER_MATCH_THRESHOLD => Some(REG_PRESENCE_OWNER_MATCH_THRESHOLD),
         _ => None,
     }
+}
+
+fn optional_bool(
+    lookup: &mut impl FnMut(&'static str) -> Option<String>,
+    env_name: &'static str,
+) -> Result<Option<bool>, ProtocolError> {
+    lookup(env_name)
+        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "enabled" | "on" => Ok(true),
+            "0" | "false" | "no" | "disabled" | "off" => Ok(false),
+            _ => Err(ProtocolError::InvalidMessage),
+        })
+        .transpose()
 }
 
 fn required_path(
@@ -352,6 +402,34 @@ mod tests {
         });
 
         assert_eq!(result, Err(ProtocolError::InvalidMessage));
+    }
+
+    #[test]
+    fn presence_config_defaults_to_disabled_when_missing() -> Result<(), ProtocolError> {
+        let config = ServicePresenceConfig::from_lookup(|_| None)?;
+
+        assert!(!config.presence_lock_enabled);
+        assert_eq!(
+            config.presence_owner_match_threshold,
+            DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn presence_config_parses_enabled_and_threshold() -> Result<(), ProtocolError> {
+        let values = HashMap::from([
+            (ENV_PRESENCE_LOCK_ENABLED, "true"),
+            (ENV_PRESENCE_OWNER_MATCH_THRESHOLD, "0.47"),
+        ]);
+
+        let config = ServicePresenceConfig::from_lookup(|env_name| {
+            values.get(env_name).map(|value| value.to_string())
+        })?;
+
+        assert!(config.presence_lock_enabled);
+        assert_eq!(config.presence_owner_match_threshold, 0.47);
+        Ok(())
     }
 }
 

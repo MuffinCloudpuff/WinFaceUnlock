@@ -163,6 +163,17 @@ fn run_command(command: InstallerCommand) -> Result<(), InstallerError> {
                     .as_deref()
                     .unwrap_or("<unset>")
             );
+            println!(
+                "presence_lock_enabled: {}",
+                status.presence_lock_enabled.as_deref().unwrap_or("<unset>")
+            );
+            println!(
+                "presence_owner_match_threshold: {}",
+                status
+                    .presence_owner_match_threshold
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
         }
         InstallerCommand::InstallProvider {
             provider_binary_path,
@@ -325,6 +336,12 @@ fn parse_service_auth_config(args: &[String]) -> Result<ServiceAuthRegistryConfi
     if let Some(match_threshold) = optional_f32(args, "--match-threshold")? {
         config.match_threshold = match_threshold;
     }
+    config.presence_lock_enabled = !has_flag(args, "--disable-presence-lock");
+    if let Some(presence_owner_match_threshold) =
+        optional_f32(args, "--presence-owner-match-threshold")?
+    {
+        config.presence_owner_match_threshold = presence_owner_match_threshold;
+    }
     if let Some(minifasnet_crop_scale) = optional_f32(args, "--minifasnet-crop-scale")? {
         config.minifasnet_crop_scale = minifasnet_crop_scale;
     }
@@ -456,6 +473,11 @@ fn print_service_auth_config(label: &str, config: &ServiceAuthRegistryConfig) {
         config.required_consecutive_match_count
     );
     println!("match_threshold: {}", config.match_threshold);
+    println!("presence_lock_enabled: {}", config.presence_lock_enabled);
+    println!(
+        "presence_owner_match_threshold: {}",
+        config.presence_owner_match_threshold
+    );
 }
 
 fn print_usage() {
@@ -468,7 +490,7 @@ fn print_usage() {
     println!("  installer_cli service-status");
     println!("  installer_cli repair-service [--service-binary <path>] [--dry-run]");
     println!(
-        "  installer_cli configure-service-auth --face-template <path> [--camera-id opencv-index:0] [--yunet-model <path>] [--sface-model <path>] [--minifasnet-model <path>] [--minifasnet-crop-scale 2.7] [--minifasnet-min-live-score 0.80] [--minifasnet-min-spoof-score 0.70] [--minifasnet-max-spoof-frame-ratio 0.40] [--match-threshold 0.75] [--dry-run]"
+        "  installer_cli configure-service-auth --face-template <path> [--camera-id opencv-index:0] [--yunet-model <path>] [--sface-model <path>] [--minifasnet-model <path>] [--minifasnet-crop-scale 2.7] [--minifasnet-min-live-score 0.80] [--minifasnet-min-spoof-score 0.70] [--minifasnet-max-spoof-frame-ratio 0.40] [--match-threshold 0.75] [--presence-owner-match-threshold 0.50] [--disable-presence-lock] [--dry-run]"
     );
     println!("  installer_cli service-auth-status");
     println!(
@@ -661,6 +683,8 @@ mod tests {
             "0.6".to_owned(),
             "--required-consecutive".to_owned(),
             "1".to_owned(),
+            "--presence-owner-match-threshold".to_owned(),
+            "0.48".to_owned(),
             "--minifasnet-model".to_owned(),
             r"D:\WinFaceUnlock\minifasnet.onnx".to_owned(),
             "--minifasnet-crop-scale".to_owned(),
@@ -684,12 +708,36 @@ mod tests {
         assert_eq!(config.camera_id, "opencv-index:1");
         assert_eq!(config.match_threshold, 0.6);
         assert_eq!(config.required_consecutive_match_count, 1);
+        assert!(config.presence_lock_enabled);
+        assert_eq!(config.presence_owner_match_threshold, 0.48);
         assert_eq!(
             config.minifasnet_model_path,
             PathBuf::from(r"D:\WinFaceUnlock\minifasnet.onnx")
         );
         assert_eq!(config.minifasnet_crop_scale, 1.3);
         assert_eq!(config.minifasnet_max_spoof_frame_ratio, 0.45);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_configure_service_auth_can_disable_presence_lock() -> Result<(), InstallerError> {
+        let args = vec![
+            "installer_cli".to_owned(),
+            "configure-service-auth".to_owned(),
+            "--face-template".to_owned(),
+            r"D:\WinFaceUnlock\phase4-face-template.json".to_owned(),
+            "--disable-presence-lock".to_owned(),
+        ];
+
+        let InstallerCommand::ConfigureServiceAuth { config, dry_run } = parse_command(&args)?
+        else {
+            return Err(InstallerError::InvalidArguments(
+                "unexpected command".to_owned(),
+            ));
+        };
+
+        assert!(!dry_run);
+        assert!(!config.presence_lock_enabled);
         Ok(())
     }
 }
