@@ -21,6 +21,21 @@ const ENV_REQUIRED_CONSECUTIVE: &str = "WINFACEUNLOCK_REQUIRED_CONSECUTIVE";
 const ENV_MATCH_THRESHOLD: &str = "WINFACEUNLOCK_MATCH_THRESHOLD";
 const ENV_PRESENCE_LOCK_ENABLED: &str = "WINFACEUNLOCK_PRESENCE_LOCK_ENABLED";
 const ENV_PRESENCE_OWNER_MATCH_THRESHOLD: &str = "WINFACEUNLOCK_PRESENCE_OWNER_MATCH_THRESHOLD";
+const ENV_PRESENCE_DETECTOR_KIND: &str = "WINFACEUNLOCK_PRESENCE_DETECTOR_KIND";
+const ENV_PRESENCE_TRACKING_MODE: &str = "WINFACEUNLOCK_PRESENCE_TRACKING_MODE";
+const ENV_PRESENCE_DETECTOR_FPS: &str = "WINFACEUNLOCK_PRESENCE_DETECTOR_FPS";
+const ENV_PRESENCE_UNLOAD_MODEL_WHEN_IDLE: &str = "WINFACEUNLOCK_PRESENCE_UNLOAD_MODEL_WHEN_IDLE";
+const ENV_PRESENCE_PERSON_CONFIDENCE_THRESHOLD: &str =
+    "WINFACEUNLOCK_PRESENCE_PERSON_CONFIDENCE_THRESHOLD";
+const ENV_PRESENCE_PERSON_DETECTOR_MODEL: &str = "WINFACEUNLOCK_PRESENCE_PERSON_DETECTOR_MODEL";
+const ENV_PRESENCE_PERSON_SUSPECT_FPS: &str = "WINFACEUNLOCK_PRESENCE_PERSON_SUSPECT_FPS";
+const ENV_PRESENCE_ABSENT_REQUIRED_FRAMES: &str = "WINFACEUNLOCK_PRESENCE_ABSENT_REQUIRED_FRAMES";
+const ENV_PRESENCE_BOUNDARY_MARGIN_RATIO: &str = "WINFACEUNLOCK_PRESENCE_BOUNDARY_MARGIN_RATIO";
+const ENV_PRESENCE_MOVEMENT_DELTA_RATIO: &str = "WINFACEUNLOCK_PRESENCE_MOVEMENT_DELTA_RATIO";
+const ENV_PRESENCE_PERSON_MODEL_PATH: &str = "WINFACEUNLOCK_PRESENCE_PERSON_MODEL_PATH";
+const ENV_PRESENCE_PERSON_MODEL_CONFIG_PATH: &str =
+    "WINFACEUNLOCK_PRESENCE_PERSON_MODEL_CONFIG_PATH";
+const ENV_PRESENCE_PERSON_DEBUG_OUTPUT_DIR: &str = "WINFACEUNLOCK_PRESENCE_PERSON_DEBUG_OUTPUT_DIR";
 const SERVICE_CONFIG_REGISTRY_PATH: &str = r"SOFTWARE\WinFaceUnlock\Service";
 const REG_AUTH_MODE: &str = "AuthMode";
 const REG_FACE_TEMPLATE_PATH: &str = "FaceTemplatePath";
@@ -39,6 +54,19 @@ const REG_REQUIRED_CONSECUTIVE: &str = "RequiredConsecutiveMatchCount";
 const REG_MATCH_THRESHOLD: &str = "MatchThreshold";
 const REG_PRESENCE_LOCK_ENABLED: &str = "PresenceLockEnabled";
 const REG_PRESENCE_OWNER_MATCH_THRESHOLD: &str = "PresenceOwnerMatchThreshold";
+const REG_PRESENCE_DETECTOR_KIND: &str = "PresenceDetectorKind";
+const REG_PRESENCE_TRACKING_MODE: &str = "PresenceTrackingMode";
+const REG_PRESENCE_DETECTOR_FPS: &str = "PresenceDetectorFps";
+const REG_PRESENCE_UNLOAD_MODEL_WHEN_IDLE: &str = "PresenceUnloadModelWhenIdle";
+const REG_PRESENCE_PERSON_CONFIDENCE_THRESHOLD: &str = "PresencePersonConfidenceThreshold";
+const REG_PRESENCE_PERSON_DETECTOR_MODEL: &str = "PresencePersonDetectorModel";
+const REG_PRESENCE_PERSON_SUSPECT_FPS: &str = "PresencePersonSuspectFps";
+const REG_PRESENCE_ABSENT_REQUIRED_FRAMES: &str = "PresenceAbsentRequiredFrames";
+const REG_PRESENCE_BOUNDARY_MARGIN_RATIO: &str = "PresenceBoundaryMarginRatio";
+const REG_PRESENCE_MOVEMENT_DELTA_RATIO: &str = "PresenceMovementDeltaRatio";
+const REG_PRESENCE_PERSON_MODEL_PATH: &str = "PresencePersonModelPath";
+const REG_PRESENCE_PERSON_MODEL_CONFIG_PATH: &str = "PresencePersonModelConfigPath";
+const REG_PRESENCE_PERSON_DEBUG_OUTPUT_DIR: &str = "PresencePersonDebugOutputDir";
 
 const AUTH_MODE_MANUAL_TEST: &str = "manual-test";
 const AUTH_MODE_LOCAL_CAMERA: &str = "local-camera";
@@ -54,6 +82,21 @@ const DEFAULT_REQUIRED_CONSECUTIVE_MATCH_COUNT: u32 = 2;
 const DEFAULT_MAX_CAMERA_INDEX: u32 = 8;
 const DEFAULT_SERVICE_FACE_MATCH_THRESHOLD: f32 = 0.75;
 const DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD: f32 = 0.50;
+const DEFAULT_PRESENCE_DETECTOR_FPS: f32 = 2.0;
+const DEFAULT_PRESENCE_PERSON_SUSPECT_FPS: f32 = 5.0;
+const DEFAULT_PRESENCE_PERSON_CONFIDENCE_THRESHOLD: f32 = 0.50;
+const DEFAULT_PRESENCE_ABSENT_REQUIRED_FRAMES: u32 = 6;
+const DEFAULT_PRESENCE_BOUNDARY_MARGIN_RATIO: f32 = 0.12;
+const DEFAULT_PRESENCE_MOVEMENT_DELTA_RATIO: f32 = 0.04;
+const DEFAULT_PRESENCE_PERSON_MODEL_PATH: &str = "models/MobileNetSSD_deploy.caffemodel";
+const DEFAULT_PRESENCE_PERSON_MODEL_CONFIG_PATH: &str = "models/MobileNetSSD_deploy.prototxt";
+const DEFAULT_PRESENCE_YOLOV8_PERSON_MODEL_PATH: &str = "models/yolov8n.onnx";
+const PRESENCE_DETECTOR_KIND_FACE_OWNER_MATCH: &str = "face-owner-match";
+const PRESENCE_DETECTOR_KIND_OPENCV_DNN_PERSON: &str = "opencv-dnn-person";
+const PRESENCE_TRACKING_MODE_FACE_POLICY: &str = "face-policy";
+const PRESENCE_TRACKING_MODE_CONTINUOUS_LOW_FPS: &str = "continuous-low-fps";
+const PRESENCE_PERSON_DETECTOR_MODEL_MOBILENET_SSD: &str = "mobilenet-ssd";
+const PRESENCE_PERSON_DETECTOR_MODEL_YOLOV8_ONNX: &str = "yolov8-onnx";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServiceAuthConfig {
@@ -84,6 +127,37 @@ pub struct LocalCameraAuthConfig {
 pub struct ServicePresenceConfig {
     pub presence_lock_enabled: bool,
     pub presence_owner_match_threshold: f32,
+    pub presence_detector_kind: PresenceDetectorKind,
+    pub presence_tracking_mode: PresenceTrackingMode,
+    pub presence_detector_fps: f32,
+    pub presence_unload_model_when_idle: bool,
+    pub presence_person_confidence_threshold: f32,
+    pub presence_person_detector_model: PresencePersonDetectorModel,
+    pub presence_person_suspect_fps: f32,
+    pub presence_absent_required_frames: u32,
+    pub presence_boundary_margin_ratio: f32,
+    pub presence_movement_delta_ratio: f32,
+    pub presence_person_model_path: PathBuf,
+    pub presence_person_model_config_path: Option<PathBuf>,
+    pub presence_person_debug_output_dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PresenceDetectorKind {
+    FaceOwnerMatch,
+    OpenCvDnnPerson,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PresenceTrackingMode {
+    FacePolicy,
+    ContinuousLowFps,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PresencePersonDetectorModel {
+    MobileNetSsd,
+    YoloV8Onnx,
 }
 
 impl ServicePresenceConfig {
@@ -98,6 +172,22 @@ impl ServicePresenceConfig {
     fn from_lookup(
         mut lookup: impl FnMut(&'static str) -> Option<String>,
     ) -> Result<Self, ProtocolError> {
+        let presence_person_detector_model = optional_presence_person_detector_model(
+            &mut lookup,
+            ENV_PRESENCE_PERSON_DETECTOR_MODEL,
+        )?
+        .unwrap_or(PresencePersonDetectorModel::MobileNetSsd);
+        let default_person_model_path = match presence_person_detector_model {
+            PresencePersonDetectorModel::MobileNetSsd => DEFAULT_PRESENCE_PERSON_MODEL_PATH,
+            PresencePersonDetectorModel::YoloV8Onnx => DEFAULT_PRESENCE_YOLOV8_PERSON_MODEL_PATH,
+        };
+        let default_person_model_config_path = match presence_person_detector_model {
+            PresencePersonDetectorModel::MobileNetSsd => {
+                Some(PathBuf::from(DEFAULT_PRESENCE_PERSON_MODEL_CONFIG_PATH))
+            }
+            PresencePersonDetectorModel::YoloV8Onnx => None,
+        };
+
         Ok(Self {
             presence_lock_enabled: optional_bool(&mut lookup, ENV_PRESENCE_LOCK_ENABLED)?
                 .unwrap_or(false),
@@ -106,6 +196,63 @@ impl ServicePresenceConfig {
                 ENV_PRESENCE_OWNER_MATCH_THRESHOLD,
             )?
             .unwrap_or(DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD),
+            presence_detector_kind: optional_presence_detector_kind(
+                &mut lookup,
+                ENV_PRESENCE_DETECTOR_KIND,
+            )?
+            .unwrap_or(PresenceDetectorKind::FaceOwnerMatch),
+            presence_tracking_mode: optional_presence_tracking_mode(
+                &mut lookup,
+                ENV_PRESENCE_TRACKING_MODE,
+            )?
+            .unwrap_or(PresenceTrackingMode::FacePolicy),
+            presence_detector_fps: optional_f32(&mut lookup, ENV_PRESENCE_DETECTOR_FPS)?
+                .unwrap_or(DEFAULT_PRESENCE_DETECTOR_FPS),
+            presence_unload_model_when_idle: optional_bool(
+                &mut lookup,
+                ENV_PRESENCE_UNLOAD_MODEL_WHEN_IDLE,
+            )?
+            .unwrap_or(false),
+            presence_person_confidence_threshold: optional_f32(
+                &mut lookup,
+                ENV_PRESENCE_PERSON_CONFIDENCE_THRESHOLD,
+            )?
+            .unwrap_or(DEFAULT_PRESENCE_PERSON_CONFIDENCE_THRESHOLD),
+            presence_person_detector_model,
+            presence_person_suspect_fps: optional_f32(
+                &mut lookup,
+                ENV_PRESENCE_PERSON_SUSPECT_FPS,
+            )?
+            .unwrap_or(DEFAULT_PRESENCE_PERSON_SUSPECT_FPS),
+            presence_absent_required_frames: optional_u32(
+                &mut lookup,
+                ENV_PRESENCE_ABSENT_REQUIRED_FRAMES,
+            )?
+            .unwrap_or(DEFAULT_PRESENCE_ABSENT_REQUIRED_FRAMES),
+            presence_boundary_margin_ratio: optional_f32(
+                &mut lookup,
+                ENV_PRESENCE_BOUNDARY_MARGIN_RATIO,
+            )?
+            .unwrap_or(DEFAULT_PRESENCE_BOUNDARY_MARGIN_RATIO),
+            presence_movement_delta_ratio: optional_f32(
+                &mut lookup,
+                ENV_PRESENCE_MOVEMENT_DELTA_RATIO,
+            )?
+            .unwrap_or(DEFAULT_PRESENCE_MOVEMENT_DELTA_RATIO),
+            presence_person_model_path: optional_path_or_default(
+                &mut lookup,
+                ENV_PRESENCE_PERSON_MODEL_PATH,
+                default_person_model_path,
+            ),
+            presence_person_model_config_path: optional_path(
+                &mut lookup,
+                ENV_PRESENCE_PERSON_MODEL_CONFIG_PATH,
+            )
+            .or(default_person_model_config_path),
+            presence_person_debug_output_dir: optional_path(
+                &mut lookup,
+                ENV_PRESENCE_PERSON_DEBUG_OUTPUT_DIR,
+            ),
         })
     }
 }
@@ -211,8 +358,66 @@ fn registry_value_name(env_name: &'static str) -> Option<&'static str> {
         ENV_MATCH_THRESHOLD => Some(REG_MATCH_THRESHOLD),
         ENV_PRESENCE_LOCK_ENABLED => Some(REG_PRESENCE_LOCK_ENABLED),
         ENV_PRESENCE_OWNER_MATCH_THRESHOLD => Some(REG_PRESENCE_OWNER_MATCH_THRESHOLD),
+        ENV_PRESENCE_DETECTOR_KIND => Some(REG_PRESENCE_DETECTOR_KIND),
+        ENV_PRESENCE_TRACKING_MODE => Some(REG_PRESENCE_TRACKING_MODE),
+        ENV_PRESENCE_DETECTOR_FPS => Some(REG_PRESENCE_DETECTOR_FPS),
+        ENV_PRESENCE_UNLOAD_MODEL_WHEN_IDLE => Some(REG_PRESENCE_UNLOAD_MODEL_WHEN_IDLE),
+        ENV_PRESENCE_PERSON_CONFIDENCE_THRESHOLD => Some(REG_PRESENCE_PERSON_CONFIDENCE_THRESHOLD),
+        ENV_PRESENCE_PERSON_DETECTOR_MODEL => Some(REG_PRESENCE_PERSON_DETECTOR_MODEL),
+        ENV_PRESENCE_PERSON_SUSPECT_FPS => Some(REG_PRESENCE_PERSON_SUSPECT_FPS),
+        ENV_PRESENCE_ABSENT_REQUIRED_FRAMES => Some(REG_PRESENCE_ABSENT_REQUIRED_FRAMES),
+        ENV_PRESENCE_BOUNDARY_MARGIN_RATIO => Some(REG_PRESENCE_BOUNDARY_MARGIN_RATIO),
+        ENV_PRESENCE_MOVEMENT_DELTA_RATIO => Some(REG_PRESENCE_MOVEMENT_DELTA_RATIO),
+        ENV_PRESENCE_PERSON_MODEL_PATH => Some(REG_PRESENCE_PERSON_MODEL_PATH),
+        ENV_PRESENCE_PERSON_MODEL_CONFIG_PATH => Some(REG_PRESENCE_PERSON_MODEL_CONFIG_PATH),
+        ENV_PRESENCE_PERSON_DEBUG_OUTPUT_DIR => Some(REG_PRESENCE_PERSON_DEBUG_OUTPUT_DIR),
         _ => None,
     }
+}
+
+fn optional_presence_person_detector_model(
+    lookup: &mut impl FnMut(&'static str) -> Option<String>,
+    env_name: &'static str,
+) -> Result<Option<PresencePersonDetectorModel>, ProtocolError> {
+    lookup(env_name)
+        .map(|value| match value.trim() {
+            "" | PRESENCE_PERSON_DETECTOR_MODEL_MOBILENET_SSD => {
+                Ok(PresencePersonDetectorModel::MobileNetSsd)
+            }
+            PRESENCE_PERSON_DETECTOR_MODEL_YOLOV8_ONNX => {
+                Ok(PresencePersonDetectorModel::YoloV8Onnx)
+            }
+            _ => Err(ProtocolError::InvalidMessage),
+        })
+        .transpose()
+}
+
+fn optional_presence_detector_kind(
+    lookup: &mut impl FnMut(&'static str) -> Option<String>,
+    env_name: &'static str,
+) -> Result<Option<PresenceDetectorKind>, ProtocolError> {
+    lookup(env_name)
+        .map(|value| match value.trim() {
+            "" | PRESENCE_DETECTOR_KIND_FACE_OWNER_MATCH => {
+                Ok(PresenceDetectorKind::FaceOwnerMatch)
+            }
+            PRESENCE_DETECTOR_KIND_OPENCV_DNN_PERSON => Ok(PresenceDetectorKind::OpenCvDnnPerson),
+            _ => Err(ProtocolError::InvalidMessage),
+        })
+        .transpose()
+}
+
+fn optional_presence_tracking_mode(
+    lookup: &mut impl FnMut(&'static str) -> Option<String>,
+    env_name: &'static str,
+) -> Result<Option<PresenceTrackingMode>, ProtocolError> {
+    lookup(env_name)
+        .map(|value| match value.trim() {
+            "" | PRESENCE_TRACKING_MODE_FACE_POLICY => Ok(PresenceTrackingMode::FacePolicy),
+            PRESENCE_TRACKING_MODE_CONTINUOUS_LOW_FPS => Ok(PresenceTrackingMode::ContinuousLowFps),
+            _ => Err(ProtocolError::InvalidMessage),
+        })
+        .transpose()
 }
 
 fn optional_bool(
@@ -245,6 +450,16 @@ fn optional_path_or_default(
     lookup(env_name)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(default_path))
+}
+
+fn optional_path(
+    lookup: &mut impl FnMut(&'static str) -> Option<String>,
+    env_name: &'static str,
+) -> Option<PathBuf> {
+    lookup(env_name)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn optional_u32(
@@ -413,6 +628,28 @@ mod tests {
             config.presence_owner_match_threshold,
             DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD
         );
+        assert_eq!(
+            config.presence_detector_kind,
+            PresenceDetectorKind::FaceOwnerMatch
+        );
+        assert_eq!(
+            config.presence_tracking_mode,
+            PresenceTrackingMode::FacePolicy
+        );
+        assert_eq!(config.presence_detector_fps, DEFAULT_PRESENCE_DETECTOR_FPS);
+        assert!(!config.presence_unload_model_when_idle);
+        assert_eq!(
+            config.presence_person_detector_model,
+            PresencePersonDetectorModel::MobileNetSsd
+        );
+        assert_eq!(
+            config.presence_person_suspect_fps,
+            DEFAULT_PRESENCE_PERSON_SUSPECT_FPS
+        );
+        assert_eq!(
+            config.presence_person_confidence_threshold,
+            DEFAULT_PRESENCE_PERSON_CONFIDENCE_THRESHOLD
+        );
         Ok(())
     }
 
@@ -421,6 +658,21 @@ mod tests {
         let values = HashMap::from([
             (ENV_PRESENCE_LOCK_ENABLED, "true"),
             (ENV_PRESENCE_OWNER_MATCH_THRESHOLD, "0.47"),
+            (ENV_PRESENCE_DETECTOR_KIND, "opencv-dnn-person"),
+            (ENV_PRESENCE_TRACKING_MODE, "continuous-low-fps"),
+            (ENV_PRESENCE_DETECTOR_FPS, "3.0"),
+            (ENV_PRESENCE_UNLOAD_MODEL_WHEN_IDLE, "false"),
+            (ENV_PRESENCE_PERSON_CONFIDENCE_THRESHOLD, "0.62"),
+            (ENV_PRESENCE_PERSON_DETECTOR_MODEL, "yolov8-onnx"),
+            (ENV_PRESENCE_PERSON_SUSPECT_FPS, "5.0"),
+            (ENV_PRESENCE_ABSENT_REQUIRED_FRAMES, "9"),
+            (ENV_PRESENCE_BOUNDARY_MARGIN_RATIO, "0.18"),
+            (ENV_PRESENCE_MOVEMENT_DELTA_RATIO, "0.07"),
+            (ENV_PRESENCE_PERSON_MODEL_PATH, r"D:\models\person.onnx"),
+            (
+                ENV_PRESENCE_PERSON_DEBUG_OUTPUT_DIR,
+                r"D:\debug\presence-person",
+            ),
         ]);
 
         let config = ServicePresenceConfig::from_lookup(|env_name| {
@@ -429,6 +681,54 @@ mod tests {
 
         assert!(config.presence_lock_enabled);
         assert_eq!(config.presence_owner_match_threshold, 0.47);
+        assert_eq!(
+            config.presence_detector_kind,
+            PresenceDetectorKind::OpenCvDnnPerson
+        );
+        assert_eq!(
+            config.presence_tracking_mode,
+            PresenceTrackingMode::ContinuousLowFps
+        );
+        assert_eq!(config.presence_detector_fps, 3.0);
+        assert!(!config.presence_unload_model_when_idle);
+        assert_eq!(config.presence_person_confidence_threshold, 0.62);
+        assert_eq!(
+            config.presence_person_detector_model,
+            PresencePersonDetectorModel::YoloV8Onnx
+        );
+        assert_eq!(config.presence_person_suspect_fps, 5.0);
+        assert_eq!(config.presence_absent_required_frames, 9);
+        assert_eq!(config.presence_boundary_margin_ratio, 0.18);
+        assert_eq!(config.presence_movement_delta_ratio, 0.07);
+        assert_eq!(
+            config.presence_person_model_path,
+            PathBuf::from(r"D:\models\person.onnx")
+        );
+        assert_eq!(config.presence_person_model_config_path, None);
+        assert_eq!(
+            config.presence_person_debug_output_dir,
+            Some(PathBuf::from(r"D:\debug\presence-person"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn yolo_person_detector_model_defaults_to_yolo_model_path() -> Result<(), ProtocolError> {
+        let values = HashMap::from([(ENV_PRESENCE_PERSON_DETECTOR_MODEL, "yolov8-onnx")]);
+
+        let config = ServicePresenceConfig::from_lookup(|env_name| {
+            values.get(env_name).map(|value| value.to_string())
+        })?;
+
+        assert_eq!(
+            config.presence_person_detector_model,
+            PresencePersonDetectorModel::YoloV8Onnx
+        );
+        assert_eq!(
+            config.presence_person_model_path,
+            PathBuf::from(DEFAULT_PRESENCE_YOLOV8_PERSON_MODEL_PATH)
+        );
+        assert_eq!(config.presence_person_model_config_path, None);
         Ok(())
     }
 }

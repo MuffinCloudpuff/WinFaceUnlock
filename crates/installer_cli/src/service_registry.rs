@@ -21,10 +21,32 @@ const REG_REQUIRED_CONSECUTIVE: &str = "RequiredConsecutiveMatchCount";
 const REG_MATCH_THRESHOLD: &str = "MatchThreshold";
 const REG_PRESENCE_LOCK_ENABLED: &str = "PresenceLockEnabled";
 const REG_PRESENCE_OWNER_MATCH_THRESHOLD: &str = "PresenceOwnerMatchThreshold";
+const REG_PRESENCE_DETECTOR_KIND: &str = "PresenceDetectorKind";
+const REG_PRESENCE_TRACKING_MODE: &str = "PresenceTrackingMode";
+const REG_PRESENCE_DETECTOR_FPS: &str = "PresenceDetectorFps";
+const REG_PRESENCE_UNLOAD_MODEL_WHEN_IDLE: &str = "PresenceUnloadModelWhenIdle";
+const REG_PRESENCE_PERSON_CONFIDENCE_THRESHOLD: &str = "PresencePersonConfidenceThreshold";
+const REG_PRESENCE_PERSON_DETECTOR_MODEL: &str = "PresencePersonDetectorModel";
+const REG_PRESENCE_PERSON_SUSPECT_FPS: &str = "PresencePersonSuspectFps";
+const REG_PRESENCE_ABSENT_REQUIRED_FRAMES: &str = "PresenceAbsentRequiredFrames";
+const REG_PRESENCE_BOUNDARY_MARGIN_RATIO: &str = "PresenceBoundaryMarginRatio";
+const REG_PRESENCE_MOVEMENT_DELTA_RATIO: &str = "PresenceMovementDeltaRatio";
+const REG_PRESENCE_PERSON_MODEL_PATH: &str = "PresencePersonModelPath";
+const REG_PRESENCE_PERSON_MODEL_CONFIG_PATH: &str = "PresencePersonModelConfigPath";
+const REG_PRESENCE_PERSON_DEBUG_OUTPUT_DIR: &str = "PresencePersonDebugOutputDir";
 
 const AUTH_MODE_LOCAL_CAMERA: &str = "local-camera";
 const DEFAULT_SERVICE_FACE_MATCH_THRESHOLD: f32 = 0.75;
 const DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD: f32 = 0.50;
+const DEFAULT_PRESENCE_DETECTOR_FPS: f32 = 2.0;
+const DEFAULT_PRESENCE_PERSON_SUSPECT_FPS: f32 = 5.0;
+const DEFAULT_PRESENCE_PERSON_CONFIDENCE_THRESHOLD: f32 = 0.50;
+const DEFAULT_PRESENCE_ABSENT_REQUIRED_FRAMES: u32 = 6;
+const DEFAULT_PRESENCE_BOUNDARY_MARGIN_RATIO: f32 = 0.12;
+const DEFAULT_PRESENCE_MOVEMENT_DELTA_RATIO: f32 = 0.04;
+const DEFAULT_PRESENCE_PERSON_DETECTOR_MODEL: &str = "mobilenet-ssd";
+const DEFAULT_PRESENCE_PERSON_MODEL_PATH: &str = r"models\MobileNetSSD_deploy.caffemodel";
+const DEFAULT_PRESENCE_PERSON_MODEL_CONFIG_PATH: &str = r"models\MobileNetSSD_deploy.prototxt";
 const DEFAULT_MINIFASNET_MODEL_PATH: &str = r"models\minifasnet_v2.onnx";
 const DEFAULT_MINIFASNET_CROP_SCALE: f32 = 2.7;
 const DEFAULT_MINIFASNET_MIN_LIVE_SCORE: f32 = 0.80;
@@ -50,6 +72,18 @@ pub struct ServiceAuthRegistryConfig {
     pub match_threshold: f32,
     pub presence_lock_enabled: bool,
     pub presence_owner_match_threshold: f32,
+    pub presence_detector_kind: String,
+    pub presence_tracking_mode: String,
+    pub presence_detector_fps: f32,
+    pub presence_unload_model_when_idle: bool,
+    pub presence_person_confidence_threshold: f32,
+    pub presence_person_detector_model: String,
+    pub presence_person_suspect_fps: f32,
+    pub presence_absent_required_frames: u32,
+    pub presence_boundary_margin_ratio: f32,
+    pub presence_movement_delta_ratio: f32,
+    pub presence_person_model_path: PathBuf,
+    pub presence_person_model_config_path: Option<PathBuf>,
 }
 
 impl ServiceAuthRegistryConfig {
@@ -74,8 +108,22 @@ impl ServiceAuthRegistryConfig {
             max_auth_frames: 30,
             required_consecutive_match_count: 2,
             match_threshold: DEFAULT_SERVICE_FACE_MATCH_THRESHOLD,
-            presence_lock_enabled: true,
+            presence_lock_enabled: false,
             presence_owner_match_threshold: DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD,
+            presence_detector_kind: "face-owner-match".to_owned(),
+            presence_tracking_mode: "face-policy".to_owned(),
+            presence_detector_fps: DEFAULT_PRESENCE_DETECTOR_FPS,
+            presence_unload_model_when_idle: false,
+            presence_person_confidence_threshold: DEFAULT_PRESENCE_PERSON_CONFIDENCE_THRESHOLD,
+            presence_person_detector_model: DEFAULT_PRESENCE_PERSON_DETECTOR_MODEL.to_owned(),
+            presence_person_suspect_fps: DEFAULT_PRESENCE_PERSON_SUSPECT_FPS,
+            presence_absent_required_frames: DEFAULT_PRESENCE_ABSENT_REQUIRED_FRAMES,
+            presence_boundary_margin_ratio: DEFAULT_PRESENCE_BOUNDARY_MARGIN_RATIO,
+            presence_movement_delta_ratio: DEFAULT_PRESENCE_MOVEMENT_DELTA_RATIO,
+            presence_person_model_path: PathBuf::from(DEFAULT_PRESENCE_PERSON_MODEL_PATH),
+            presence_person_model_config_path: Some(PathBuf::from(
+                DEFAULT_PRESENCE_PERSON_MODEL_CONFIG_PATH,
+            )),
         }
     }
 }
@@ -91,6 +139,38 @@ pub struct ServiceAuthRegistryStatus {
     pub minifasnet_max_spoof_frame_ratio: Option<String>,
     pub presence_lock_enabled: Option<String>,
     pub presence_owner_match_threshold: Option<String>,
+    pub presence_detector_kind: Option<String>,
+    pub presence_tracking_mode: Option<String>,
+    pub presence_detector_fps: Option<String>,
+    pub presence_unload_model_when_idle: Option<String>,
+    pub presence_person_confidence_threshold: Option<String>,
+    pub presence_person_detector_model: Option<String>,
+    pub presence_person_suspect_fps: Option<String>,
+    pub presence_absent_required_frames: Option<String>,
+    pub presence_boundary_margin_ratio: Option<String>,
+    pub presence_movement_delta_ratio: Option<String>,
+    pub presence_person_model_path: Option<String>,
+    pub presence_person_model_config_path: Option<String>,
+    pub presence_person_debug_output_dir: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ServicePresenceRegistryPatch {
+    pub presence_lock_enabled: Option<bool>,
+    pub presence_owner_match_threshold: Option<f32>,
+    pub presence_detector_kind: Option<String>,
+    pub presence_tracking_mode: Option<String>,
+    pub presence_detector_fps: Option<f32>,
+    pub presence_unload_model_when_idle: Option<bool>,
+    pub presence_person_confidence_threshold: Option<f32>,
+    pub presence_person_detector_model: Option<String>,
+    pub presence_person_suspect_fps: Option<f32>,
+    pub presence_absent_required_frames: Option<u32>,
+    pub presence_boundary_margin_ratio: Option<f32>,
+    pub presence_movement_delta_ratio: Option<f32>,
+    pub presence_person_model_path: Option<PathBuf>,
+    pub presence_person_model_config_path: Option<Option<PathBuf>>,
+    pub presence_person_debug_output_dir: Option<Option<PathBuf>>,
 }
 
 pub struct ServiceAuthRegistry;
@@ -176,6 +256,139 @@ impl ServiceAuthRegistry {
             REG_PRESENCE_OWNER_MATCH_THRESHOLD,
             &config.presence_owner_match_threshold.to_string(),
         )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_DETECTOR_KIND,
+            &config.presence_detector_kind,
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_TRACKING_MODE,
+            &config.presence_tracking_mode,
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_DETECTOR_FPS,
+            &config.presence_detector_fps.to_string(),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_UNLOAD_MODEL_WHEN_IDLE,
+            bool_registry_value(config.presence_unload_model_when_idle),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_PERSON_CONFIDENCE_THRESHOLD,
+            &config.presence_person_confidence_threshold.to_string(),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_PERSON_DETECTOR_MODEL,
+            &config.presence_person_detector_model,
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_PERSON_SUSPECT_FPS,
+            &config.presence_person_suspect_fps.to_string(),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_ABSENT_REQUIRED_FRAMES,
+            &config.presence_absent_required_frames.to_string(),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_BOUNDARY_MARGIN_RATIO,
+            &config.presence_boundary_margin_ratio.to_string(),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_MOVEMENT_DELTA_RATIO,
+            &config.presence_movement_delta_ratio.to_string(),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_PERSON_MODEL_PATH,
+            &config.presence_person_model_path.display().to_string(),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_PERSON_MODEL_CONFIG_PATH,
+            &config
+                .presence_person_model_config_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+        )?;
+        Ok(())
+    }
+
+    pub fn configure_presence_lock(
+        patch: &ServicePresenceRegistryPatch,
+    ) -> Result<(), ServiceRegistryError> {
+        if let Some(value) = patch.presence_lock_enabled {
+            registry::set_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_LOCK_ENABLED,
+                bool_registry_value(value),
+            )?;
+        }
+        set_optional_f32(
+            REG_PRESENCE_OWNER_MATCH_THRESHOLD,
+            patch.presence_owner_match_threshold,
+        )?;
+        set_optional_string(
+            REG_PRESENCE_DETECTOR_KIND,
+            patch.presence_detector_kind.as_deref(),
+        )?;
+        set_optional_string(
+            REG_PRESENCE_TRACKING_MODE,
+            patch.presence_tracking_mode.as_deref(),
+        )?;
+        set_optional_f32(REG_PRESENCE_DETECTOR_FPS, patch.presence_detector_fps)?;
+        if let Some(value) = patch.presence_unload_model_when_idle {
+            registry::set_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_UNLOAD_MODEL_WHEN_IDLE,
+                bool_registry_value(value),
+            )?;
+        }
+        set_optional_f32(
+            REG_PRESENCE_PERSON_CONFIDENCE_THRESHOLD,
+            patch.presence_person_confidence_threshold,
+        )?;
+        set_optional_string(
+            REG_PRESENCE_PERSON_DETECTOR_MODEL,
+            patch.presence_person_detector_model.as_deref(),
+        )?;
+        set_optional_f32(
+            REG_PRESENCE_PERSON_SUSPECT_FPS,
+            patch.presence_person_suspect_fps,
+        )?;
+        set_optional_u32(
+            REG_PRESENCE_ABSENT_REQUIRED_FRAMES,
+            patch.presence_absent_required_frames,
+        )?;
+        set_optional_f32(
+            REG_PRESENCE_BOUNDARY_MARGIN_RATIO,
+            patch.presence_boundary_margin_ratio,
+        )?;
+        set_optional_f32(
+            REG_PRESENCE_MOVEMENT_DELTA_RATIO,
+            patch.presence_movement_delta_ratio,
+        )?;
+        set_optional_path(
+            REG_PRESENCE_PERSON_MODEL_PATH,
+            &patch.presence_person_model_path,
+        )?;
+        set_optional_nullable_path(
+            REG_PRESENCE_PERSON_MODEL_CONFIG_PATH,
+            &patch.presence_person_model_config_path,
+        )?;
+        set_optional_nullable_path(
+            REG_PRESENCE_PERSON_DEBUG_OUTPUT_DIR,
+            &patch.presence_person_debug_output_dir,
+        )?;
         Ok(())
     }
 
@@ -208,6 +421,58 @@ impl ServiceAuthRegistry {
                 SERVICE_CONFIG_REGISTRY_PATH,
                 REG_PRESENCE_OWNER_MATCH_THRESHOLD,
             ),
+            presence_detector_kind: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_DETECTOR_KIND,
+            ),
+            presence_tracking_mode: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_TRACKING_MODE,
+            ),
+            presence_detector_fps: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_DETECTOR_FPS,
+            ),
+            presence_unload_model_when_idle: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_UNLOAD_MODEL_WHEN_IDLE,
+            ),
+            presence_person_confidence_threshold: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_PERSON_CONFIDENCE_THRESHOLD,
+            ),
+            presence_person_detector_model: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_PERSON_DETECTOR_MODEL,
+            ),
+            presence_person_suspect_fps: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_PERSON_SUSPECT_FPS,
+            ),
+            presence_absent_required_frames: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_ABSENT_REQUIRED_FRAMES,
+            ),
+            presence_boundary_margin_ratio: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_BOUNDARY_MARGIN_RATIO,
+            ),
+            presence_movement_delta_ratio: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_MOVEMENT_DELTA_RATIO,
+            ),
+            presence_person_model_path: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_PERSON_MODEL_PATH,
+            ),
+            presence_person_model_config_path: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_PERSON_MODEL_CONFIG_PATH,
+            ),
+            presence_person_debug_output_dir: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_PERSON_DEBUG_OUTPUT_DIR,
+            ),
         }
     }
 }
@@ -222,6 +487,57 @@ fn set_optional_u32(
 ) -> Result<(), ServiceRegistryError> {
     if let Some(value) = value {
         registry::set_string_value(SERVICE_CONFIG_REGISTRY_PATH, value_name, &value.to_string())?;
+    }
+    Ok(())
+}
+
+fn set_optional_f32(
+    value_name: &'static str,
+    value: Option<f32>,
+) -> Result<(), ServiceRegistryError> {
+    if let Some(value) = value {
+        registry::set_string_value(SERVICE_CONFIG_REGISTRY_PATH, value_name, &value.to_string())?;
+    }
+    Ok(())
+}
+
+fn set_optional_string(
+    value_name: &'static str,
+    value: Option<&str>,
+) -> Result<(), ServiceRegistryError> {
+    if let Some(value) = value {
+        registry::set_string_value(SERVICE_CONFIG_REGISTRY_PATH, value_name, value)?;
+    }
+    Ok(())
+}
+
+fn set_optional_path(
+    value_name: &'static str,
+    value: &Option<PathBuf>,
+) -> Result<(), ServiceRegistryError> {
+    if let Some(value) = value {
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            value_name,
+            &value.display().to_string(),
+        )?;
+    }
+    Ok(())
+}
+
+fn set_optional_nullable_path(
+    value_name: &'static str,
+    value: &Option<Option<PathBuf>>,
+) -> Result<(), ServiceRegistryError> {
+    if let Some(value) = value {
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            value_name,
+            &value
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+        )?;
     }
     Ok(())
 }
@@ -453,10 +769,30 @@ mod tests {
         assert_eq!(config.camera_id, "opencv-index:0");
         assert_eq!(config.required_consecutive_match_count, 2);
         assert_eq!(config.match_threshold, DEFAULT_SERVICE_FACE_MATCH_THRESHOLD);
-        assert!(config.presence_lock_enabled);
+        assert!(!config.presence_lock_enabled);
         assert_eq!(
             config.presence_owner_match_threshold,
             DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD
+        );
+        assert_eq!(config.presence_detector_kind, "face-owner-match");
+        assert_eq!(config.presence_tracking_mode, "face-policy");
+        assert_eq!(config.presence_detector_fps, DEFAULT_PRESENCE_DETECTOR_FPS);
+        assert!(!config.presence_unload_model_when_idle);
+        assert_eq!(
+            config.presence_person_detector_model,
+            DEFAULT_PRESENCE_PERSON_DETECTOR_MODEL
+        );
+        assert_eq!(
+            config.presence_person_suspect_fps,
+            DEFAULT_PRESENCE_PERSON_SUSPECT_FPS
+        );
+        assert_eq!(
+            config.presence_person_confidence_threshold,
+            DEFAULT_PRESENCE_PERSON_CONFIDENCE_THRESHOLD
+        );
+        assert_eq!(
+            config.presence_absent_required_frames,
+            DEFAULT_PRESENCE_ABSENT_REQUIRED_FRAMES
         );
         assert_eq!(
             config.minifasnet_model_path,

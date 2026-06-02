@@ -1184,6 +1184,7 @@ dependencies = [
  "face_liveness",
  "hardware_binding",
  "ipc",
+ "opencv",
  "serde",
  "serde_json",
  "video_provider",

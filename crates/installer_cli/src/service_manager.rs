@@ -8,7 +8,10 @@ use std::{
 
 use common_protocol::SERVICE_NAME;
 
-use crate::{provider_registry::ProviderRegistryError, service_registry::ServiceRegistryError};
+use crate::{
+    provider_registry::ProviderRegistryError, resource_directory::ResourceDirectoryError,
+    service_registry::ServiceRegistryError,
+};
 use windows_service::{
     service::{
         ServiceAccess, ServiceAction, ServiceActionType, ServiceErrorControl,
@@ -121,6 +124,24 @@ impl ServiceManagerFacade {
         wait_for_service_deleted(&self.manager)
     }
 
+    pub fn uninstall_service_if_exists(&self, stop_first: bool) -> Result<(), InstallerError> {
+        let access = ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE;
+        let service = match self.manager.open_service(SERVICE_NAME, access) {
+            Ok(service) => service,
+            Err(error) if is_service_missing_error(&error) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+
+        if stop_first && service.query_status()?.current_state != ServiceState::Stopped {
+            service.stop()?;
+            wait_for_service_state(&service, ServiceState::Stopped)?;
+        }
+        service.delete()?;
+        drop(service);
+
+        wait_for_service_deleted(&self.manager)
+    }
+
     pub fn run_lifecycle_command(
         &self,
         command: ServiceLifecycleCommand,
@@ -149,6 +170,19 @@ impl ServiceManagerFacade {
                 wait_for_service_state(&service, ServiceState::Stopped)
             }
         }
+    }
+
+    pub fn restart_service(&self) -> Result<(), InstallerError> {
+        let service = self.manager.open_service(
+            SERVICE_NAME,
+            ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::START,
+        )?;
+        if service.query_status()?.current_state != ServiceState::Stopped {
+            service.stop()?;
+            wait_for_service_state(&service, ServiceState::Stopped)?;
+        }
+        service.start::<&str>(&[])?;
+        wait_for_service_state(&service, ServiceState::Running)
     }
 
     pub fn query_service_status(&self) -> Result<ServiceStatus, InstallerError> {
@@ -254,6 +288,7 @@ pub enum InstallerError {
     InvalidArguments(String),
     Io(std::io::Error),
     ProviderRegistry(ProviderRegistryError),
+    ResourceDirectory(ResourceDirectoryError),
     ServiceRegistry(ServiceRegistryError),
     Service(windows_service::Error),
     TimedOut(String),
@@ -265,6 +300,7 @@ impl fmt::Display for InstallerError {
             Self::InvalidArguments(message) => write!(formatter, "invalid arguments: {message}"),
             Self::Io(error) => write!(formatter, "io error: {error}"),
             Self::ProviderRegistry(error) => write!(formatter, "provider registry error: {error}"),
+            Self::ResourceDirectory(error) => write!(formatter, "{error}"),
             Self::ServiceRegistry(error) => write!(formatter, "service registry error: {error}"),
             Self::Service(windows_service::Error::Winapi(error)) => {
                 write!(formatter, "windows service winapi error: {error}")
@@ -292,6 +328,12 @@ impl From<windows_service::Error> for InstallerError {
 impl From<ProviderRegistryError> for InstallerError {
     fn from(error: ProviderRegistryError) -> Self {
         Self::ProviderRegistry(error)
+    }
+}
+
+impl From<ResourceDirectoryError> for InstallerError {
+    fn from(error: ResourceDirectoryError) -> Self {
+        Self::ResourceDirectory(error)
     }
 }
 

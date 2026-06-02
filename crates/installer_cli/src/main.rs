@@ -1,5 +1,7 @@
 mod commands;
+mod installation;
 mod provider_registry;
+mod resource_directory;
 mod service_manager;
 mod service_registry;
 

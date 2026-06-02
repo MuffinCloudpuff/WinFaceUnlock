@@ -8,6 +8,8 @@ pub mod presence_audit;
 pub mod presence_camera;
 pub mod presence_helper;
 pub mod presence_monitor;
+pub mod presence_person_camera;
+pub mod presence_person_detector;
 pub mod presence_policy;
 pub mod presence_service;
 pub mod screen_snapshot;

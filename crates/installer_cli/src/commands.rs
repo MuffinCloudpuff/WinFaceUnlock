@@ -1,11 +1,15 @@
 use std::{ffi::OsString, path::PathBuf};
 
 use crate::{
+    installation::{FullInstallPlan, FullUninstallPlan, InstallerOrchestrator},
     provider_registry::{ProviderInstallPlan, ProviderRegistry, default_provider_binary_path},
+    resource_directory::ResourceDirectoryPlan,
     service_manager::{
         InstallerError, ServiceInstallPlan, ServiceLifecycleCommand, ServiceManagerFacade,
     },
-    service_registry::{ServiceAuthRegistry, ServiceAuthRegistryConfig},
+    service_registry::{
+        ServiceAuthRegistry, ServiceAuthRegistryConfig, ServicePresenceRegistryPatch,
+    },
 };
 use windows_provider::{
     TILE_VISIBILITY_HIDDEN_UNTIL_READY, TILE_VISIBILITY_VISIBLE, WAKE_AUTH_SOURCE_LOCAL_CAMERA,
@@ -14,6 +18,21 @@ use windows_provider::{
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum InstallerCommand {
+    Install {
+        plan: Box<FullInstallPlan>,
+        dry_run: bool,
+    },
+    Uninstall {
+        plan: Box<FullUninstallPlan>,
+        dry_run: bool,
+    },
+    Repair {
+        plan: Box<FullInstallPlan>,
+        dry_run: bool,
+    },
+    EmergencyDisable {
+        dry_run: bool,
+    },
     InstallService {
         service_binary_path: PathBuf,
         start_after_install: bool,
@@ -31,7 +50,11 @@ pub enum InstallerCommand {
         dry_run: bool,
     },
     ConfigureServiceAuth {
-        config: ServiceAuthRegistryConfig,
+        config: Box<ServiceAuthRegistryConfig>,
+        dry_run: bool,
+    },
+    ConfigurePresenceLock {
+        patch: Box<ServicePresenceRegistryPatch>,
         dry_run: bool,
     },
     ServiceAuthStatus,
@@ -60,6 +83,40 @@ pub fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<(), Insta
 
 fn run_command(command: InstallerCommand) -> Result<(), InstallerError> {
     match command {
+        InstallerCommand::Install { plan, dry_run } => {
+            if dry_run {
+                print_full_install_plan("install dry-run", &plan);
+                return Ok(());
+            }
+            InstallerOrchestrator::install(&plan)?;
+            println!("installed WinFaceUnlock");
+        }
+        InstallerCommand::Uninstall { plan, dry_run } => {
+            if dry_run {
+                print_full_uninstall_plan("uninstall dry-run", &plan);
+                return Ok(());
+            }
+            InstallerOrchestrator::uninstall(&plan)?;
+            println!("uninstalled WinFaceUnlock");
+        }
+        InstallerCommand::Repair { plan, dry_run } => {
+            if dry_run {
+                print_full_install_plan("repair dry-run", &plan);
+                return Ok(());
+            }
+            InstallerOrchestrator::repair(&plan)?;
+            println!("repaired WinFaceUnlock");
+        }
+        InstallerCommand::EmergencyDisable { dry_run } => {
+            if dry_run {
+                println!(
+                    "emergency-disable dry-run: credential provider enumeration key will be removed"
+                );
+                return Ok(());
+            }
+            InstallerOrchestrator::emergency_disable_provider()?;
+            println!("emergency disabled WinFaceUnlock");
+        }
         InstallerCommand::InstallService {
             service_binary_path,
             start_after_install,
@@ -130,6 +187,15 @@ fn run_command(command: InstallerCommand) -> Result<(), InstallerError> {
             println!("configured WinFaceUnlockService auth");
             print_service_auth_config("service auth config", &config);
         }
+        InstallerCommand::ConfigurePresenceLock { patch, dry_run } => {
+            if dry_run {
+                print_presence_registry_patch("configure-presence-lock dry-run", &patch);
+                return Ok(());
+            }
+            ServiceAuthRegistry::configure_presence_lock(&patch)?;
+            println!("configured WinFaceUnlockService presence lock");
+            print_presence_registry_patch("presence lock patch", &patch);
+        }
         InstallerCommand::ServiceAuthStatus => {
             let status = ServiceAuthRegistry::status();
             println!(
@@ -171,6 +237,94 @@ fn run_command(command: InstallerCommand) -> Result<(), InstallerError> {
                 "presence_owner_match_threshold: {}",
                 status
                     .presence_owner_match_threshold
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
+            println!(
+                "presence_detector_kind: {}",
+                status
+                    .presence_detector_kind
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
+            println!(
+                "presence_tracking_mode: {}",
+                status
+                    .presence_tracking_mode
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
+            println!(
+                "presence_detector_fps: {}",
+                status.presence_detector_fps.as_deref().unwrap_or("<unset>")
+            );
+            println!(
+                "presence_unload_model_when_idle: {}",
+                status
+                    .presence_unload_model_when_idle
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
+            println!(
+                "presence_person_confidence_threshold: {}",
+                status
+                    .presence_person_confidence_threshold
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
+            println!(
+                "presence_person_detector_model: {}",
+                status
+                    .presence_person_detector_model
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
+            println!(
+                "presence_person_suspect_fps: {}",
+                status
+                    .presence_person_suspect_fps
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
+            println!(
+                "presence_absent_required_frames: {}",
+                status
+                    .presence_absent_required_frames
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
+            println!(
+                "presence_boundary_margin_ratio: {}",
+                status
+                    .presence_boundary_margin_ratio
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
+            println!(
+                "presence_movement_delta_ratio: {}",
+                status
+                    .presence_movement_delta_ratio
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
+            println!(
+                "presence_person_model_path: {}",
+                status
+                    .presence_person_model_path
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
+            println!(
+                "presence_person_model_config_path: {}",
+                status
+                    .presence_person_model_config_path
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
+            println!(
+                "presence_person_debug_output_dir: {}",
+                status
+                    .presence_person_debug_output_dir
                     .as_deref()
                     .unwrap_or("<unset>")
             );
@@ -245,6 +399,27 @@ fn parse_command(args: &[String]) -> Result<InstallerCommand, InstallerError> {
     let dry_run = has_flag(args, "--dry-run");
 
     match command {
+        "install" => Ok(InstallerCommand::Install {
+            plan: Box::new(parse_full_install_plan(
+                args,
+                service_binary_path,
+                provider_binary_path,
+            )?),
+            dry_run,
+        }),
+        "uninstall" => Ok(InstallerCommand::Uninstall {
+            plan: Box::new(parse_full_uninstall_plan(args)?),
+            dry_run,
+        }),
+        "repair" => Ok(InstallerCommand::Repair {
+            plan: Box::new(parse_full_install_plan(
+                args,
+                service_binary_path,
+                provider_binary_path,
+            )?),
+            dry_run,
+        }),
+        "emergency-disable" => Ok(InstallerCommand::EmergencyDisable { dry_run }),
         "install-service" => Ok(InstallerCommand::InstallService {
             service_binary_path,
             start_after_install: has_flag(args, "--start"),
@@ -262,7 +437,11 @@ fn parse_command(args: &[String]) -> Result<InstallerCommand, InstallerError> {
             dry_run,
         }),
         "configure-service-auth" => Ok(InstallerCommand::ConfigureServiceAuth {
-            config: parse_service_auth_config(args)?,
+            config: Box::new(parse_service_auth_config(args)?),
+            dry_run,
+        }),
+        "configure-presence-lock" => Ok(InstallerCommand::ConfigurePresenceLock {
+            patch: Box::new(parse_presence_registry_patch(args)?),
             dry_run,
         }),
         "service-auth-status" => Ok(InstallerCommand::ServiceAuthStatus),
@@ -281,6 +460,44 @@ fn parse_command(args: &[String]) -> Result<InstallerCommand, InstallerError> {
             "unknown command: {other}"
         ))),
     }
+}
+
+fn parse_full_install_plan(
+    args: &[String],
+    service_binary_path: PathBuf,
+    provider_binary_path: PathBuf,
+) -> Result<FullInstallPlan, InstallerError> {
+    let provider_plan = ProviderInstallPlan::new(provider_binary_path)
+        .with_wake_auth_source(wake_auth_source_argument(args)?)
+        .with_tile_visibility(tile_visibility_argument(args))
+        .with_auto_wake_on_advise(!has_flag(args, "--no-auto-wake-on-advise"));
+    let auth_config = if argument_value(args, "--face-template").is_some() {
+        Some(parse_service_auth_config(args)?)
+    } else {
+        None
+    };
+
+    Ok(FullInstallPlan {
+        service_plan: ServiceInstallPlan::new(service_binary_path),
+        provider_plan,
+        resource_plan: ResourceDirectoryPlan::from_environment_or_default(),
+        auth_config,
+        start_service: has_flag(args, "--start") || has_flag(args, "--start-service"),
+    })
+}
+
+fn parse_full_uninstall_plan(args: &[String]) -> Result<FullUninstallPlan, InstallerError> {
+    if has_flag(args, "--delete-data") && has_flag(args, "--preserve-data") {
+        return Err(InstallerError::InvalidArguments(
+            "--delete-data and --preserve-data cannot be used together".to_owned(),
+        ));
+    }
+
+    Ok(FullUninstallPlan {
+        resource_plan: ResourceDirectoryPlan::from_environment_or_default(),
+        stop_service_first: !has_flag(args, "--no-stop"),
+        delete_data: !has_flag(args, "--preserve-data"),
+    })
 }
 
 fn tile_visibility_argument(args: &[String]) -> &'static str {
@@ -336,11 +553,67 @@ fn parse_service_auth_config(args: &[String]) -> Result<ServiceAuthRegistryConfi
     if let Some(match_threshold) = optional_f32(args, "--match-threshold")? {
         config.match_threshold = match_threshold;
     }
-    config.presence_lock_enabled = !has_flag(args, "--disable-presence-lock");
+    if has_flag(args, "--enable-presence-lock") && has_flag(args, "--disable-presence-lock") {
+        return Err(InstallerError::InvalidArguments(
+            "--enable-presence-lock and --disable-presence-lock cannot be used together".to_owned(),
+        ));
+    }
+    config.presence_lock_enabled = has_flag(args, "--enable-presence-lock");
     if let Some(presence_owner_match_threshold) =
         optional_f32(args, "--presence-owner-match-threshold")?
     {
         config.presence_owner_match_threshold = presence_owner_match_threshold;
+    }
+    if let Some(presence_detector_kind) = argument_value(args, "--presence-detector-kind") {
+        validate_presence_detector_kind(presence_detector_kind)?;
+        config.presence_detector_kind = presence_detector_kind.to_owned();
+    }
+    if let Some(presence_tracking_mode) = argument_value(args, "--presence-tracking-mode") {
+        validate_presence_tracking_mode(presence_tracking_mode)?;
+        config.presence_tracking_mode = presence_tracking_mode.to_owned();
+    }
+    if let Some(presence_detector_fps) = optional_f32(args, "--presence-detector-fps")? {
+        config.presence_detector_fps = presence_detector_fps;
+    }
+    config.presence_unload_model_when_idle = has_flag(args, "--presence-unload-model-when-idle");
+    if let Some(presence_person_confidence_threshold) =
+        optional_f32(args, "--presence-person-confidence-threshold")?
+    {
+        config.presence_person_confidence_threshold = presence_person_confidence_threshold;
+    }
+    if let Some(presence_person_detector_model) =
+        argument_value(args, "--presence-person-detector-model")
+    {
+        validate_presence_person_detector_model(presence_person_detector_model)?;
+        apply_presence_person_detector_model_defaults(&mut config, presence_person_detector_model);
+    }
+    if let Some(presence_person_suspect_fps) = optional_f32(args, "--presence-person-suspect-fps")?
+    {
+        config.presence_person_suspect_fps = presence_person_suspect_fps;
+    }
+    if let Some(presence_absent_required_frames) =
+        optional_u32(args, "--presence-absent-required-frames")?
+    {
+        config.presence_absent_required_frames = presence_absent_required_frames;
+    }
+    if let Some(presence_boundary_margin_ratio) =
+        optional_f32(args, "--presence-boundary-margin-ratio")?
+    {
+        config.presence_boundary_margin_ratio = presence_boundary_margin_ratio;
+    }
+    if let Some(presence_movement_delta_ratio) =
+        optional_f32(args, "--presence-movement-delta-ratio")?
+    {
+        config.presence_movement_delta_ratio = presence_movement_delta_ratio;
+    }
+    if let Some(presence_person_model_path) = argument_value(args, "--presence-person-model") {
+        config.presence_person_model_path = PathBuf::from(presence_person_model_path);
+    }
+    if let Some(presence_person_model_config_path) =
+        argument_value(args, "--presence-person-model-config")
+    {
+        config.presence_person_model_config_path =
+            Some(PathBuf::from(presence_person_model_config_path));
     }
     if let Some(minifasnet_crop_scale) = optional_f32(args, "--minifasnet-crop-scale")? {
         config.minifasnet_crop_scale = minifasnet_crop_scale;
@@ -359,6 +632,84 @@ fn parse_service_auth_config(args: &[String]) -> Result<ServiceAuthRegistryConfi
     Ok(config)
 }
 
+fn parse_presence_registry_patch(
+    args: &[String],
+) -> Result<ServicePresenceRegistryPatch, InstallerError> {
+    if has_flag(args, "--enable-presence-lock") && has_flag(args, "--disable-presence-lock") {
+        return Err(InstallerError::InvalidArguments(
+            "--enable-presence-lock and --disable-presence-lock cannot be used together".to_owned(),
+        ));
+    }
+    let mut patch = ServicePresenceRegistryPatch {
+        presence_lock_enabled: if has_flag(args, "--enable-presence-lock") {
+            Some(true)
+        } else if has_flag(args, "--disable-presence-lock") {
+            Some(false)
+        } else {
+            None
+        },
+        ..ServicePresenceRegistryPatch::default()
+    };
+
+    patch.presence_owner_match_threshold = optional_f32(args, "--presence-owner-match-threshold")?;
+    if let Some(presence_detector_kind) = argument_value(args, "--presence-detector-kind") {
+        validate_presence_detector_kind(presence_detector_kind)?;
+        patch.presence_detector_kind = Some(presence_detector_kind.to_owned());
+    }
+    if let Some(presence_tracking_mode) = argument_value(args, "--presence-tracking-mode") {
+        validate_presence_tracking_mode(presence_tracking_mode)?;
+        patch.presence_tracking_mode = Some(presence_tracking_mode.to_owned());
+    }
+    patch.presence_detector_fps = optional_f32(args, "--presence-detector-fps")?;
+    if has_flag(args, "--presence-unload-model-when-idle") {
+        patch.presence_unload_model_when_idle = Some(true);
+    }
+    if has_flag(args, "--presence-keep-model-loaded") {
+        patch.presence_unload_model_when_idle = Some(false);
+    }
+    patch.presence_person_confidence_threshold =
+        optional_f32(args, "--presence-person-confidence-threshold")?;
+    if let Some(presence_person_detector_model) =
+        argument_value(args, "--presence-person-detector-model")
+    {
+        validate_presence_person_detector_model(presence_person_detector_model)?;
+        apply_presence_person_detector_model_patch_defaults(
+            &mut patch,
+            presence_person_detector_model,
+        );
+    }
+    patch.presence_person_suspect_fps = optional_f32(args, "--presence-person-suspect-fps")?;
+    patch.presence_absent_required_frames =
+        optional_u32(args, "--presence-absent-required-frames")?;
+    patch.presence_boundary_margin_ratio = optional_f32(args, "--presence-boundary-margin-ratio")?;
+    patch.presence_movement_delta_ratio = optional_f32(args, "--presence-movement-delta-ratio")?;
+    if let Some(presence_person_model_path) = argument_value(args, "--presence-person-model") {
+        patch.presence_person_model_path = Some(PathBuf::from(presence_person_model_path));
+    }
+    if let Some(presence_person_model_config_path) =
+        argument_value(args, "--presence-person-model-config")
+    {
+        patch.presence_person_model_config_path =
+            Some(Some(PathBuf::from(presence_person_model_config_path)));
+    }
+    if has_flag(args, "--clear-presence-person-model-config") {
+        patch.presence_person_model_config_path = Some(None);
+    }
+    if let Some(debug_output_dir) = argument_value(args, "--presence-person-debug-output-dir") {
+        patch.presence_person_debug_output_dir = Some(Some(PathBuf::from(debug_output_dir)));
+    }
+    if has_flag(args, "--clear-presence-person-debug-output-dir") {
+        patch.presence_person_debug_output_dir = Some(None);
+    }
+
+    if !presence_registry_patch_has_changes(&patch) {
+        return Err(InstallerError::InvalidArguments(
+            "configure-presence-lock requires at least one presence option".to_owned(),
+        ));
+    }
+    Ok(patch)
+}
+
 fn optional_u32(args: &[String], name: &str) -> Result<Option<u32>, InstallerError> {
     argument_value(args, name)
         .map(str::parse::<u32>)
@@ -373,6 +724,91 @@ fn optional_f32(args: &[String], name: &str) -> Result<Option<f32>, InstallerErr
         .map(str::parse::<f32>)
         .transpose()
         .map_err(|_| InstallerError::InvalidArguments(format!("{name} must be a number")))
+}
+
+fn validate_presence_detector_kind(value: &str) -> Result<(), InstallerError> {
+    match value {
+        "face-owner-match" | "opencv-dnn-person" => Ok(()),
+        _ => Err(InstallerError::InvalidArguments(
+            "--presence-detector-kind must be face-owner-match or opencv-dnn-person".to_owned(),
+        )),
+    }
+}
+
+fn validate_presence_tracking_mode(value: &str) -> Result<(), InstallerError> {
+    match value {
+        "face-policy" | "continuous-low-fps" => Ok(()),
+        _ => Err(InstallerError::InvalidArguments(
+            "--presence-tracking-mode must be face-policy or continuous-low-fps".to_owned(),
+        )),
+    }
+}
+
+fn validate_presence_person_detector_model(value: &str) -> Result<(), InstallerError> {
+    match value {
+        "mobilenet-ssd" | "yolov8-onnx" => Ok(()),
+        _ => Err(InstallerError::InvalidArguments(
+            "--presence-person-detector-model must be mobilenet-ssd or yolov8-onnx".to_owned(),
+        )),
+    }
+}
+
+fn apply_presence_person_detector_model_defaults(
+    config: &mut ServiceAuthRegistryConfig,
+    detector_model: &str,
+) {
+    config.presence_person_detector_model = detector_model.to_owned();
+    match detector_model {
+        "mobilenet-ssd" => {
+            config.presence_person_model_path =
+                PathBuf::from(r"models\MobileNetSSD_deploy.caffemodel");
+            config.presence_person_model_config_path =
+                Some(PathBuf::from(r"models\MobileNetSSD_deploy.prototxt"));
+        }
+        "yolov8-onnx" => {
+            config.presence_person_model_path = PathBuf::from(r"models\yolov8n.onnx");
+            config.presence_person_model_config_path = None;
+        }
+        _ => {}
+    }
+}
+
+fn apply_presence_person_detector_model_patch_defaults(
+    patch: &mut ServicePresenceRegistryPatch,
+    detector_model: &str,
+) {
+    patch.presence_person_detector_model = Some(detector_model.to_owned());
+    match detector_model {
+        "mobilenet-ssd" => {
+            patch.presence_person_model_path =
+                Some(PathBuf::from(r"models\MobileNetSSD_deploy.caffemodel"));
+            patch.presence_person_model_config_path =
+                Some(Some(PathBuf::from(r"models\MobileNetSSD_deploy.prototxt")));
+        }
+        "yolov8-onnx" => {
+            patch.presence_person_model_path = Some(PathBuf::from(r"models\yolov8n.onnx"));
+            patch.presence_person_model_config_path = Some(None);
+        }
+        _ => {}
+    }
+}
+
+fn presence_registry_patch_has_changes(patch: &ServicePresenceRegistryPatch) -> bool {
+    patch.presence_lock_enabled.is_some()
+        || patch.presence_owner_match_threshold.is_some()
+        || patch.presence_detector_kind.is_some()
+        || patch.presence_tracking_mode.is_some()
+        || patch.presence_detector_fps.is_some()
+        || patch.presence_unload_model_when_idle.is_some()
+        || patch.presence_person_confidence_threshold.is_some()
+        || patch.presence_person_detector_model.is_some()
+        || patch.presence_person_suspect_fps.is_some()
+        || patch.presence_absent_required_frames.is_some()
+        || patch.presence_boundary_margin_ratio.is_some()
+        || patch.presence_movement_delta_ratio.is_some()
+        || patch.presence_person_model_path.is_some()
+        || patch.presence_person_model_config_path.is_some()
+        || patch.presence_person_debug_output_dir.is_some()
 }
 
 fn default_service_binary_path() -> Result<PathBuf, InstallerError> {
@@ -405,6 +841,32 @@ fn print_install_plan(label: &str, plan: &ServiceInstallPlan) {
     println!("binary: {}", plan.service_binary_path.display());
     println!("launch_argument: --service");
     println!("account: LocalSystem");
+}
+
+fn print_full_install_plan(label: &str, plan: &FullInstallPlan) {
+    println!("{label}");
+    print_resource_directory_plan(&plan.resource_plan);
+    print_install_plan("service plan", &plan.service_plan);
+    if let Some(config) = &plan.auth_config {
+        print_service_auth_config("service auth config", config);
+    } else {
+        println!("service auth config: <unchanged>");
+    }
+    print_provider_install_plan("provider plan", &plan.provider_plan);
+    println!("start_service: {}", plan.start_service);
+}
+
+fn print_full_uninstall_plan(label: &str, plan: &FullUninstallPlan) {
+    println!("{label}");
+    print_resource_directory_plan(&plan.resource_plan);
+    println!("stop_service_first: {}", plan.stop_service_first);
+    println!("delete_data: {}", plan.delete_data);
+}
+
+fn print_resource_directory_plan(plan: &ResourceDirectoryPlan) {
+    println!("resource_root_dir: {}", plan.root_dir.display());
+    println!("presence_audit_dir: {}", plan.presence_audit_dir.display());
+    println!("resource_acl: SYSTEM=full, Administrators=full");
 }
 
 fn print_provider_install_plan(label: &str, plan: &ProviderInstallPlan) {
@@ -478,11 +940,162 @@ fn print_service_auth_config(label: &str, config: &ServiceAuthRegistryConfig) {
         "presence_owner_match_threshold: {}",
         config.presence_owner_match_threshold
     );
+    println!("presence_detector_kind: {}", config.presence_detector_kind);
+    println!("presence_tracking_mode: {}", config.presence_tracking_mode);
+    println!("presence_detector_fps: {}", config.presence_detector_fps);
+    println!(
+        "presence_unload_model_when_idle: {}",
+        config.presence_unload_model_when_idle
+    );
+    println!(
+        "presence_person_confidence_threshold: {}",
+        config.presence_person_confidence_threshold
+    );
+    println!(
+        "presence_person_detector_model: {}",
+        config.presence_person_detector_model
+    );
+    println!(
+        "presence_person_suspect_fps: {}",
+        config.presence_person_suspect_fps
+    );
+    println!(
+        "presence_absent_required_frames: {}",
+        config.presence_absent_required_frames
+    );
+    println!(
+        "presence_boundary_margin_ratio: {}",
+        config.presence_boundary_margin_ratio
+    );
+    println!(
+        "presence_movement_delta_ratio: {}",
+        config.presence_movement_delta_ratio
+    );
+    println!(
+        "presence_person_model_path: {}",
+        config.presence_person_model_path.display()
+    );
+    println!(
+        "presence_person_model_config_path: {}",
+        config
+            .presence_person_model_config_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<none>".to_owned())
+    );
+}
+
+fn print_presence_registry_patch(label: &str, patch: &ServicePresenceRegistryPatch) {
+    println!("{label}");
+    print_optional_bool("presence_lock_enabled", patch.presence_lock_enabled);
+    print_optional_f32(
+        "presence_owner_match_threshold",
+        patch.presence_owner_match_threshold,
+    );
+    print_optional_string(
+        "presence_detector_kind",
+        patch.presence_detector_kind.as_deref(),
+    );
+    print_optional_string(
+        "presence_tracking_mode",
+        patch.presence_tracking_mode.as_deref(),
+    );
+    print_optional_f32("presence_detector_fps", patch.presence_detector_fps);
+    print_optional_bool(
+        "presence_unload_model_when_idle",
+        patch.presence_unload_model_when_idle,
+    );
+    print_optional_f32(
+        "presence_person_confidence_threshold",
+        patch.presence_person_confidence_threshold,
+    );
+    print_optional_string(
+        "presence_person_detector_model",
+        patch.presence_person_detector_model.as_deref(),
+    );
+    print_optional_f32(
+        "presence_person_suspect_fps",
+        patch.presence_person_suspect_fps,
+    );
+    print_optional_u32(
+        "presence_absent_required_frames",
+        patch.presence_absent_required_frames,
+    );
+    print_optional_f32(
+        "presence_boundary_margin_ratio",
+        patch.presence_boundary_margin_ratio,
+    );
+    print_optional_f32(
+        "presence_movement_delta_ratio",
+        patch.presence_movement_delta_ratio,
+    );
+    print_optional_path(
+        "presence_person_model_path",
+        &patch.presence_person_model_path,
+    );
+    print_optional_nullable_path(
+        "presence_person_model_config_path",
+        &patch.presence_person_model_config_path,
+    );
+    print_optional_nullable_path(
+        "presence_person_debug_output_dir",
+        &patch.presence_person_debug_output_dir,
+    );
+}
+
+fn print_optional_bool(name: &str, value: Option<bool>) {
+    if let Some(value) = value {
+        println!("{name}: {value}");
+    }
+}
+
+fn print_optional_u32(name: &str, value: Option<u32>) {
+    if let Some(value) = value {
+        println!("{name}: {value}");
+    }
+}
+
+fn print_optional_f32(name: &str, value: Option<f32>) {
+    if let Some(value) = value {
+        println!("{name}: {value}");
+    }
+}
+
+fn print_optional_string(name: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        println!("{name}: {value}");
+    }
+}
+
+fn print_optional_path(name: &str, value: &Option<PathBuf>) {
+    if let Some(value) = value {
+        println!("{name}: {}", value.display());
+    }
+}
+
+fn print_optional_nullable_path(name: &str, value: &Option<Option<PathBuf>>) {
+    if let Some(value) = value {
+        println!(
+            "{name}: {}",
+            value
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<none>".to_owned())
+        );
+    }
 }
 
 fn print_usage() {
     println!("WinFaceUnlock installer");
     println!("Usage:");
+    println!(
+        "  installer_cli install [--service-binary <path>] [--provider-binary <path>] [--face-template <path>] [--start|--start-service] [--wake-source local-camera|manual-test] [--show-tile-before-ready] [--no-auto-wake-on-advise] [--dry-run]"
+    );
+    println!("  installer_cli uninstall [--no-stop] [--preserve-data|--delete-data] [--dry-run]");
+    println!(
+        "  installer_cli repair [--service-binary <path>] [--provider-binary <path>] [--face-template <path>] [--start|--start-service] [--dry-run]"
+    );
+    println!("  installer_cli emergency-disable [--dry-run]");
     println!("  installer_cli install-service [--service-binary <path>] [--start] [--dry-run]");
     println!("  installer_cli uninstall-service [--no-stop] [--dry-run]");
     println!("  installer_cli start-service");
@@ -490,7 +1103,10 @@ fn print_usage() {
     println!("  installer_cli service-status");
     println!("  installer_cli repair-service [--service-binary <path>] [--dry-run]");
     println!(
-        "  installer_cli configure-service-auth --face-template <path> [--camera-id opencv-index:0] [--yunet-model <path>] [--sface-model <path>] [--minifasnet-model <path>] [--minifasnet-crop-scale 2.7] [--minifasnet-min-live-score 0.80] [--minifasnet-min-spoof-score 0.70] [--minifasnet-max-spoof-frame-ratio 0.40] [--match-threshold 0.75] [--presence-owner-match-threshold 0.50] [--disable-presence-lock] [--dry-run]"
+        "  installer_cli configure-service-auth --face-template <path> [--camera-id opencv-index:0] [--yunet-model <path>] [--sface-model <path>] [--minifasnet-model <path>] [--minifasnet-crop-scale 2.7] [--minifasnet-min-live-score 0.80] [--minifasnet-min-spoof-score 0.70] [--minifasnet-max-spoof-frame-ratio 0.40] [--match-threshold 0.75] [--enable-presence-lock|--disable-presence-lock] [--presence-owner-match-threshold 0.50] [--presence-detector-kind face-owner-match|opencv-dnn-person] [--presence-tracking-mode face-policy|continuous-low-fps] [--presence-detector-fps 2.0] [--presence-person-detector-model mobilenet-ssd|yolov8-onnx] [--presence-person-suspect-fps 5.0] [--presence-person-confidence-threshold 0.50] [--presence-absent-required-frames 6] [--presence-boundary-margin-ratio 0.12] [--presence-movement-delta-ratio 0.04] [--presence-person-model <path>] [--presence-person-model-config <path>] [--presence-unload-model-when-idle] [--dry-run]"
+    );
+    println!(
+        "  installer_cli configure-presence-lock [--enable-presence-lock|--disable-presence-lock] [--presence-detector-kind face-owner-match|opencv-dnn-person] [--presence-tracking-mode face-policy|continuous-low-fps] [--presence-detector-fps 2.0] [--presence-person-detector-model mobilenet-ssd|yolov8-onnx] [--presence-person-suspect-fps 5.0] [--presence-person-confidence-threshold 0.50] [--presence-absent-required-frames 6] [--presence-boundary-margin-ratio 0.12] [--presence-movement-delta-ratio 0.04] [--presence-person-model <path>] [--presence-person-model-config <path>|--clear-presence-person-model-config] [--presence-person-debug-output-dir <path>|--clear-presence-person-debug-output-dir] [--dry-run]"
     );
     println!("  installer_cli service-auth-status");
     println!(
@@ -536,6 +1152,118 @@ mod tests {
                 stop_first: true,
                 dry_run: false,
             }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_full_install_combines_service_provider_and_optional_auth() -> Result<(), InstallerError>
+    {
+        let args = vec![
+            "installer_cli".to_owned(),
+            "install".to_owned(),
+            "--service-binary".to_owned(),
+            r"C:\WinFaceUnlock\win_service.exe".to_owned(),
+            "--provider-binary".to_owned(),
+            r"C:\WinFaceUnlock\windows_provider.dll".to_owned(),
+            "--face-template".to_owned(),
+            r"C:\WinFaceUnlock\phase4-face-template.json".to_owned(),
+            "--wake-source".to_owned(),
+            "manual-test".to_owned(),
+            "--show-tile-before-ready".to_owned(),
+            "--start-service".to_owned(),
+            "--dry-run".to_owned(),
+        ];
+
+        let InstallerCommand::Install { plan, dry_run } = parse_command(&args)? else {
+            return Err(InstallerError::InvalidArguments(
+                "unexpected command".to_owned(),
+            ));
+        };
+
+        assert!(dry_run);
+        assert_eq!(
+            plan.service_plan.service_binary_path,
+            PathBuf::from(r"C:\WinFaceUnlock\win_service.exe")
+        );
+        assert_eq!(
+            plan.provider_plan.provider_binary_path,
+            PathBuf::from(r"C:\WinFaceUnlock\windows_provider.dll")
+        );
+        assert_eq!(
+            plan.provider_plan.wake_auth_source,
+            WAKE_AUTH_SOURCE_MANUAL_TEST
+        );
+        assert_eq!(plan.provider_plan.tile_visibility, TILE_VISIBILITY_VISIBLE);
+        assert_eq!(
+            plan.auth_config
+                .as_ref()
+                .map(|config| &config.face_template_path),
+            Some(&PathBuf::from(
+                r"C:\WinFaceUnlock\phase4-face-template.json"
+            ))
+        );
+        assert!(plan.start_service);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_full_uninstall_deletes_data_by_default() -> Result<(), InstallerError> {
+        let args = vec!["installer_cli".to_owned(), "uninstall".to_owned()];
+
+        let InstallerCommand::Uninstall { plan, dry_run } = parse_command(&args)? else {
+            return Err(InstallerError::InvalidArguments(
+                "unexpected command".to_owned(),
+            ));
+        };
+
+        assert!(!dry_run);
+        assert!(plan.stop_service_first);
+        assert!(plan.delete_data);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_full_uninstall_can_preserve_data_explicitly() -> Result<(), InstallerError> {
+        let args = vec![
+            "installer_cli".to_owned(),
+            "uninstall".to_owned(),
+            "--preserve-data".to_owned(),
+            "--no-stop".to_owned(),
+        ];
+
+        let InstallerCommand::Uninstall { plan, .. } = parse_command(&args)? else {
+            return Err(InstallerError::InvalidArguments(
+                "unexpected command".to_owned(),
+            ));
+        };
+
+        assert!(!plan.stop_service_first);
+        assert!(!plan.delete_data);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_full_uninstall_rejects_conflicting_data_flags() {
+        let args = vec![
+            "installer_cli".to_owned(),
+            "uninstall".to_owned(),
+            "--delete-data".to_owned(),
+            "--preserve-data".to_owned(),
+        ];
+
+        let result = parse_command(&args);
+
+        assert!(matches!(result, Err(InstallerError::InvalidArguments(_))));
+    }
+
+    #[test]
+    fn parse_full_emergency_disable() -> Result<(), InstallerError> {
+        let args = vec!["installer_cli".to_owned(), "emergency-disable".to_owned()];
+
+        assert_eq!(
+            parse_command(&args)?,
+            InstallerCommand::EmergencyDisable { dry_run: false }
         );
         Ok(())
     }
@@ -683,8 +1411,29 @@ mod tests {
             "0.6".to_owned(),
             "--required-consecutive".to_owned(),
             "1".to_owned(),
+            "--enable-presence-lock".to_owned(),
             "--presence-owner-match-threshold".to_owned(),
             "0.48".to_owned(),
+            "--presence-detector-kind".to_owned(),
+            "opencv-dnn-person".to_owned(),
+            "--presence-tracking-mode".to_owned(),
+            "continuous-low-fps".to_owned(),
+            "--presence-detector-fps".to_owned(),
+            "3.0".to_owned(),
+            "--presence-person-detector-model".to_owned(),
+            "yolov8-onnx".to_owned(),
+            "--presence-person-suspect-fps".to_owned(),
+            "5.0".to_owned(),
+            "--presence-person-confidence-threshold".to_owned(),
+            "0.62".to_owned(),
+            "--presence-absent-required-frames".to_owned(),
+            "8".to_owned(),
+            "--presence-boundary-margin-ratio".to_owned(),
+            "0.16".to_owned(),
+            "--presence-movement-delta-ratio".to_owned(),
+            "0.06".to_owned(),
+            "--presence-person-model".to_owned(),
+            r"D:\WinFaceUnlock\person.onnx".to_owned(),
             "--minifasnet-model".to_owned(),
             r"D:\WinFaceUnlock\minifasnet.onnx".to_owned(),
             "--minifasnet-crop-scale".to_owned(),
@@ -710,6 +1459,21 @@ mod tests {
         assert_eq!(config.required_consecutive_match_count, 1);
         assert!(config.presence_lock_enabled);
         assert_eq!(config.presence_owner_match_threshold, 0.48);
+        assert_eq!(config.presence_detector_kind, "opencv-dnn-person");
+        assert_eq!(config.presence_tracking_mode, "continuous-low-fps");
+        assert_eq!(config.presence_detector_fps, 3.0);
+        assert!(!config.presence_unload_model_when_idle);
+        assert_eq!(config.presence_person_detector_model, "yolov8-onnx");
+        assert_eq!(config.presence_person_suspect_fps, 5.0);
+        assert_eq!(config.presence_person_confidence_threshold, 0.62);
+        assert_eq!(config.presence_absent_required_frames, 8);
+        assert_eq!(config.presence_boundary_margin_ratio, 0.16);
+        assert_eq!(config.presence_movement_delta_ratio, 0.06);
+        assert_eq!(
+            config.presence_person_model_path,
+            PathBuf::from(r"D:\WinFaceUnlock\person.onnx")
+        );
+        assert_eq!(config.presence_person_model_config_path, None);
         assert_eq!(
             config.minifasnet_model_path,
             PathBuf::from(r"D:\WinFaceUnlock\minifasnet.onnx")
@@ -739,5 +1503,103 @@ mod tests {
         assert!(!dry_run);
         assert!(!config.presence_lock_enabled);
         Ok(())
+    }
+
+    #[test]
+    fn parse_configure_service_auth_does_not_enable_presence_lock_by_default()
+    -> Result<(), InstallerError> {
+        let args = vec![
+            "installer_cli".to_owned(),
+            "configure-service-auth".to_owned(),
+            "--face-template".to_owned(),
+            r"D:\WinFaceUnlock\phase4-face-template.json".to_owned(),
+        ];
+
+        let InstallerCommand::ConfigureServiceAuth { config, .. } = parse_command(&args)? else {
+            return Err(InstallerError::InvalidArguments(
+                "unexpected command".to_owned(),
+            ));
+        };
+
+        assert!(!config.presence_lock_enabled);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_configure_service_auth_rejects_conflicting_presence_lock_flags() {
+        let args = vec![
+            "installer_cli".to_owned(),
+            "configure-service-auth".to_owned(),
+            "--face-template".to_owned(),
+            r"D:\WinFaceUnlock\phase4-face-template.json".to_owned(),
+            "--enable-presence-lock".to_owned(),
+            "--disable-presence-lock".to_owned(),
+        ];
+
+        let result = parse_command(&args);
+
+        assert!(matches!(result, Err(InstallerError::InvalidArguments(_))));
+    }
+
+    #[test]
+    fn parse_configure_presence_lock_updates_presence_without_face_template()
+    -> Result<(), InstallerError> {
+        let args = vec![
+            "installer_cli".to_owned(),
+            "configure-presence-lock".to_owned(),
+            "--enable-presence-lock".to_owned(),
+            "--presence-detector-kind".to_owned(),
+            "opencv-dnn-person".to_owned(),
+            "--presence-tracking-mode".to_owned(),
+            "continuous-low-fps".to_owned(),
+            "--presence-person-detector-model".to_owned(),
+            "yolov8-onnx".to_owned(),
+            "--presence-person-debug-output-dir".to_owned(),
+            r"D:\WinFaceUnlock\presence-debug".to_owned(),
+        ];
+
+        let InstallerCommand::ConfigurePresenceLock { patch, dry_run } = parse_command(&args)?
+        else {
+            return Err(InstallerError::InvalidArguments(
+                "unexpected command".to_owned(),
+            ));
+        };
+
+        assert!(!dry_run);
+        assert_eq!(patch.presence_lock_enabled, Some(true));
+        assert_eq!(
+            patch.presence_detector_kind.as_deref(),
+            Some("opencv-dnn-person")
+        );
+        assert_eq!(
+            patch.presence_tracking_mode.as_deref(),
+            Some("continuous-low-fps")
+        );
+        assert_eq!(
+            patch.presence_person_detector_model.as_deref(),
+            Some("yolov8-onnx")
+        );
+        assert_eq!(
+            patch.presence_person_model_path,
+            Some(PathBuf::from(r"models\yolov8n.onnx"))
+        );
+        assert_eq!(patch.presence_person_model_config_path, Some(None));
+        assert_eq!(
+            patch.presence_person_debug_output_dir,
+            Some(Some(PathBuf::from(r"D:\WinFaceUnlock\presence-debug")))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_configure_presence_lock_requires_a_presence_option() {
+        let args = vec![
+            "installer_cli".to_owned(),
+            "configure-presence-lock".to_owned(),
+        ];
+
+        let result = parse_command(&args);
+
+        assert!(matches!(result, Err(InstallerError::InvalidArguments(_))));
     }
 }

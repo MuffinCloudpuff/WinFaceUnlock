@@ -1,8 +1,10 @@
 use std::{
-    fmt, fs,
-    path::PathBuf,
+    fmt,
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use common_protocol::{
@@ -26,8 +28,12 @@ use face_pose_mediapipe::{
     MediaPipeFacePoseProvider, MediaPipeFacePoseProviderConfig, MediaPipeFacePoseProviderError,
 };
 use ipc::{IpcClient, NamedPipeClient};
-use video_provider::OpenCvCameraProviderConfig;
-use video_provider::{CameraId, OpenCvCameraProvider, VideoError, VideoFrameProvider};
+use opencv::{
+    core::{AlgorithmHint, Mat, MatTraitConst, Rect, Scalar, Vector},
+    imgcodecs, imgproc,
+};
+use video_provider::{CameraId, OpenCvCameraProvider, OpenCvCameraProviderConfig, PixelFormat};
+use video_provider::{VideoError, VideoFrame, VideoFrameProvider};
 use win_service::credential_store_config::{
     ServiceCredentialStorePaths, WindowsCredentialEnrollment, enroll_windows_credential,
 };
@@ -41,6 +47,10 @@ use win_service::presence_helper::{
 use win_service::presence_monitor::{
     PresenceMonitor, PresenceMonitorConfig, PresenceMonitorError, PresenceObservationSource,
     UnknownFaceAuditSink,
+};
+use win_service::presence_person_detector::{
+    OpenCvDnnPersonDetector, OpenCvDnnPersonDetectorConfig, PersonDetection, PresenceDetector,
+    PresencePersonDetectorError,
 };
 use win_service::presence_policy::{
     PresenceObservation, PresencePolicy, PresencePolicyConfig, PresencePolicyDecision,
@@ -77,6 +87,7 @@ pub enum DiagnosticError {
     FaceDebugSnapshot(FaceDebugSnapshotError),
     LivenessScreenDebug(LivenessScreenDebugError),
     ThresholdPreview(ThresholdPreviewError),
+    PresencePersonDetector(PresencePersonDetectorError),
     #[cfg(not(feature = "mediapipe-pose"))]
     MediaPipeFeatureDisabled,
     #[cfg(feature = "mediapipe-pose")]
@@ -109,6 +120,9 @@ impl fmt::Display for DiagnosticError {
                 write!(formatter, "liveness screen debug error: {error}")
             }
             Self::ThresholdPreview(error) => write!(formatter, "threshold preview error: {error}"),
+            Self::PresencePersonDetector(error) => {
+                write!(formatter, "presence person detector error: {error}")
+            }
             #[cfg(not(feature = "mediapipe-pose"))]
             Self::MediaPipeFeatureDisabled => write!(
                 formatter,
@@ -178,6 +192,12 @@ impl From<LivenessScreenDebugError> for DiagnosticError {
 impl From<ThresholdPreviewError> for DiagnosticError {
     fn from(value: ThresholdPreviewError) -> Self {
         Self::ThresholdPreview(value)
+    }
+}
+
+impl From<PresencePersonDetectorError> for DiagnosticError {
+    fn from(value: PresencePersonDetectorError) -> Self {
+        Self::PresencePersonDetector(value)
     }
 }
 
@@ -276,6 +296,8 @@ pub fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<(), Diagn
         .any(|arg| arg == "presence-monitor-camera-debug")
     {
         run_presence_monitor_camera_debug(&args)?;
+    } else if args.iter().any(|arg| arg == "presence-person-benchmark") {
+        run_presence_person_benchmark(&args)?;
     } else if args.iter().any(|arg| arg == "screen-snapshot-debug") {
         run_screen_snapshot_debug(&args)?;
     } else if args.iter().any(|arg| arg == "face-auth-debug") {
@@ -1188,7 +1210,10 @@ fn print_presence_observation_and_decision(
     let owner_match_score = match observation {
         PresenceObservation::OwnerPresent { owner_match_score }
         | PresenceObservation::UnknownFace { owner_match_score } => Some(owner_match_score),
-        PresenceObservation::NoFaceDetected | PresenceObservation::CameraUnavailable => None,
+        PresenceObservation::NoFaceDetected
+        | PresenceObservation::PersonPresent { .. }
+        | PresenceObservation::PersonAbsent
+        | PresenceObservation::CameraUnavailable => None,
     };
 
     println!("presence_owner_match_threshold: {threshold}");
@@ -1409,6 +1434,299 @@ fn run_presence_monitor_camera_debug(args: &[String]) -> Result<(), DiagnosticEr
     Ok(())
 }
 
+fn run_presence_person_benchmark(args: &[String]) -> Result<(), DiagnosticError> {
+    let detector_label = argument_value(args, "--detector").unwrap_or("mobilenet-ssd");
+    let confidence_threshold =
+        optional_f32(args, "--confidence")?.unwrap_or(DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD);
+    let requested_fps = optional_f32(args, "--fps")?.unwrap_or(2.0);
+    if requested_fps <= 0.0 {
+        return Err(DiagnosticError::InvalidArgument);
+    }
+    let duration_seconds = optional_u32(args, "--duration-seconds")?.unwrap_or(120);
+    if duration_seconds == 0 {
+        return Err(DiagnosticError::InvalidArgument);
+    }
+
+    let detector_config =
+        person_detector_config_from_args(args, detector_label, confidence_threshold)?;
+    let debug_output_dir = argument_value(args, "--output-dir").map(PathBuf::from);
+    if let Some(output_dir) = &debug_output_dir {
+        fs::create_dir_all(output_dir).map_err(|_| DiagnosticError::IoFailed)?;
+        let metadata_path = output_dir.join("presence_person_benchmark_frames.jsonl");
+        if metadata_path.exists() {
+            fs::remove_file(metadata_path).map_err(|_| DiagnosticError::IoFailed)?;
+        }
+    }
+    let mut detector = OpenCvDnnPersonDetector::new(detector_config);
+    let detector_load_started = Instant::now();
+    detector.load_model()?;
+    let detector_load_ms = detector_load_started.elapsed().as_secs_f64() * 1_000.0;
+
+    let mut camera_provider = build_camera_provider(args)?;
+    let sources = camera_provider.list_sources()?;
+    let camera_id = selected_camera_id(args, &sources)?;
+    camera_provider.open(&camera_id)?;
+
+    let frame_interval = Duration::from_secs_f32(1.0 / requested_fps);
+    let benchmark_started = Instant::now();
+    let benchmark_duration = Duration::from_secs(duration_seconds as u64);
+    let mut frame_count = 0_u32;
+    let mut person_frame_count = 0_u32;
+    let mut no_person_frame_count = 0_u32;
+    let mut camera_error_count = 0_u32;
+    let mut inference_error_count = 0_u32;
+    let mut max_person_count = 0_usize;
+    let mut inference_latencies_ms = Vec::new();
+
+    while benchmark_started.elapsed() < benchmark_duration {
+        let frame_started = Instant::now();
+        match camera_provider.read_frame() {
+            Ok(frame) => {
+                frame_count = frame_count.saturating_add(1);
+                let inference_started = Instant::now();
+                match detector.detect_persons(&frame) {
+                    Ok(detections) => {
+                        inference_latencies_ms
+                            .push(inference_started.elapsed().as_secs_f64() * 1_000.0);
+                        if let Some(output_dir) = &debug_output_dir {
+                            save_person_benchmark_debug_frame(
+                                output_dir,
+                                frame_count,
+                                &frame,
+                                &detections,
+                            )?;
+                        }
+                        max_person_count = max_person_count.max(detections.len());
+                        if detections.is_empty() {
+                            no_person_frame_count = no_person_frame_count.saturating_add(1);
+                        } else {
+                            person_frame_count = person_frame_count.saturating_add(1);
+                        }
+                    }
+                    Err(_) => {
+                        inference_error_count = inference_error_count.saturating_add(1);
+                    }
+                }
+            }
+            Err(_) => {
+                camera_error_count = camera_error_count.saturating_add(1);
+            }
+        }
+
+        let elapsed = frame_started.elapsed();
+        if elapsed < frame_interval {
+            thread::sleep(frame_interval - elapsed);
+        }
+    }
+
+    camera_provider.close();
+    detector.unload_model();
+
+    let elapsed_seconds = benchmark_started.elapsed().as_secs_f64();
+    let actual_fps = if elapsed_seconds > 0.0 {
+        frame_count as f64 / elapsed_seconds
+    } else {
+        0.0
+    };
+    let person_frame_ratio = if frame_count > 0 {
+        person_frame_count as f64 / frame_count as f64
+    } else {
+        0.0
+    };
+    let latency = LatencySummary::from_samples(&inference_latencies_ms);
+
+    println!("presence_person_benchmark_completed: true");
+    println!("detector: {detector_label}");
+    println!("camera_id: {}", camera_id.0);
+    println!("requested_fps: {requested_fps}");
+    println!("actual_fps: {actual_fps}");
+    println!("duration_seconds: {elapsed_seconds}");
+    println!("detector_load_ms: {detector_load_ms}");
+    println!("captured_frame_count: {frame_count}");
+    println!("person_frame_count: {person_frame_count}");
+    println!("no_person_frame_count: {no_person_frame_count}");
+    println!("person_frame_ratio: {person_frame_ratio}");
+    println!("max_person_count: {max_person_count}");
+    println!("camera_error_count: {camera_error_count}");
+    println!("inference_error_count: {inference_error_count}");
+    println!("inference_latency_count: {}", latency.count);
+    println!("inference_latency_avg_ms: {}", latency.avg_ms);
+    println!("inference_latency_p50_ms: {}", latency.p50_ms);
+    println!("inference_latency_p90_ms: {}", latency.p90_ms);
+    println!("inference_latency_max_ms: {}", latency.max_ms);
+    if let Some(output_dir) = &debug_output_dir {
+        println!("debug_output_dir: {}", output_dir.display());
+    }
+    Ok(())
+}
+
+fn save_person_benchmark_debug_frame(
+    output_dir: &Path,
+    frame_index: u32,
+    frame: &VideoFrame,
+    detections: &[PersonDetection],
+) -> Result<(), DiagnosticError> {
+    let mut mat = video_frame_to_mat_for_debug(frame)?;
+    for detection in detections {
+        let rect = Rect::new(
+            detection.bbox.x as i32,
+            detection.bbox.y as i32,
+            detection.bbox.width as i32,
+            detection.bbox.height as i32,
+        );
+        imgproc::rectangle(
+            &mut mat,
+            rect,
+            Scalar::new(0.0, 255.0, 0.0, 0.0),
+            2,
+            imgproc::LINE_8,
+            0,
+        )
+        .map_err(|_| DiagnosticError::IoFailed)?;
+        imgproc::put_text(
+            &mut mat,
+            &format!("{:.2}", detection.confidence),
+            opencv::core::Point::new(detection.bbox.x as i32, detection.bbox.y as i32 - 6),
+            imgproc::FONT_HERSHEY_SIMPLEX,
+            0.6,
+            Scalar::new(0.0, 255.0, 0.0, 0.0),
+            1,
+            imgproc::LINE_8,
+            false,
+        )
+        .map_err(|_| DiagnosticError::IoFailed)?;
+    }
+
+    let outcome = if detections.is_empty() { "miss" } else { "hit" };
+    let image_path = output_dir.join(format!("frame-{frame_index:06}-{outcome}.jpg"));
+    let image_path_text = image_path.display().to_string();
+    imgcodecs::imwrite(&image_path_text, &mat, &Vector::<i32>::new())
+        .map_err(|_| DiagnosticError::IoFailed)?;
+
+    let metadata = serde_json::json!({
+        "frame_index": frame_index,
+        "outcome": outcome,
+        "image_path": image_path_text,
+        "frame_width": frame.width,
+        "frame_height": frame.height,
+        "detections": detections.iter().map(|detection| serde_json::json!({
+            "confidence": detection.confidence,
+            "bbox": {
+                "x": detection.bbox.x,
+                "y": detection.bbox.y,
+                "width": detection.bbox.width,
+                "height": detection.bbox.height,
+            },
+            "normalized_bbox": {
+                "x_min": detection.normalized_bbox.x_min,
+                "y_min": detection.normalized_bbox.y_min,
+                "x_max": detection.normalized_bbox.x_max,
+                "y_max": detection.normalized_bbox.y_max,
+            }
+        })).collect::<Vec<_>>(),
+    });
+    let mut metadata_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(output_dir.join("presence_person_benchmark_frames.jsonl"))
+        .map_err(|_| DiagnosticError::IoFailed)?;
+    writeln!(metadata_file, "{metadata}").map_err(|_| DiagnosticError::IoFailed)?;
+    Ok(())
+}
+
+fn video_frame_to_mat_for_debug(frame: &VideoFrame) -> Result<Mat, DiagnosticError> {
+    let channels = match frame.format {
+        PixelFormat::Bgr8 | PixelFormat::Rgb8 => 3,
+        PixelFormat::Gray8 => 1,
+    };
+    let mat = Mat::from_slice(&frame.data).map_err(|_| DiagnosticError::IoFailed)?;
+    let mat = mat
+        .reshape(channels, frame.height as i32)
+        .map_err(|_| DiagnosticError::IoFailed)?;
+    let mut mat = mat.try_clone().map_err(|_| DiagnosticError::IoFailed)?;
+
+    if frame.format == PixelFormat::Rgb8 {
+        let mut bgr = Mat::default();
+        imgproc::cvt_color(
+            &mat,
+            &mut bgr,
+            imgproc::COLOR_RGB2BGR,
+            0,
+            AlgorithmHint::ALGO_HINT_DEFAULT,
+        )
+        .map_err(|_| DiagnosticError::IoFailed)?;
+        mat = bgr;
+    }
+
+    Ok(mat)
+}
+
+fn person_detector_config_from_args(
+    args: &[String],
+    detector_label: &str,
+    confidence_threshold: f32,
+) -> Result<OpenCvDnnPersonDetectorConfig, DiagnosticError> {
+    let mut config = match detector_label {
+        "mobilenet-ssd" => OpenCvDnnPersonDetectorConfig::mobilenet_ssd(
+            model_path(args, "--model", "models/MobileNetSSD_deploy.caffemodel"),
+            model_path(args, "--config", "models/MobileNetSSD_deploy.prototxt"),
+        ),
+        "ssdlite-onnx" => OpenCvDnnPersonDetectorConfig::ssdlite_onnx(model_path(
+            args,
+            "--model",
+            "models/ssdlite_mobilenet_v3.onnx",
+        )),
+        "yolov8-onnx" => OpenCvDnnPersonDetectorConfig::yolov8_onnx(model_path(
+            args,
+            "--model",
+            "models/yolov8n.onnx",
+        )),
+        _ => return Err(DiagnosticError::InvalidArgument),
+    };
+    config.confidence_threshold = confidence_threshold;
+    if let Some(input_width) = optional_i32(args, "--input-width")? {
+        config.input_width = input_width;
+    }
+    if let Some(input_height) = optional_i32(args, "--input-height")? {
+        config.input_height = input_height;
+    }
+    Ok(config)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LatencySummary {
+    count: usize,
+    avg_ms: f64,
+    p50_ms: f64,
+    p90_ms: f64,
+    max_ms: f64,
+}
+
+impl LatencySummary {
+    fn from_samples(samples: &[f64]) -> Self {
+        if samples.is_empty() {
+            return Self {
+                count: 0,
+                avg_ms: 0.0,
+                p50_ms: 0.0,
+                p90_ms: 0.0,
+                max_ms: 0.0,
+            };
+        }
+
+        let mut sorted = samples.to_vec();
+        sorted.sort_by(|left, right| left.total_cmp(right));
+        let sum: f64 = sorted.iter().sum();
+        Self {
+            count: sorted.len(),
+            avg_ms: sum / sorted.len() as f64,
+            p50_ms: percentile_sorted_f64(&sorted, 0.50),
+            p90_ms: percentile_sorted_f64(&sorted, 0.90),
+            max_ms: sorted[sorted.len() - 1],
+        }
+    }
+}
+
 struct DiagnosticSequenceObservationSource {
     observations: Vec<PresenceObservation>,
 }
@@ -1486,6 +1804,17 @@ fn presence_observation_from_name(name: &str) -> Result<PresenceObservation, Dia
         "unknown" | "unknown-face" => Ok(PresenceObservation::UnknownFace {
             owner_match_score: 0.20,
         }),
+        "person" | "person-present" => Ok(PresenceObservation::PersonPresent {
+            confidence: 0.80,
+            bbox_center_x_ratio: 0.50,
+            bbox_area_ratio: 0.40,
+        }),
+        "person-left" | "person-left-boundary" => Ok(PresenceObservation::PersonPresent {
+            confidence: 0.80,
+            bbox_center_x_ratio: 0.08,
+            bbox_area_ratio: 0.20,
+        }),
+        "person-absent" => Ok(PresenceObservation::PersonAbsent),
         "camera-unavailable" => Ok(PresenceObservation::CameraUnavailable),
         _ => Err(DiagnosticError::InvalidArgument),
     }
@@ -1758,6 +2087,17 @@ fn percentile_sorted(sorted_scores: &[f32], percentile: f32) -> f32 {
     sorted_scores[index.min(last_index)]
 }
 
+fn percentile_sorted_f64(sorted_scores: &[f64], percentile: f64) -> f64 {
+    if sorted_scores.len() == 1 {
+        return sorted_scores[0];
+    }
+
+    let clamped_percentile = percentile.clamp(0.0, 1.0);
+    let last_index = sorted_scores.len() - 1;
+    let index = (last_index as f64 * clamped_percentile).round() as usize;
+    sorted_scores[index.min(last_index)]
+}
+
 fn build_loaded_model_provider(
     args: &[String],
 ) -> Result<OpenCvFaceModelProvider, DiagnosticError> {
@@ -1994,13 +2334,16 @@ fn print_usage() {
         "Usage: diagnostics_cli presence-check-once --template <selected_templates.json> [--camera-id opencv-index:0] [--threshold 0.50] [--frame-width 640 --frame-height 480] [--audit-dir <dir>] [--disable-screen-snapshot]"
     );
     println!(
-        "Usage: diagnostics_cli presence-policy-simulate --events owner,no-face,unknown,camera-unavailable [--threshold 0.50]"
+        "Usage: diagnostics_cli presence-policy-simulate --events owner,no-face,unknown,person,person-left,person-absent,camera-unavailable [--threshold 0.50]"
     );
     println!(
-        "Usage: diagnostics_cli presence-monitor-simulate --events owner,no-face,unknown,camera-unavailable [--threshold 0.50] [--max-iterations 10]"
+        "Usage: diagnostics_cli presence-monitor-simulate --events owner,no-face,unknown,person,person-left,person-absent,camera-unavailable [--threshold 0.50] [--max-iterations 10]"
     );
     println!(
         "Usage: diagnostics_cli presence-monitor-camera-debug --template <selected_templates.json> [--camera-id opencv-index:0] [--threshold 0.50] [--iterations 3] [--frame-width 640 --frame-height 480]"
+    );
+    println!(
+        "Usage: diagnostics_cli presence-person-benchmark [--detector mobilenet-ssd|ssdlite-onnx|yolov8-onnx] [--model <path>] [--config <path>] [--fps 2] [--duration-seconds 120] [--confidence 0.50] [--camera-id opencv-index:0] [--frame-width 640 --frame-height 480] [--output-dir <dir>]"
     );
     println!("Usage: diagnostics_cli screen-snapshot-debug --output <path.bmp>");
     println!(
@@ -2152,6 +2495,22 @@ mod tests {
         assert_eq!(percentile_sorted(&scores, 0.0), 0.1);
         assert_eq!(percentile_sorted(&scores, 0.5), 0.3);
         assert_eq!(percentile_sorted(&scores, 1.0), 0.5);
+    }
+
+    #[test]
+    fn latency_summary_reports_distribution() {
+        let summary = LatencySummary::from_samples(&[10.0, 30.0, 20.0]);
+
+        assert_eq!(
+            summary,
+            LatencySummary {
+                count: 3,
+                avg_ms: 20.0,
+                p50_ms: 20.0,
+                p90_ms: 30.0,
+                max_ms: 30.0,
+            }
+        );
     }
 
     #[test]

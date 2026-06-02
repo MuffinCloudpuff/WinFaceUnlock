@@ -55,5 +55,17 @@ provider when `models/minifasnet_v2.onnx` exists. MiniFASNet spoof scores reject
 the authentication window by default. Use `--minifasnet-diagnostic-only` only
 when collecting scores without enforcing rejection.
 
+Optional person presence models:
+
+```text
+yolov8n.onnx
+MobileNetSSD_deploy.caffemodel
+MobileNetSSD_deploy.prototxt
+```
+
+`yolov8n.onnx` is the preferred person detector for `opencv-dnn-person`
+presence tracking. The MobileNet-SSD Caffe files are retained as a diagnostic
+baseline because they are faster but less reliable on the tested cameras.
+
 Model weights are intentionally excluded from Git; keep the upstream license and
 attribution in product distributions.

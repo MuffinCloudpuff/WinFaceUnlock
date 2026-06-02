@@ -349,12 +349,12 @@ diagnostics_cli.exe presence-policy-simulate `
 8. 实现真实摄像头 observation source，把 `presence_monitor` 接到低频检测链路。已完成 diagnostics 调试入口。
 9. 实现用户会话 helper 进程或等价启动方式，解决 Service Session 0 不能稳定截图当前桌面的边界。待实现。
 10. 将 `presence_monitor` 接入 `WinFaceUnlockService` session-change 后台链路。已完成：Service 接受 `SESSION_CHANGE` 控制事件，`SessionLogon`/`SessionUnlock` 启动 monitor，`SessionLock`/`SessionLogoff`/断开/终止停止 monitor。
-11. 接入 `win_service` 配置开关。已完成：配置缺失时不启动；`installer_cli configure-service-auth` 默认写入 `PresenceLockEnabled=true`，可用 `--disable-presence-lock` 显式关闭。
+11. 接入 `win_service` 配置开关。已完成：配置缺失时不启动；`installer_cli configure-service-auth` 默认写入 `PresenceLockEnabled=false`，必须通过 `--enable-presence-lock` 或独立的 `configure-presence-lock --enable-presence-lock` 显式开启。
 12. 虚拟机验证自动锁屏行为。待实现。
 
 ## 验收标准
 
-1. 配置缺失时 Presence Lock 关闭，不影响现有登录链路；完成本地摄像头认证配置后，installer 默认启用 Presence Lock。
+1. 配置缺失时 Presence Lock 关闭，不影响现有登录链路；完成本地摄像头认证配置后，installer 仍默认关闭 Presence Lock，离开锁屏由独立配置入口显式开启。
 2. 打开后，稳定检测到本人时采样间隔能从 10 秒拉长到 30 秒和 60 秒。
 3. 连续 3 次无脸后触发锁屏。
 4. 首次检测到未知人脸低匹配时立即保存裁剪人脸审计记录。

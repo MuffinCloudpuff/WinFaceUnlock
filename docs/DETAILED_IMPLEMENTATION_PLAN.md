@@ -473,7 +473,7 @@ docs/PHASE6_5_PRESENCE_LOCK.md
 2. `installer_cli uninstall`：
    - 注销 Credential Provider。
    - 停止并删除 Service。
-   - 保留或删除数据按参数选择。
+   - 默认删除 `C:\ProgramData\WinFaceUnlock` 数据；仅在显式传入 `--preserve-data` 时保留数据。
 3. `installer_cli repair`：
    - 检查 Provider 注册表。
    - 检查 Service 状态。

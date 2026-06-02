@@ -2,6 +2,8 @@
 /vcpkg_installed/
 /models/*.onnx
 /models/*.task
+/models/*.caffemodel
+/models/*.prototxt
 /node_modules/
 /.external/
 /.idea/
