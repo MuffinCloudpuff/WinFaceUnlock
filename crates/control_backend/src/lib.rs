@@ -2,6 +2,7 @@ use control_protocol::{
     CONTROL_PROTOCOL_VERSION, ControlErrorCode, ControlOperation, ControlOperationStatus,
     ControlRequestEnvelope, ControlResponseEnvelope, DashboardStatus,
 };
+use control_status::{ControlStatusError, WindowsDashboardStatusProvider};
 use serde_json::{Value, json};
 
 pub trait DashboardStatusProvider {
@@ -39,6 +40,52 @@ impl ControlBackendError {
         }
     }
 
+    fn status_reader_error(error: ControlStatusError) -> Self {
+        match error {
+            ControlStatusError::PermissionDenied(message) => Self::permission_denied(message),
+            ControlStatusError::ServiceStatusUnavailable(message) => Self {
+                operation_status: ControlOperationStatus::ServiceUnavailable,
+                control_error_code: ControlErrorCode::ServiceStatusUnavailable,
+                message,
+                next_recommended_action: Some(
+                    "Check whether the Windows Service Control Manager is reachable.".to_owned(),
+                ),
+            },
+            ControlStatusError::ProviderStatusUnavailable(message) => Self {
+                operation_status: ControlOperationStatus::Failed,
+                control_error_code: ControlErrorCode::ProviderStatusUnavailable,
+                message,
+                next_recommended_action: Some(
+                    "Check WinFaceUnlock credential provider registry entries.".to_owned(),
+                ),
+            },
+            ControlStatusError::ServiceConfigUnavailable(message) => Self {
+                operation_status: ControlOperationStatus::Failed,
+                control_error_code: ControlErrorCode::ServiceConfigUnavailable,
+                message,
+                next_recommended_action: Some(
+                    "Check WinFaceUnlock service configuration registry entries.".to_owned(),
+                ),
+            },
+            ControlStatusError::DataDirectoryStatusUnavailable(message) => Self {
+                operation_status: ControlOperationStatus::Failed,
+                control_error_code: ControlErrorCode::DataDirectoryStatusUnavailable,
+                message,
+                next_recommended_action: Some(
+                    "Check WinFaceUnlock ProgramData directory access.".to_owned(),
+                ),
+            },
+            ControlStatusError::PresenceRuntimeStatusUnavailable(message) => Self {
+                operation_status: ControlOperationStatus::Failed,
+                control_error_code: ControlErrorCode::PresenceRuntimeStatusUnavailable,
+                message,
+                next_recommended_action: Some(
+                    "Check the WinFaceUnlock presence runtime status file.".to_owned(),
+                ),
+            },
+        }
+    }
+
     fn into_response(self, request: &ControlRequestEnvelope) -> ControlResponseEnvelope {
         ControlResponseEnvelope {
             protocol_version: CONTROL_PROTOCOL_VERSION,
@@ -51,6 +98,13 @@ impl ControlBackendError {
             }),
             next_recommended_action: self.next_recommended_action,
         }
+    }
+}
+
+impl DashboardStatusProvider for WindowsDashboardStatusProvider {
+    fn load_dashboard_status(&self) -> Result<DashboardStatus, ControlBackendError> {
+        self.load_dashboard_status()
+            .map_err(ControlBackendError::status_reader_error)
     }
 }
 

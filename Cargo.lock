@@ -155,6 +155,7 @@ name = "control_backend"
 version = "0.1.0"
 dependencies = [
  "control_protocol",
+ "control_status",
  "serde_json",
 ]
 
@@ -164,6 +165,19 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "control_status"
+version = "0.1.0"
+dependencies = [
+ "common_protocol",
+ "control_protocol",
+ "serde",
+ "serde_json",
+ "windows-service",
+ "windows-sys 0.61.2",
+ "windows_provider",
 ]
 
 [[package]]
@@ -565,6 +579,8 @@ name = "installer_cli"
 version = "0.1.0"
 dependencies = [
  "common_protocol",
+ "control_protocol",
+ "control_status",
  "serde_json",
  "setup_api",
  "win_service",

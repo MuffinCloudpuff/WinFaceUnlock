@@ -3,6 +3,7 @@ members = [
     "crates/common_protocol",
     "crates/control_backend",
     "crates/control_protocol",
+    "crates/control_status",
     "crates/credential_store",
     "crates/diagnostics_cli",
     "crates/face_auth",

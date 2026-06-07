@@ -8,6 +8,11 @@ use std::{
 use common_protocol::AccountType;
 #[cfg(all(windows, not(test)))]
 use common_protocol::{CredentialRef, UserId};
+use control_protocol::{
+    DashboardStatus, PathPresence, ProviderRegistrationState, RegistryConfigState,
+    ServiceInstallationState, ServiceRuntimeState,
+};
+use control_status::{ControlStatusError, WindowsDashboardStatusProvider};
 use serde_json::{Value, json};
 use setup_api::{
     ConfigurePresenceLockPayload, EnrollCredentialPayload, EnrollFaceTemplatePayload,
@@ -20,13 +25,11 @@ use setup_api::{
 use win_service::credential_store_config::{
     ServiceCredentialStorePaths, WindowsCredentialEnrollment, enroll_windows_credential,
 };
-use windows_service::service::ServiceState;
 
 use crate::{
     installation::{FullInstallPlan, FullUninstallPlan, InstallerOrchestrator},
-    provider_registry::ProviderRegistry,
     resource_directory::ResourceDirectoryPlan,
-    service_manager::{InstallerError, ServiceManagerFacade},
+    service_manager::InstallerError,
     service_registry::ServiceAuthRegistry,
 };
 
@@ -197,51 +200,58 @@ fn get_status(request: &SetupRequestEnvelope) -> SetupResponseEnvelope {
     }
 }
 
-fn load_status_details() -> Result<Value, InstallerError> {
-    let provider_status = ProviderRegistry::provider_status();
-    let service_status = ServiceManagerFacade::connect()?.query_service_status_if_exists()?;
-    let service_config_status = ServiceAuthRegistry::status();
-    let resource_plan = ResourceDirectoryPlan::from_environment_or_default();
+fn load_status_details() -> Result<Value, ControlStatusError> {
+    let status =
+        WindowsDashboardStatusProvider::from_environment_or_default().load_dashboard_status()?;
+    Ok(legacy_setup_status_details(&status))
+}
 
-    let service_details = match service_status {
-        Some(status) => json!({
-            "installed": true,
-            "running": status.current_state == ServiceState::Running,
-            "state": format!("{:?}", status.current_state),
-            "process_id": status.process_id,
-        }),
-        None => json!({
-            "installed": false,
-            "running": false,
-            "state": "missing",
-            "process_id": null,
-        }),
-    };
-
-    Ok(json!({
-        "service": service_details,
+fn legacy_setup_status_details(status: &DashboardStatus) -> Value {
+    json!({
+        "service": {
+            "installed": status.service.installation_state == ServiceInstallationState::Installed,
+            "running": status.service.runtime_state == ServiceRuntimeState::Running,
+            "state": service_state_text(&status.service.runtime_state),
+            "process_id": status.service.process_id,
+        },
         "provider": {
-            "credential_provider_registered": provider_status.credential_provider_registered,
-            "com_server_registered": provider_status.com_server_registered,
-            "project_config_registered": provider_status.project_config_registered,
-            "registered": provider_status.is_registered(),
+            "credential_provider_registered": status.provider.credential_provider_registered,
+            "com_server_registered": status.provider.com_server_registered,
+            "project_config_registered": status.provider.project_config_registered,
+            "registered": status.provider.registration_state == ProviderRegistrationState::Registered,
         },
         "service_config": {
-            "registry_config_exists": service_config_status.registry_config_exists,
-            "auth_mode": service_config_status.auth_mode,
-            "face_template_path": service_config_status.face_template_path,
-            "presence_lock_enabled": service_config_status.presence_lock_enabled,
-            "presence_detector_kind": service_config_status.presence_detector_kind,
-            "presence_tracking_mode": service_config_status.presence_tracking_mode,
-            "presence_person_detector_model": service_config_status.presence_person_detector_model,
+            "registry_config_exists": status.service_config.registry_config_state == RegistryConfigState::Present,
+            "auth_mode": status.service_config.auth_mode,
+            "face_template_path": status.service_config.face_template_path,
+            "presence_lock_enabled": legacy_optional_bool(status.service_config.presence_lock_enabled),
+            "presence_detector_kind": status.service_config.presence_detector_kind,
+            "presence_tracking_mode": status.service_config.presence_tracking_mode,
+            "presence_person_detector_model": null,
         },
         "data": {
-            "program_data_dir": resource_plan.root_dir,
-            "program_data_exists": resource_plan.root_dir.exists(),
-            "presence_audit_dir": resource_plan.presence_audit_dir,
-            "presence_audit_dir_exists": resource_plan.presence_audit_dir.exists(),
+            "program_data_dir": status.data_directory.program_data_dir,
+            "program_data_exists": status.data_directory.program_data_presence == PathPresence::Present,
+            "presence_audit_dir": status.data_directory.presence_audit_dir,
+            "presence_audit_dir_exists": status.data_directory.presence_audit_presence == PathPresence::Present,
         }
-    }))
+    })
+}
+
+fn service_state_text(state: &ServiceRuntimeState) -> String {
+    match state {
+        ServiceRuntimeState::Running => "Running".to_owned(),
+        ServiceRuntimeState::Stopped => "Stopped".to_owned(),
+        ServiceRuntimeState::Paused => "Paused".to_owned(),
+        ServiceRuntimeState::StartPending => "StartPending".to_owned(),
+        ServiceRuntimeState::StopPending => "StopPending".to_owned(),
+        ServiceRuntimeState::Missing => "missing".to_owned(),
+        ServiceRuntimeState::Unknown(value) => value.clone(),
+    }
+}
+
+fn legacy_optional_bool(value: Option<bool>) -> Option<&'static str> {
+    value.map(|value| if value { "true" } else { "false" })
 }
 
 fn run_preflight(request: &SetupRequestEnvelope) -> SetupResponseEnvelope {
