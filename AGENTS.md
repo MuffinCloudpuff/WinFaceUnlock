@@ -2,19 +2,10 @@
 
 ## Communication
 
-- 默认使用简体中文沟通。
-- 开发前把可扩展性、健壮性和可维护性作为基础约束。
-- 默认按模块化边界推进，不把多种职责长期混写在同一个模块里。
-- 写代码时必须按功能和职责拆分模块；安全存储、IPC、协议、文件格式、平台 API 适配、业务策略、测试辅助等不应长期堆在同一个文件里。
-- 每个功能模块都应尽量能单独测试；新增核心能力时优先给模块自身补单元测试，再通过上层集成测试串联。
-- 平台相关或 unsafe 代码必须隔离在明确的 adapter/bindings 模块中，不要泄漏到业务策略和上层编排代码。
-- 每个功能模块都要追求该模块目标下的效果最优，而不是为了最快推进选择临时、粗糙或后续必然推翻的路线；技术选型必须服务于该模块的长期可用性、易集成性、可靠性和可维护性。
-- 不为了“先做个最小原型”牺牲模块的正确边界、接口质量、数据模型和未来集成路径；如果确实采用临时实现，必须明确标记临时范围、替换条件和清理计划。
-- 接口、协议、状态、事件、错误和布尔含义的命名必须语义清晰，体现所属层级和判定对象；禁止用含糊的 `success`、`ok`、`flag`、`true/false` 在多层流程中传递关键语义。
-- 当存在多层成功/失败判定时，必须命名为具体语义，例如 `auth_match_passed`、`grant_issued`、`credential_decryption_succeeded`、`pipe_delivery_confirmed`，避免不同层的“成功”混淆。
-- 协议字段和公共接口一旦可能跨模块、跨进程或持久化，应优先使用枚举、结构化状态和明确错误类型，不用裸 bool 或字符串拼接协议表达复杂状态。
-- 遇到问题先追踪根因，不用表面补丁掩盖结构性问题。
-- 新路线确认后围绕新路线收敛实现；旧路线废弃后优先移除，短期保留时必须标记为临时过渡。
+- 默认使用全局 AGENTS.md 的通用工程规则；本文件只补充 WinFaceUnlock 项目特定约束。
+- 项目模块边界必须围绕安全存储、IPC、协议、文件格式、平台 API 适配、业务策略和测试辅助来划分。
+- 平台相关或 unsafe 代码优先隔离在 adapter/bindings 边界内，不泄漏到认证策略和上层编排逻辑。
+- 跨进程或持久化契约中的状态、错误和授权结果必须使用结构化类型表达，尤其避免把认证匹配、授权发放、凭据解密、管道投递混成同一个布尔成功值。
 
 ## Project Direction
 
@@ -39,21 +30,6 @@ WinFaceUnlock 的核心链路固定为 Rust 主线：
 - VM 服务状态、资源占用、`diagnostics_cli` 远程触发和 WinRM 故障排查见 `docs/VM_WINRM_OPERATIONS.md`。
 - 首选 WinRM 命令行：`Invoke-Command -ComputerName 192.168.204.129 -Credential $cred ...`。
 - 不要默认通过 VMware 窗口点击、键盘注入或截图操作 VM；只有 WinRM 不可用且用户明确同意时才走 GUI 兜底。
-
-## GitNexus CLI
-
-当前环境默认不使用 GitNexus MCP 工具。所有 GitNexus 操作默认使用 CLI：
-
-```powershell
-npx gitnexus status
-npx gitnexus analyze --skip-agents-md
-npx gitnexus analyze --force --skip-agents-md
-npx gitnexus analyze --embeddings --skip-agents-md
-npx gitnexus clean --force
-npx gitnexus list
-```
-
-如果没有显式可用的 GitNexus MCP 工具，不要继续尝试 MCP 调用；直接用 CLI、本地搜索、编译器和测试做影响分析。
 
 ### Impact Analysis Fallback
 
