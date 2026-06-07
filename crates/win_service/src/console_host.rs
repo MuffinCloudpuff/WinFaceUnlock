@@ -4,7 +4,8 @@ use common_protocol::{
 };
 
 use crate::named_pipe_host::{
-    build_development_handler, run_named_pipe_once, run_named_pipe_requests,
+    DevelopmentServiceRequestHandler, build_development_handler, run_named_pipe_once,
+    run_named_pipe_requests,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -54,8 +55,12 @@ pub fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<(), Proto
 }
 
 pub fn run_console_smoke() -> Result<ConsoleSmokeReport, ProtocolError> {
-    let mut handler = build_development_handler()?;
+    run_console_smoke_with_handler(build_development_handler()?)
+}
 
+fn run_console_smoke_with_handler(
+    mut handler: DevelopmentServiceRequestHandler,
+) -> Result<ConsoleSmokeReport, ProtocolError> {
     let health_event = handler.handle_request(ServiceRequest::HealthCheck)?;
     let issued_grant = match handler.handle_request(ServiceRequest::WakeAuth {
         session_id: SessionId("dev-session".to_owned()),
@@ -105,11 +110,25 @@ fn argument_value<'args>(args: &'args [String], name: &str) -> Option<&'args str
 mod tests {
     use common_protocol::{CredentialRef, GrantId, Nonce};
 
+    use crate::{
+        credential_store_config::ServiceCredentialStorePaths,
+        named_pipe_host::build_development_handler_with_paths,
+    };
+
     use super::*;
 
     #[test]
     fn console_smoke_completes_without_plaintext_credential() -> Result<(), ProtocolError> {
-        let report = run_console_smoke()?;
+        let root = std::env::temp_dir().join(format!(
+            "winfaceunlock-console-smoke-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let paths = ServiceCredentialStorePaths::from_store_dir(root.clone());
+        let report = run_console_smoke_with_handler(build_development_handler_with_paths(&paths)?)?;
 
         assert_eq!(report.health_event, ServiceEvent::HealthOk);
         assert_eq!(
@@ -121,6 +140,7 @@ mod tests {
             report.protected_credential.credential_ref,
             CredentialRef("dev-credential-ref".to_owned())
         );
+        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 

@@ -72,8 +72,9 @@ pub fn wake_named_pipe_host(pipe_name: &str) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-type DevelopmentCredentialResolver = StoreProtectedCredentialResolver<ServiceCredentialStore>;
-type DevelopmentServiceRequestHandler = ServiceRequestHandler<
+pub(crate) type DevelopmentCredentialResolver =
+    StoreProtectedCredentialResolver<ServiceCredentialStore>;
+pub(crate) type DevelopmentServiceRequestHandler = ServiceRequestHandler<
     DevelopmentAuthGrantIssuer,
     DevelopmentCredentialResolver,
     SystemUnixTimeMillisClock,
@@ -83,7 +84,7 @@ pub fn build_development_handler() -> Result<DevelopmentServiceRequestHandler, P
     build_development_handler_with_paths(&ServiceCredentialStorePaths::from_environment_or_default())
 }
 
-fn build_development_handler_with_paths(
+pub(crate) fn build_development_handler_with_paths(
     paths: &ServiceCredentialStorePaths,
 ) -> Result<DevelopmentServiceRequestHandler, ProtocolError> {
     let dev_user_id = UserId("dev-user".to_owned());
