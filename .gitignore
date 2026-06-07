@@ -5,6 +5,8 @@
 /models/*.caffemodel
 /models/*.prototxt
 /node_modules/
+/apps/**/bin/
+/apps/**/obj/
 /.external/
 /.idea/
 /.vscode/
@@ -17,6 +19,8 @@
 *.db-wal
 *.log
 .gitnexus
+.code-graph/
+.codebase-memory/
 .claude/skills/gitnexus/
 /face-debug/
 /face-calibration/
@@ -25,3 +29,4 @@
 /liveness-debug/
 /presence-audit-debug/
 /vm-package/
+/output/
