@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/common_protocol",
+    "crates/control_protocol",
     "crates/credential_store",
     "crates/diagnostics_cli",
     "crates/face_auth",
