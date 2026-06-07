@@ -102,6 +102,7 @@ pub enum ControlOperation {
     GetDashboardStatus,
     GetSettings,
     UpdateSettings,
+    GetWindowsCredentialAccount,
     EnrollWindowsCredential,
 }
 
@@ -124,10 +125,12 @@ pub enum ControlOperationStatus {
 pub enum ControlErrorCode {
     InvalidDashboardStatusRequest,
     InvalidSettingsRequest,
+    InvalidCredentialAccountRequest,
     InvalidCredentialEnrollmentRequest,
     DashboardStatusUnavailable,
     SettingsUnavailable,
     SettingsPersistenceFailed,
+    CredentialAccountUnavailable,
     CredentialEnrollmentUnavailable,
     CredentialEnrollmentFailed,
     ServiceStatusUnavailable,
@@ -178,6 +181,15 @@ pub struct WindowsCredentialEnrollmentPayload {
     pub account_type: WindowsCredentialAccountType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_ref: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct WindowsCredentialAccountProfile {
+    pub windows_account_username: String,
+    pub user_id: String,
+    pub user_sid: String,
+    pub account_type: WindowsCredentialAccountType,
+    pub credential_ref: String,
 }
 
 impl WindowsCredentialEnrollmentPayload {
@@ -544,6 +556,44 @@ mod tests {
 
         let decoded: ControlRequestEnvelope = serde_json::from_str(&json_text)?;
         assert_eq!(decoded, request);
+        Ok(())
+    }
+
+    #[test]
+    fn credential_account_request_round_trips_snake_case_operation() -> Result<(), serde_json::Error>
+    {
+        let request = ControlRequestEnvelope {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            correlation_id: "control-credential-account-test-1".to_owned(),
+            operation: ControlOperation::GetWindowsCredentialAccount,
+            payload: json!({}),
+        };
+
+        let json_text = serde_json::to_string(&request)?;
+        assert!(json_text.contains("\"operation\":\"get_windows_credential_account\""));
+
+        let decoded: ControlRequestEnvelope = serde_json::from_str(&json_text)?;
+        assert_eq!(decoded, request);
+        Ok(())
+    }
+
+    #[test]
+    fn credential_account_profile_round_trips_without_password() -> Result<(), serde_json::Error> {
+        let profile = WindowsCredentialAccountProfile {
+            windows_account_username: "Leo16".to_owned(),
+            user_id: "dev-user".to_owned(),
+            user_sid: "S-1-5-21-real".to_owned(),
+            account_type: WindowsCredentialAccountType::Local,
+            credential_ref: "windows-credential-dev-user".to_owned(),
+        };
+
+        let json_text = serde_json::to_string(&profile)?;
+        assert!(json_text.contains("\"windows_account_username\":\"Leo16\""));
+        assert!(json_text.contains("\"credential_ref\":\"windows-credential-dev-user\""));
+        assert!(!json_text.contains("password"));
+
+        let decoded: WindowsCredentialAccountProfile = serde_json::from_str(&json_text)?;
+        assert_eq!(decoded, profile);
         Ok(())
     }
 

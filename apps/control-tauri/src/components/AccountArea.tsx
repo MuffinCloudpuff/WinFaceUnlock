@@ -1,11 +1,41 @@
 import { User, KeyRound, ArrowRight } from 'lucide-react';
 import { motion } from 'motion/react';
-import { useState } from 'react';
-import { enrollWindowsCredential, isControlRuntimeAvailable } from '../controlProtocol';
+import { useEffect, useState } from 'react';
+import {
+  enrollWindowsCredential,
+  getWindowsCredentialAccount,
+  isControlRuntimeAvailable,
+  type WindowsCredentialAccountProfile,
+} from '../controlProtocol';
 
 export function AccountArea() {
   const [pin, setPin] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [accountProfile, setAccountProfile] = useState<WindowsCredentialAccountProfile | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (!isControlRuntimeAvailable()) {
+      return;
+    }
+
+    let isMounted = true;
+    getWindowsCredentialAccount()
+      .then((response) => {
+        if (!isMounted || response.operation_status !== 'completed') {
+          return;
+        }
+        setAccountProfile(response.safe_details);
+      })
+      .catch((error) => {
+        console.warn('Failed to load WinFaceUnlock credential account.', error);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const handleCredentialSubmit = () => {
     if (pin.length === 0 || isSubmitting) {
@@ -13,19 +43,27 @@ export function AccountArea() {
     }
 
     const passwordSecret = pin;
-    setPin('');
 
     if (!isControlRuntimeAvailable()) {
+      setPin('');
       console.warn('WinFaceUnlock credential enrollment requires the Tauri runtime.');
       return;
     }
 
+    if (!accountProfile) {
+      console.warn('WinFaceUnlock credential account is not loaded yet.');
+      return;
+    }
+
+    setPin('');
     setIsSubmitting(true);
-    enrollWindowsCredential(passwordSecret)
+    enrollWindowsCredential(passwordSecret, accountProfile)
       .then((response) => {
         if (response.operation_status !== 'completed') {
           console.warn('WinFaceUnlock credential enrollment was not completed.', response);
+          return;
         }
+        setAccountProfile(response.safe_details);
       })
       .catch((error) => {
         console.warn('Failed to enroll WinFaceUnlock credential.', error);
@@ -48,7 +86,9 @@ export function AccountArea() {
           <div className="absolute inset-0 bg-blue-50/50" />
           <User className="relative z-10 h-10 w-10 text-slate-400" strokeWidth={1.5} />
         </div>
-        <h2 className="text-xl font-medium text-slate-800 tracking-tight">Admin User</h2>
+        <h2 className="text-xl font-medium text-slate-800 tracking-tight">
+          {accountProfile?.windows_account_username ?? 'Admin User'}
+        </h2>
       </motion.div>
 
       <motion.div
@@ -95,7 +135,7 @@ export function AccountArea() {
                 initial={{ scale: 0.8, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 className="absolute inset-y-0 right-1.5 flex items-center z-10"
-                disabled={isSubmitting}
+                disabled={isSubmitting || (isControlRuntimeAvailable() && !accountProfile)}
                 onClick={handleCredentialSubmit}
               >
                 <div className="bg-[#007acc] hover:bg-[#0066aa] active:scale-95 text-white p-1.5 rounded-lg transition-all shadow-sm">

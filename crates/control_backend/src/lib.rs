@@ -1,7 +1,8 @@
 use control_protocol::{
     CONTROL_PROTOCOL_VERSION, ControlErrorCode, ControlOperation, ControlOperationStatus,
     ControlRequestEnvelope, ControlResponseEnvelope, ControlSettingsPatch, ControlSettingsSnapshot,
-    DashboardStatus, WindowsCredentialEnrollmentOutcome, WindowsCredentialEnrollmentPayload,
+    DashboardStatus, WindowsCredentialAccountProfile, WindowsCredentialEnrollmentOutcome,
+    WindowsCredentialEnrollmentPayload,
 };
 use control_status::{
     ControlStatusError, WindowsControlSettingsStore, WindowsDashboardStatusProvider,
@@ -22,6 +23,10 @@ pub trait ControlSettingsStore {
 }
 
 pub trait WindowsCredentialEnrollmentStore {
+    fn load_windows_credential_account(
+        &self,
+    ) -> Result<WindowsCredentialAccountProfile, ControlBackendError>;
+
     fn enroll_windows_credential(
         &self,
         payload: &WindowsCredentialEnrollmentPayload,
@@ -107,6 +112,17 @@ impl ControlBackendError {
             message: message.into(),
             next_recommended_action: Some(
                 "Check whether the WinFaceUnlock credential store can be opened.".to_owned(),
+            ),
+        }
+    }
+
+    pub fn credential_account_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            operation_status: ControlOperationStatus::ServiceUnavailable,
+            control_error_code: ControlErrorCode::CredentialAccountUnavailable,
+            message: message.into(),
+            next_recommended_action: Some(
+                "Check whether the current Windows account identity is available.".to_owned(),
             ),
         }
     }
@@ -266,6 +282,9 @@ where
             ControlOperation::GetDashboardStatus => self.handle_get_dashboard_status(&request),
             ControlOperation::GetSettings => self.handle_get_settings(&request),
             ControlOperation::UpdateSettings => self.handle_update_settings(&request),
+            ControlOperation::GetWindowsCredentialAccount => {
+                self.handle_get_windows_credential_account(&request)
+            }
             ControlOperation::EnrollWindowsCredential => ControlResponseEnvelope::invalid_request(
                 &request,
                 "enroll_windows_credential requires a credential secret side channel.",
@@ -273,6 +292,33 @@ where
                     "control_error_code": ControlErrorCode::InvalidCredentialEnrollmentRequest,
                 }),
             ),
+        }
+    }
+
+    fn handle_get_windows_credential_account(
+        &self,
+        request: &ControlRequestEnvelope,
+    ) -> ControlResponseEnvelope {
+        if !payload_is_empty(&request.payload) {
+            return ControlResponseEnvelope::invalid_request(
+                request,
+                "get_windows_credential_account does not accept a payload.",
+                json!({
+                    "control_error_code": ControlErrorCode::InvalidCredentialAccountRequest,
+                }),
+            );
+        }
+
+        match self
+            .credential_enrollment_store
+            .load_windows_credential_account()
+        {
+            Ok(profile) => ControlResponseEnvelope::completed(
+                request,
+                "Windows credential account loaded.",
+                json!(profile),
+            ),
+            Err(error) => error.into_response(request),
         }
     }
 
@@ -492,12 +538,19 @@ mod tests {
 
     #[derive(Clone)]
     struct RecordingCredentialEnrollmentStore {
+        account_profile: Result<WindowsCredentialAccountProfile, ControlBackendError>,
         result: Result<WindowsCredentialEnrollmentOutcome, ControlBackendError>,
         last_payload: Rc<RefCell<Option<WindowsCredentialEnrollmentPayload>>>,
         last_password: Rc<RefCell<Option<String>>>,
     }
 
     impl WindowsCredentialEnrollmentStore for RecordingCredentialEnrollmentStore {
+        fn load_windows_credential_account(
+            &self,
+        ) -> Result<WindowsCredentialAccountProfile, ControlBackendError> {
+            self.account_profile.clone()
+        }
+
         fn enroll_windows_credential(
             &self,
             payload: &WindowsCredentialEnrollmentPayload,
@@ -512,6 +565,13 @@ mod tests {
 
     fn credential_enrollment_store_fixture() -> RecordingCredentialEnrollmentStore {
         RecordingCredentialEnrollmentStore {
+            account_profile: Ok(WindowsCredentialAccountProfile {
+                windows_account_username: "Leo16".to_owned(),
+                user_id: "dev-user".to_owned(),
+                user_sid: "S-1-5-21-real".to_owned(),
+                account_type: WindowsCredentialAccountType::Local,
+                credential_ref: "windows-credential-dev-user".to_owned(),
+            }),
             result: Ok(WindowsCredentialEnrollmentOutcome {
                 windows_account_username: "Leo16".to_owned(),
                 user_id: "dev-user".to_owned(),
@@ -543,6 +603,10 @@ mod tests {
 
     fn update_settings_request(payload: Value) -> ControlRequestEnvelope {
         request(ControlOperation::UpdateSettings, payload)
+    }
+
+    fn credential_account_request(payload: Value) -> ControlRequestEnvelope {
+        request(ControlOperation::GetWindowsCredentialAccount, payload)
     }
 
     fn credential_enrollment_request(payload: Value) -> ControlRequestEnvelope {
@@ -730,6 +794,56 @@ mod tests {
             Some(LogonWakeMode::InputTriggered)
         );
         Ok(())
+    }
+
+    #[test]
+    fn get_windows_credential_account_returns_current_profile() -> Result<(), serde_json::Error> {
+        let handler = ControlHandler::new(
+            FixedDashboardStatusProvider {
+                result: Ok(dashboard_status_fixture()),
+            },
+            settings_store_fixture(),
+            credential_enrollment_store_fixture(),
+        );
+
+        let response = handler.handle_request(credential_account_request(json!({})));
+
+        assert_eq!(response.operation_status, ControlOperationStatus::Completed);
+        assert_eq!(response.message, "Windows credential account loaded.");
+        let decoded_profile: WindowsCredentialAccountProfile =
+            serde_json::from_value(response.safe_details)?;
+        assert_eq!(decoded_profile.windows_account_username, "Leo16");
+        assert_eq!(decoded_profile.user_id, "dev-user");
+        assert_eq!(decoded_profile.user_sid, "S-1-5-21-real");
+        assert_eq!(
+            decoded_profile.credential_ref,
+            "windows-credential-dev-user"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn get_windows_credential_account_rejects_payload() {
+        let handler = ControlHandler::new(
+            FixedDashboardStatusProvider {
+                result: Ok(dashboard_status_fixture()),
+            },
+            settings_store_fixture(),
+            credential_enrollment_store_fixture(),
+        );
+
+        let response = handler.handle_request(credential_account_request(json!({
+            "unexpected": true,
+        })));
+
+        assert_eq!(
+            response.operation_status,
+            ControlOperationStatus::InvalidRequest
+        );
+        assert_eq!(
+            response.safe_details["control_error_code"],
+            "invalid_credential_account_request"
+        );
     }
 
     #[test]

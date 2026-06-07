@@ -6,6 +6,7 @@ export type ControlOperation =
   | 'get_dashboard_status'
   | 'get_settings'
   | 'update_settings'
+  | 'get_windows_credential_account'
   | 'enroll_windows_credential';
 
 export type ControlOperationStatus =
@@ -58,6 +59,14 @@ export interface WindowsCredentialEnrollmentPayload {
   credential_ref?: string;
 }
 
+export interface WindowsCredentialAccountProfile {
+  windows_account_username: string;
+  user_id: string;
+  user_sid: string;
+  account_type: WindowsCredentialAccountType;
+  credential_ref: string;
+}
+
 export interface WindowsCredentialEnrollmentOutcome {
   windows_account_username: string;
   user_id: string;
@@ -78,16 +87,33 @@ export async function updateControlSettings(patch: ControlSettingsPatch) {
   return sendControlRequest<ControlSettingsSnapshot, ControlSettingsPatch>('update_settings', patch);
 }
 
-export async function enrollWindowsCredential(passwordSecret: string) {
+export async function getWindowsCredentialAccount() {
+  return sendControlRequest<WindowsCredentialAccountProfile>('get_windows_credential_account', {});
+}
+
+export async function enrollWindowsCredential(
+  passwordSecret: string,
+  accountProfile?: WindowsCredentialAccountProfile,
+) {
   if (!isTauriRuntime()) {
     throw new Error('Tauri 运行时未连接。');
   }
+
+  const payload: WindowsCredentialEnrollmentPayload = accountProfile
+    ? {
+        windows_account_username: accountProfile.windows_account_username,
+        user_id: accountProfile.user_id,
+        user_sid: accountProfile.user_sid,
+        account_type: accountProfile.account_type,
+        credential_ref: accountProfile.credential_ref,
+      }
+    : {};
 
   const request: ControlRequestEnvelope<WindowsCredentialEnrollmentPayload> = {
     protocol_version: CONTROL_PROTOCOL_VERSION,
     correlation_id: `control-ui-event-enroll_windows_credential-${Date.now()}`,
     operation: 'enroll_windows_credential',
-    payload: {},
+    payload,
   };
 
   return invoke<ControlResponseEnvelope<WindowsCredentialEnrollmentOutcome>>(

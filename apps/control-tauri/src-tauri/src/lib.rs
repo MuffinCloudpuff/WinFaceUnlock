@@ -3,8 +3,9 @@ use control_backend::{
     ControlBackendError, ControlHandler, WindowsCredentialEnrollmentStore, WindowsCredentialSecret,
 };
 use control_protocol::{
-    ControlRequestEnvelope, ControlResponseEnvelope, WindowsCredentialAccountType,
-    WindowsCredentialEnrollmentOutcome, WindowsCredentialEnrollmentPayload,
+    ControlRequestEnvelope, ControlResponseEnvelope, WindowsCredentialAccountProfile,
+    WindowsCredentialAccountType, WindowsCredentialEnrollmentOutcome,
+    WindowsCredentialEnrollmentPayload,
 };
 use control_status::{WindowsControlSettingsStore, WindowsDashboardStatusProvider};
 use tauri::{Manager, PhysicalPosition, PhysicalSize};
@@ -16,6 +17,12 @@ use win_service::credential_store_config::{
 struct WindowsCredentialEnrollmentAdapter;
 
 impl WindowsCredentialEnrollmentStore for WindowsCredentialEnrollmentAdapter {
+    fn load_windows_credential_account(
+        &self,
+    ) -> Result<WindowsCredentialAccountProfile, ControlBackendError> {
+        current_windows_credential_account()
+    }
+
     fn enroll_windows_credential(
         &self,
         payload: &WindowsCredentialEnrollmentPayload,
@@ -47,6 +54,10 @@ impl WindowsCredentialEnrollmentStore for WindowsCredentialEnrollmentAdapter {
         })
     }
 }
+
+const DEFAULT_CONTROL_USER_ID: &str = "dev-user";
+#[cfg(not(windows))]
+const DEFAULT_CONTROL_USER_SID: &str = "S-1-5-21-winfaceunlock-pending";
 
 #[tauri::command]
 fn handle_control_request(request: ControlRequestEnvelope) -> ControlResponseEnvelope {
@@ -96,6 +107,125 @@ fn resolve_windows_account_username(
                 "current Windows account username is unavailable",
             )
         })
+}
+
+fn current_windows_credential_account(
+) -> Result<WindowsCredentialAccountProfile, ControlBackendError> {
+    let username = current_windows_account_username()?;
+    let user_sid = current_windows_user_sid().map_err(|message| {
+        ControlBackendError::credential_account_unavailable(format!(
+            "current Windows account SID is unavailable: {message}"
+        ))
+    })?;
+    let user_id = DEFAULT_CONTROL_USER_ID.to_owned();
+
+    Ok(WindowsCredentialAccountProfile {
+        windows_account_username: username,
+        user_id: user_id.clone(),
+        user_sid,
+        account_type: WindowsCredentialAccountType::Local,
+        credential_ref: format!("windows-credential-{user_id}"),
+    })
+}
+
+fn current_windows_account_username() -> Result<String, ControlBackendError> {
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .map(|username| username.trim().to_owned())
+        .ok()
+        .filter(|username| !username.is_empty())
+        .ok_or_else(|| {
+            ControlBackendError::credential_account_unavailable(
+                "current Windows account username is unavailable",
+            )
+        })
+}
+
+#[cfg(windows)]
+fn current_windows_user_sid() -> Result<String, String> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, LocalFree, HANDLE},
+        Security::{
+            Authorization::ConvertSidToStringSidW, GetTokenInformation, TokenUser, TOKEN_QUERY,
+            TOKEN_USER,
+        },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    struct TokenHandle(HANDLE);
+
+    impl Drop for TokenHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    unsafe {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let token = TokenHandle(token);
+
+        let mut required_len = 0_u32;
+        let _ = GetTokenInformation(
+            token.0,
+            TokenUser,
+            std::ptr::null_mut(),
+            0,
+            &mut required_len,
+        );
+        if required_len == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+
+        let mut buffer = vec![0_u8; required_len as usize];
+        if GetTokenInformation(
+            token.0,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            required_len,
+            &mut required_len,
+        ) == 0
+        {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+
+        let token_user = buffer.as_ptr().cast::<TOKEN_USER>();
+        let sid = (*token_user).User.Sid;
+        let mut sid_text_ptr = std::ptr::null_mut();
+        if ConvertSidToStringSidW(sid, &mut sid_text_ptr) == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let sid_text = wide_ptr_to_string(sid_text_ptr);
+        let _ = LocalFree(sid_text_ptr.cast());
+
+        sid_text.ok_or_else(|| "Windows returned an invalid SID string".to_owned())
+    }
+}
+
+#[cfg(not(windows))]
+fn current_windows_user_sid() -> Result<String, String> {
+    Ok(DEFAULT_CONTROL_USER_SID.to_owned())
+}
+
+#[cfg(windows)]
+unsafe fn wide_ptr_to_string(ptr: windows_sys::core::PWSTR) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+
+    let mut len = 0;
+    while *ptr.add(len) != 0 {
+        len += 1;
+    }
+    Some(String::from_utf16_lossy(std::slice::from_raw_parts(
+        ptr, len,
+    )))
 }
 
 fn account_type_from_control(account_type: WindowsCredentialAccountType) -> AccountType {

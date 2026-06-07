@@ -101,6 +101,7 @@ Initial runtime control operations should include:
 get_dashboard_status
 get_settings
 update_settings
+get_windows_credential_account
 enroll_windows_credential
 list_face_templates
 delete_face_template
@@ -200,6 +201,11 @@ Rules:
    keys, tokens, or unnecessary sensitive data.
 
 ### Credential Secret Channel
+
+`get_windows_credential_account` returns the backend-owned Windows account
+identity that the credential binding page should display and use for
+subsequent credential enrollment. The frontend must not hard-code a display
+name such as "Admin User" when a backend account profile is available.
 
 `enroll_windows_credential` is a runtime control operation because it binds the
 post-install Windows credential used after successful face authentication.

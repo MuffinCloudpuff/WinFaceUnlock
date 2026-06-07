@@ -4727,6 +4727,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "win_service",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

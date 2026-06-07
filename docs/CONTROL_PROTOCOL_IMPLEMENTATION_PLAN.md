@@ -345,23 +345,29 @@ the runtime control protocol.
 ### Operations
 
 ```text
+get_windows_credential_account
 enroll_windows_credential
 ```
 
 ### Rules
 
-1. The frontend triggers the operation only from the account credential submit
-   event.
-2. The control envelope carries only safe metadata such as
+1. The account page may read `get_windows_credential_account` once when opened
+   because its purpose is to show which Windows account the credential will
+   bind to.
+2. The frontend displays the backend-provided `windows_account_username`;
+   account names must not be hard-coded in the UI.
+3. The frontend triggers `enroll_windows_credential` only from the account
+   credential submit event.
+4. The control envelope carries only safe metadata such as
    `windows_account_username`, `user_id`, `user_sid`, `account_type`, and
    `credential_ref`.
-3. The password must not be serialized into the normal control request payload
+5. The password must not be serialized into the normal control request payload
    or any response `safe_details`.
-4. A local adapter may pass the password through a one-shot secret side channel
+6. A local adapter may pass the password through a one-shot secret side channel
    that is immediately consumed by the backend.
-5. The backend owns credential store paths, default `user_id`, and
+7. The backend owns credential store paths, default `user_id`, and
    `credential_ref` generation.
-6. Responses distinguish invalid payload, missing secret, unavailable
+8. Responses distinguish invalid payload, missing secret, unavailable
    credential store, failed enrollment, and successful enrollment.
 
 ## Phase C5: Face Management
