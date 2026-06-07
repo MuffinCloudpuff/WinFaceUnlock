@@ -22,7 +22,7 @@ use crate::{
     broker_client::{ProviderBrokerClient, ProviderWakeOutcome},
     credential::create_credential,
     fields::{FIELD_COUNT, allocate_field_descriptor},
-    provider_config::ProviderRuntimeConfig,
+    provider_config::{ProviderLogonWakeMode, ProviderRuntimeConfig},
     provider_log::{write_provider_event, write_provider_event_detail},
     provider_state::{ProviderState, WakeRequestStart},
 };
@@ -87,7 +87,10 @@ impl ICredentialProvider_Impl for WinFaceUnlockProvider_Impl {
     fn Advise(&self, pcpe: Ref<ICredentialProviderEvents>, upadvisecontext: usize) -> Result<()> {
         write_provider_event("Provider.Advise");
         self.state.set_events(pcpe.cloned(), upadvisecontext);
-        if ProviderRuntimeConfig::from_registry_or_default().auto_wake_on_advise {
+        if matches!(
+            ProviderRuntimeConfig::from_registry_or_default().logon_wake_mode,
+            Some(ProviderLogonWakeMode::InputTriggered)
+        ) {
             request_wake_in_background(
                 self.state.clone(),
                 "Provider.AutoWake",

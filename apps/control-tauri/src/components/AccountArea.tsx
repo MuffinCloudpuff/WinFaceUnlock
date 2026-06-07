@@ -1,9 +1,39 @@
 import { User, KeyRound, ArrowRight } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useState } from 'react';
+import { enrollWindowsCredential, isControlRuntimeAvailable } from '../controlProtocol';
 
 export function AccountArea() {
   const [pin, setPin] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleCredentialSubmit = () => {
+    if (pin.length === 0 || isSubmitting) {
+      return;
+    }
+
+    const passwordSecret = pin;
+    setPin('');
+
+    if (!isControlRuntimeAvailable()) {
+      console.warn('WinFaceUnlock credential enrollment requires the Tauri runtime.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    enrollWindowsCredential(passwordSecret)
+      .then((response) => {
+        if (response.operation_status !== 'completed') {
+          console.warn('WinFaceUnlock credential enrollment was not completed.', response);
+        }
+      })
+      .catch((error) => {
+        console.warn('Failed to enroll WinFaceUnlock credential.', error);
+      })
+      .finally(() => {
+        setIsSubmitting(false);
+      });
+  };
 
   return (
     <div className="relative z-50 flex flex-1 flex-col items-center justify-center gap-10">
@@ -50,6 +80,12 @@ export function AccountArea() {
               type="password"
               value={pin}
               onChange={(e) => setPin(e.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  handleCredentialSubmit();
+                }
+              }}
               className="block w-full bg-transparent pl-10 pr-10 py-3 text-slate-800 placeholder-slate-400 focus:outline-none transition-all font-mono tracking-[0.3em] text-center relative z-0"
               placeholder="PIN"
               autoFocus
@@ -59,7 +95,8 @@ export function AccountArea() {
                 initial={{ scale: 0.8, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 className="absolute inset-y-0 right-1.5 flex items-center z-10"
-                onClick={() => {}}
+                disabled={isSubmitting}
+                onClick={handleCredentialSubmit}
               >
                 <div className="bg-[#007acc] hover:bg-[#0066aa] active:scale-95 text-white p-1.5 rounded-lg transition-all shadow-sm">
                   <ArrowRight className="h-4 w-4" />

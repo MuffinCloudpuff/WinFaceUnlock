@@ -2,7 +2,11 @@ import { invoke } from '@tauri-apps/api/core';
 
 export const CONTROL_PROTOCOL_VERSION = 1;
 
-export type ControlOperation = 'get_dashboard_status';
+export type ControlOperation =
+  | 'get_dashboard_status'
+  | 'get_settings'
+  | 'update_settings'
+  | 'enroll_windows_credential';
 
 export type ControlOperationStatus =
   | 'completed'
@@ -15,11 +19,11 @@ export type ControlOperationStatus =
   | 'unsupported_protocol'
   | 'cancelled';
 
-export interface ControlRequestEnvelope {
+export interface ControlRequestEnvelope<TPayload = unknown> {
   protocol_version: number;
   correlation_id: string;
   operation: ControlOperation;
-  payload: unknown;
+  payload: TPayload;
 }
 
 export interface ControlResponseEnvelope<TDetails = unknown> {
@@ -32,62 +36,82 @@ export interface ControlResponseEnvelope<TDetails = unknown> {
   next_recommended_action?: string;
 }
 
-export interface DashboardStatus {
-  service: {
-    installation_state: 'installed' | 'missing';
-    runtime_state:
-      | 'running'
-      | 'stopped'
-      | 'paused'
-      | 'start_pending'
-      | 'stop_pending'
-      | 'missing'
-      | string;
-    process_id?: number;
-  };
-  provider: {
-    registration_state: 'registered' | 'partially_registered' | 'not_registered';
-    credential_provider_registered: boolean;
-    com_server_registered: boolean;
-    project_config_registered: boolean;
-  };
-  service_config: {
-    registry_config_state: 'present' | 'missing';
-    auth_mode?: string;
-    face_template_path?: string;
-    presence_lock_enabled?: boolean;
-    presence_detector_kind?: string;
-    presence_tracking_mode?: string;
-  };
-  data_directory: {
-    program_data_dir?: string;
-    program_data_presence: 'present' | 'missing' | 'unknown';
-    presence_audit_dir?: string;
-    presence_audit_presence: 'present' | 'missing' | 'unknown';
-  };
-  presence_runtime?: {
-    monitor_state: 'running' | 'stopped' | 'disabled' | 'unavailable' | string;
-    session_id?: number;
-    reason?: string;
-    updated_at_unix_ms?: number;
-  };
+export type LogonWakeMode = 'input_triggered';
+
+export interface ControlSettingsSnapshot {
+  presence_lock_enabled: boolean;
+  logon_wake_mode?: LogonWakeMode;
 }
 
-export type DashboardResponseEnvelope = ControlResponseEnvelope<DashboardStatus>;
+export interface ControlSettingsPatch {
+  presence_lock_enabled?: boolean;
+  logon_wake_mode?: LogonWakeMode;
+}
 
-export async function loadDashboardStatus(): Promise<DashboardResponseEnvelope> {
+export type WindowsCredentialAccountType = 'local' | 'microsoft_account' | 'domain';
+
+export interface WindowsCredentialEnrollmentPayload {
+  windows_account_username?: string;
+  user_id?: string;
+  user_sid?: string;
+  account_type?: WindowsCredentialAccountType;
+  credential_ref?: string;
+}
+
+export interface WindowsCredentialEnrollmentOutcome {
+  windows_account_username: string;
+  user_id: string;
+  user_sid: string;
+  account_type: WindowsCredentialAccountType;
+  credential_ref: string;
+}
+
+export function isControlRuntimeAvailable() {
+  return isTauriRuntime();
+}
+
+export async function getControlSettings() {
+  return sendControlRequest<ControlSettingsSnapshot>('get_settings', {});
+}
+
+export async function updateControlSettings(patch: ControlSettingsPatch) {
+  return sendControlRequest<ControlSettingsSnapshot, ControlSettingsPatch>('update_settings', patch);
+}
+
+export async function enrollWindowsCredential(passwordSecret: string) {
   if (!isTauriRuntime()) {
     throw new Error('Tauri 运行时未连接。');
   }
 
-  const request: ControlRequestEnvelope = {
+  const request: ControlRequestEnvelope<WindowsCredentialEnrollmentPayload> = {
     protocol_version: CONTROL_PROTOCOL_VERSION,
-    correlation_id: `control-ui-${Date.now()}`,
-    operation: 'get_dashboard_status',
+    correlation_id: `control-ui-event-enroll_windows_credential-${Date.now()}`,
+    operation: 'enroll_windows_credential',
     payload: {},
   };
 
-  return invoke<DashboardResponseEnvelope>('handle_control_request', { request });
+  return invoke<ControlResponseEnvelope<WindowsCredentialEnrollmentOutcome>>(
+    'handle_credential_enrollment_request',
+    { request, passwordSecret },
+  );
+}
+
+export async function sendControlRequest<TDetails = unknown, TPayload = unknown>(
+  operation: ControlOperation,
+  payload: TPayload,
+): Promise<ControlResponseEnvelope<TDetails>> {
+  if (!isTauriRuntime()) {
+    throw new Error('Tauri 运行时未连接。');
+  }
+
+  const request: ControlRequestEnvelope<TPayload> = {
+    protocol_version: CONTROL_PROTOCOL_VERSION,
+    correlation_id: `control-ui-event-${operation}-${Date.now()}`,
+    operation,
+    payload,
+  };
+
+  return invoke<ControlResponseEnvelope<TDetails>>('handle_control_request', { request });
 }
 
 function isTauriRuntime() {

@@ -7,13 +7,15 @@ use std::{
 
 use common_protocol::SERVICE_NAME;
 use control_protocol::{
-    DashboardStatus, DataDirectorySummary, PathPresence, PresenceMonitorState,
-    PresenceRuntimeSummary, ProviderRegistrationState, ProviderStatusSummary, RegistryConfigState,
-    ServiceConfigSummary, ServiceInstallationState, ServiceRuntimeState, ServiceStatusSummary,
+    ControlSettingsPatch, ControlSettingsSnapshot, DashboardStatus, DataDirectorySummary,
+    LogonWakeMode, PathPresence, PresenceMonitorState, PresenceRuntimeSummary,
+    ProviderRegistrationState, ProviderStatusSummary, RegistryConfigState, ServiceConfigSummary,
+    ServiceInstallationState, ServiceRuntimeState, ServiceStatusSummary,
 };
 use serde::Deserialize;
 use windows_provider::{
-    COM_INPROC_SERVER_REGISTRY_PATH, PROVIDER_CLSID_REGISTRY_PATH, PROVIDER_ROOT_REGISTRY_PATH,
+    COM_INPROC_SERVER_REGISTRY_PATH, LOGON_WAKE_MODE_INPUT_TRIGGERED, PROVIDER_CLSID_REGISTRY_PATH,
+    PROVIDER_ROOT_REGISTRY_PATH, REG_VALUE_AUTO_WAKE_ON_ADVISE, REG_VALUE_LOGON_WAKE_MODE,
 };
 use windows_service::{
     service::{ServiceAccess, ServiceState, ServiceStatus},
@@ -83,13 +85,36 @@ impl Default for WindowsDashboardStatusProvider {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WindowsControlSettingsStore;
+
+impl WindowsControlSettingsStore {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn load_settings(&self) -> Result<ControlSettingsSnapshot, ControlStatusError> {
+        load_control_settings(&WindowsSettingsSource)
+    }
+
+    pub fn update_settings(
+        &self,
+        patch: &ControlSettingsPatch,
+    ) -> Result<ControlSettingsSnapshot, ControlStatusError> {
+        update_control_settings(&WindowsSettingsSource, patch)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlStatusError {
     ServiceStatusUnavailable(String),
     ProviderStatusUnavailable(String),
     ServiceConfigUnavailable(String),
+    SettingsUnavailable(String),
+    SettingsPersistenceFailed(String),
     DataDirectoryStatusUnavailable(String),
     PresenceRuntimeStatusUnavailable(String),
+    ElevationRequired(String),
     PermissionDenied(String),
 }
 
@@ -99,8 +124,11 @@ impl ControlStatusError {
             Self::ServiceStatusUnavailable(message)
             | Self::ProviderStatusUnavailable(message)
             | Self::ServiceConfigUnavailable(message)
+            | Self::SettingsUnavailable(message)
+            | Self::SettingsPersistenceFailed(message)
             | Self::DataDirectoryStatusUnavailable(message)
             | Self::PresenceRuntimeStatusUnavailable(message)
+            | Self::ElevationRequired(message)
             | Self::PermissionDenied(message) => message,
         }
     }
@@ -149,6 +177,14 @@ struct ObservedServiceConfigStatus {
     presence_lock_enabled: Option<String>,
     presence_detector_kind: Option<String>,
     presence_tracking_mode: Option<String>,
+}
+
+trait SettingsSource {
+    fn read_presence_lock_enabled(&self) -> Result<Option<String>, ControlStatusError>;
+    fn write_presence_lock_enabled(&self, enabled: bool) -> Result<(), ControlStatusError>;
+    fn read_logon_wake_mode(&self) -> Result<Option<String>, ControlStatusError>;
+    fn read_auto_wake_on_advise(&self) -> Result<Option<String>, ControlStatusError>;
+    fn write_logon_wake_mode(&self, mode: LogonWakeMode) -> Result<(), ControlStatusError>;
 }
 
 fn load_dashboard_status(
@@ -227,8 +263,105 @@ fn parse_registry_bool(value: &str) -> Option<bool> {
     }
 }
 
+fn bool_registry_value(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
+fn logon_wake_mode_registry_value(mode: LogonWakeMode) -> &'static str {
+    match mode {
+        LogonWakeMode::InputTriggered => LOGON_WAKE_MODE_INPUT_TRIGGERED,
+    }
+}
+
+fn parse_logon_wake_mode(value: &str) -> Option<LogonWakeMode> {
+    match value.trim() {
+        LOGON_WAKE_MODE_INPUT_TRIGGERED | "input_triggered" => Some(LogonWakeMode::InputTriggered),
+        _ => None,
+    }
+}
+
+fn legacy_logon_wake_mode(auto_wake_on_advise: Option<String>) -> Option<LogonWakeMode> {
+    auto_wake_on_advise
+        .as_deref()
+        .and_then(parse_registry_bool)
+        .and_then(|enabled| enabled.then_some(LogonWakeMode::InputTriggered))
+}
+
+fn load_control_settings(
+    source: &impl SettingsSource,
+) -> Result<ControlSettingsSnapshot, ControlStatusError> {
+    Ok(ControlSettingsSnapshot {
+        presence_lock_enabled: source
+            .read_presence_lock_enabled()?
+            .as_deref()
+            .and_then(parse_registry_bool)
+            .unwrap_or(false),
+        logon_wake_mode: source
+            .read_logon_wake_mode()?
+            .as_deref()
+            .and_then(parse_logon_wake_mode)
+            .or_else(|| legacy_logon_wake_mode(source.read_auto_wake_on_advise().ok().flatten())),
+    })
+}
+
+fn update_control_settings(
+    source: &impl SettingsSource,
+    patch: &ControlSettingsPatch,
+) -> Result<ControlSettingsSnapshot, ControlStatusError> {
+    if let Some(enabled) = patch.presence_lock_enabled {
+        source.write_presence_lock_enabled(enabled)?;
+    }
+    if let Some(mode) = patch.logon_wake_mode {
+        source.write_logon_wake_mode(mode)?;
+    }
+    load_control_settings(source)
+}
+
 struct WindowsStatusSource<'a> {
     paths: &'a ControlStatusPaths,
+}
+
+struct WindowsSettingsSource;
+
+impl SettingsSource for WindowsSettingsSource {
+    fn read_presence_lock_enabled(&self) -> Result<Option<String>, ControlStatusError> {
+        registry::read_string_value(SERVICE_CONFIG_REGISTRY_PATH, REG_PRESENCE_LOCK_ENABLED)
+            .map_err(settings_read_error)
+    }
+
+    fn write_presence_lock_enabled(&self, enabled: bool) -> Result<(), ControlStatusError> {
+        registry::write_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_LOCK_ENABLED,
+            bool_registry_value(enabled),
+        )
+        .map_err(settings_write_error)
+    }
+
+    fn read_logon_wake_mode(&self) -> Result<Option<String>, ControlStatusError> {
+        registry::read_string_value(PROVIDER_ROOT_REGISTRY_PATH, REG_VALUE_LOGON_WAKE_MODE)
+            .map_err(settings_read_error)
+    }
+
+    fn read_auto_wake_on_advise(&self) -> Result<Option<String>, ControlStatusError> {
+        registry::read_string_value(PROVIDER_ROOT_REGISTRY_PATH, REG_VALUE_AUTO_WAKE_ON_ADVISE)
+            .map_err(settings_read_error)
+    }
+
+    fn write_logon_wake_mode(&self, mode: LogonWakeMode) -> Result<(), ControlStatusError> {
+        registry::write_string_value(
+            PROVIDER_ROOT_REGISTRY_PATH,
+            REG_VALUE_LOGON_WAKE_MODE,
+            logon_wake_mode_registry_value(mode),
+        )
+        .map_err(settings_write_error)?;
+        registry::write_string_value(
+            PROVIDER_ROOT_REGISTRY_PATH,
+            REG_VALUE_AUTO_WAKE_ON_ADVISE,
+            bool_registry_value(matches!(mode, LogonWakeMode::InputTriggered)),
+        )
+        .map_err(settings_write_error)
+    }
 }
 
 impl StatusSource for WindowsStatusSource<'_> {
@@ -426,6 +559,28 @@ fn service_config_error(error: RegistryReadError) -> ControlStatusError {
     }
 }
 
+fn settings_read_error(error: RegistryReadError) -> ControlStatusError {
+    if error.is_access_denied() {
+        ControlStatusError::PermissionDenied("service settings registry access denied".to_owned())
+    } else {
+        ControlStatusError::SettingsUnavailable(format!(
+            "service settings registry cannot be read: {error}"
+        ))
+    }
+}
+
+fn settings_write_error(error: RegistryWriteError) -> ControlStatusError {
+    if error.is_access_denied() {
+        ControlStatusError::ElevationRequired(
+            "service settings registry update requires elevation".to_owned(),
+        )
+    } else {
+        ControlStatusError::SettingsPersistenceFailed(format!(
+            "service settings registry cannot be updated: {error}"
+        ))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RegistryReadError {
     operation: &'static str,
@@ -457,6 +612,30 @@ impl fmt::Display for RegistryReadError {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RegistryWriteError {
+    operation: &'static str,
+    path: String,
+    value_name: String,
+    code: u32,
+}
+
+impl RegistryWriteError {
+    fn is_access_denied(&self) -> bool {
+        self.code == ERROR_ACCESS_DENIED
+    }
+}
+
+impl fmt::Display for RegistryWriteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} failed for {}\\{}: error {}",
+            self.operation, self.path, self.value_name, self.code
+        )
+    }
+}
+
 #[cfg(windows)]
 mod registry {
     use std::ptr;
@@ -464,12 +643,12 @@ mod registry {
     use windows_sys::Win32::{
         Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR},
         System::Registry::{
-            HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, RegCloseKey, RegOpenKeyExW,
-            RegQueryValueExW,
+            HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
+            RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
         },
     };
 
-    use super::RegistryReadError;
+    use super::{RegistryReadError, RegistryWriteError};
 
     pub fn key_exists(path: &str) -> Result<bool, RegistryReadError> {
         match open_key(path) {
@@ -542,6 +721,32 @@ mod registry {
         Ok(String::from_utf16(&data).ok())
     }
 
+    pub fn write_string_value(
+        path: &str,
+        value_name: &str,
+        value: &str,
+    ) -> Result<(), RegistryWriteError> {
+        let key = create_key(path)?;
+        let name = to_wide_null(value_name);
+        let data = to_wide_null(value);
+        let byte_len = (data.len() * size_of::<u16>()) as u32;
+        let status = unsafe {
+            RegSetValueExW(
+                key.raw,
+                name.as_ptr(),
+                0,
+                REG_SZ,
+                data.as_ptr().cast::<u8>(),
+                byte_len,
+            )
+        };
+        if status == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(registry_write_error("set value", path, value_name, status))
+        }
+    }
+
     fn open_key(path: &str) -> Result<Option<OwnedRegistryKey>, RegistryReadError> {
         let path_wide = to_wide_null(path);
         let mut key: HKEY = ptr::null_mut();
@@ -560,6 +765,29 @@ mod registry {
             Ok(None)
         } else {
             Err(registry_error("open key", path, None, status))
+        }
+    }
+
+    fn create_key(path: &str) -> Result<OwnedRegistryKey, RegistryWriteError> {
+        let path_wide = to_wide_null(path);
+        let mut key: HKEY = ptr::null_mut();
+        let status = unsafe {
+            RegCreateKeyExW(
+                HKEY_LOCAL_MACHINE,
+                path_wide.as_ptr(),
+                0,
+                ptr::null_mut(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_SET_VALUE,
+                ptr::null(),
+                &mut key,
+                ptr::null_mut(),
+            )
+        };
+        if status == ERROR_SUCCESS {
+            Ok(OwnedRegistryKey { raw: key })
+        } else {
+            Err(registry_write_error("create key", path, "", status))
         }
     }
 
@@ -591,6 +819,20 @@ mod registry {
         }
     }
 
+    fn registry_write_error(
+        operation: &'static str,
+        path: &str,
+        value_name: &str,
+        code: WIN32_ERROR,
+    ) -> RegistryWriteError {
+        RegistryWriteError {
+            operation,
+            path: path.to_owned(),
+            value_name: value_name.to_owned(),
+            code,
+        }
+    }
+
     fn to_wide_null(value: &str) -> Vec<u16> {
         value.encode_utf16().chain(std::iter::once(0)).collect()
     }
@@ -598,7 +840,7 @@ mod registry {
 
 #[cfg(not(windows))]
 mod registry {
-    use super::RegistryReadError;
+    use super::{RegistryReadError, RegistryWriteError};
 
     pub fn key_exists(_path: &str) -> Result<bool, RegistryReadError> {
         Ok(false)
@@ -610,11 +852,24 @@ mod registry {
     ) -> Result<Option<String>, RegistryReadError> {
         Ok(None)
     }
+
+    pub fn write_string_value(
+        path: &str,
+        value_name: &str,
+        _value: &str,
+    ) -> Result<(), RegistryWriteError> {
+        Err(RegistryWriteError {
+            operation: "set value",
+            path: path.to_owned(),
+            value_name: value_name.to_owned(),
+            code: 0,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::{cell::RefCell, collections::VecDeque};
 
     use super::*;
 
@@ -692,6 +947,42 @@ mod tests {
             &self,
         ) -> Result<Option<PresenceRuntimeSummary>, ControlStatusError> {
             self.presence_runtime.clone()
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeSettingsSource {
+        presence_lock_enabled: RefCell<Option<String>>,
+        logon_wake_mode: RefCell<Option<String>>,
+        auto_wake_on_advise: RefCell<Option<String>>,
+    }
+
+    impl SettingsSource for FakeSettingsSource {
+        fn read_presence_lock_enabled(&self) -> Result<Option<String>, ControlStatusError> {
+            Ok(self.presence_lock_enabled.borrow().clone())
+        }
+
+        fn write_presence_lock_enabled(&self, enabled: bool) -> Result<(), ControlStatusError> {
+            self.presence_lock_enabled
+                .replace(Some(bool_registry_value(enabled).to_owned()));
+            Ok(())
+        }
+
+        fn read_logon_wake_mode(&self) -> Result<Option<String>, ControlStatusError> {
+            Ok(self.logon_wake_mode.borrow().clone())
+        }
+
+        fn read_auto_wake_on_advise(&self) -> Result<Option<String>, ControlStatusError> {
+            Ok(self.auto_wake_on_advise.borrow().clone())
+        }
+
+        fn write_logon_wake_mode(&self, mode: LogonWakeMode) -> Result<(), ControlStatusError> {
+            self.logon_wake_mode
+                .replace(Some(logon_wake_mode_registry_value(mode).to_owned()));
+            self.auto_wake_on_advise.replace(Some(
+                bool_registry_value(matches!(mode, LogonWakeMode::InputTriggered)).to_owned(),
+            ));
+            Ok(())
         }
     }
 
@@ -846,5 +1137,97 @@ mod tests {
                 Some(false)
             ]
         );
+    }
+
+    #[test]
+    fn settings_default_presence_lock_to_false_when_registry_value_is_missing()
+    -> Result<(), ControlStatusError> {
+        let source = FakeSettingsSource::default();
+
+        let settings = load_control_settings(&source)?;
+
+        assert!(!settings.presence_lock_enabled);
+        Ok(())
+    }
+
+    #[test]
+    fn settings_update_writes_presence_lock_and_returns_snapshot() -> Result<(), ControlStatusError>
+    {
+        let source = FakeSettingsSource {
+            presence_lock_enabled: RefCell::new(Some("true".to_owned())),
+            ..FakeSettingsSource::default()
+        };
+
+        let settings = update_control_settings(
+            &source,
+            &ControlSettingsPatch {
+                presence_lock_enabled: Some(false),
+                logon_wake_mode: None,
+            },
+        )?;
+
+        assert!(!settings.presence_lock_enabled);
+        assert_eq!(
+            source.presence_lock_enabled.borrow().as_deref(),
+            Some("false")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn settings_reads_input_triggered_logon_wake_mode() -> Result<(), ControlStatusError> {
+        let source = FakeSettingsSource {
+            logon_wake_mode: RefCell::new(Some(LOGON_WAKE_MODE_INPUT_TRIGGERED.to_owned())),
+            ..FakeSettingsSource::default()
+        };
+
+        let settings = load_control_settings(&source)?;
+
+        assert_eq!(
+            settings.logon_wake_mode,
+            Some(LogonWakeMode::InputTriggered)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn settings_derives_input_triggered_from_legacy_auto_wake() -> Result<(), ControlStatusError> {
+        let source = FakeSettingsSource {
+            auto_wake_on_advise: RefCell::new(Some("true".to_owned())),
+            ..FakeSettingsSource::default()
+        };
+
+        let settings = load_control_settings(&source)?;
+
+        assert_eq!(
+            settings.logon_wake_mode,
+            Some(LogonWakeMode::InputTriggered)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn settings_update_writes_logon_wake_mode_and_legacy_auto_wake()
+    -> Result<(), ControlStatusError> {
+        let source = FakeSettingsSource::default();
+
+        let settings = update_control_settings(
+            &source,
+            &ControlSettingsPatch {
+                presence_lock_enabled: None,
+                logon_wake_mode: Some(LogonWakeMode::InputTriggered),
+            },
+        )?;
+
+        assert_eq!(
+            settings.logon_wake_mode,
+            Some(LogonWakeMode::InputTriggered)
+        );
+        assert_eq!(
+            source.logon_wake_mode.borrow().as_deref(),
+            Some(LOGON_WAKE_MODE_INPUT_TRIGGERED)
+        );
+        assert_eq!(source.auto_wake_on_advise.borrow().as_deref(), Some("true"));
+        Ok(())
     }
 }

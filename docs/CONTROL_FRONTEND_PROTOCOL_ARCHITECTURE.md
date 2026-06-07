@@ -101,6 +101,7 @@ Initial runtime control operations should include:
 get_dashboard_status
 get_settings
 update_settings
+enroll_windows_credential
 list_face_templates
 delete_face_template
 start_enrollment
@@ -198,6 +199,40 @@ Rules:
 5. Do not pass plaintext passwords, credential material, full face images, API
    keys, tokens, or unnecessary sensitive data.
 
+### Credential Secret Channel
+
+`enroll_windows_credential` is a runtime control operation because it binds the
+post-install Windows credential used after successful face authentication.
+
+The control request envelope carries only safe enrollment metadata:
+
+```json
+{
+  "protocol_version": 1,
+  "correlation_id": "control-...",
+  "operation": "enroll_windows_credential",
+  "payload": {
+    "windows_account_username": "Leo16",
+    "user_id": "dev-user",
+    "user_sid": "S-1-5-21-winfaceunlock-pending",
+    "account_type": "local",
+    "credential_ref": "windows-credential-dev-user"
+  }
+}
+```
+
+Rules:
+
+1. The request payload must not contain a password field.
+2. Tauri may pass the user-entered password as a local command argument that is
+   immediately consumed by the Rust adapter.
+3. A future WinUI or named-pipe control client must use an equivalent secret
+   side channel, such as a one-shot pipe or native credential prompt.
+4. `safe_details` may return username, `user_id`, account type, and
+   `credential_ref`; it must not return plaintext or protected password bytes.
+5. The frontend must trigger this operation only from an explicit user submit
+   event.
+
 ## Response Envelope
 
 Runtime control responses should also be structured:
@@ -260,6 +295,27 @@ ControlResponse.safe_details
 The mapping layer may rename fields for display ergonomics, but it must not
 change the backend protocol or invent backend truth.
 
+## Frontend Request Lifecycle
+
+The control frontend must not treat backend reachability as something that is
+continuously checked by default. A backend call should be tied to one of these
+explicit causes:
+
+1. the user clicks a control action
+2. the user submits a form
+3. the user opens a view whose purpose is to show backend state
+4. the product explicitly defines a live status surface
+
+For the current Tauri UI, the established visual shell should stay intact.
+Backend integration is added behind existing events. Do not add status strips,
+dashboard cards, background refresh timers, or page-load connection checks as
+side effects of wiring backend APIs.
+
+When a user action needs the backend, that action should send one semantic
+operation, receive one structured response, and map only that response into the
+current flow. Connection failure, unsupported protocol, permission failure, and
+operation failure are action results, not separate global UI polling states.
+
 ## Current Codebase Status
 
 Current implemented pieces:
@@ -271,7 +327,9 @@ Current implemented pieces:
 4. `setup_api` and `installer_cli setup-backend` contain the setup protocol.
 5. the old WinUI control app currently reads status through setup backend
    compatibility code.
-6. the Tauri control app currently has only a stub backend status command.
+6. the Tauri control app exposes `handle_control_request` as a runtime control
+   adapter. Current UI integration should stay event-driven and must not add
+   dashboard polling as a side effect.
 
 Important interpretation:
 
@@ -325,11 +383,30 @@ Settings patches must be partial and semantic. For example:
 
 ```text
 presence_lock_enabled
+```
+
+The first implementation should only expose `presence_lock_enabled`, because
+that setting already has a real backend registry value and service runtime
+behavior. Add more fields only after their frontend semantics are mapped to
+backend-owned configuration:
+
+```text
+logon_wake_mode
 presence_detector_kind
 presence_tracking_mode
 camera_id
 match_threshold
 ```
+
+`logon_wake_mode` is the backend-owned setting behind the frontend labels
+"敲击键盘", "后台静默", and "智能混合". Only `input_triggered` is implemented
+for now. The full three-mode design is defined in:
+
+```text
+docs/LOGON_WAKE_MODES_DESIGN.md
+```
+
+This is a LogonUI unlock wake feature, not Presence Lock.
 
 The protocol should distinguish validation failure, permission failure,
 service-unavailable failure, and successful persistence.

@@ -100,6 +100,9 @@ impl ControlResponseEnvelope {
 #[serde(rename_all = "snake_case")]
 pub enum ControlOperation {
     GetDashboardStatus,
+    GetSettings,
+    UpdateSettings,
+    EnrollWindowsCredential,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -120,13 +123,108 @@ pub enum ControlOperationStatus {
 #[serde(rename_all = "snake_case")]
 pub enum ControlErrorCode {
     InvalidDashboardStatusRequest,
+    InvalidSettingsRequest,
+    InvalidCredentialEnrollmentRequest,
     DashboardStatusUnavailable,
+    SettingsUnavailable,
+    SettingsPersistenceFailed,
+    CredentialEnrollmentUnavailable,
+    CredentialEnrollmentFailed,
     ServiceStatusUnavailable,
     ProviderStatusUnavailable,
     ServiceConfigUnavailable,
     DataDirectoryStatusUnavailable,
     PresenceRuntimeStatusUnavailable,
+    ElevationRequired,
     PermissionDenied,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ControlSettingsSnapshot {
+    pub presence_lock_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logon_wake_mode: Option<LogonWakeMode>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ControlSettingsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_lock_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logon_wake_mode: Option<LogonWakeMode>,
+}
+
+impl ControlSettingsPatch {
+    pub fn has_updates(&self) -> bool {
+        self.presence_lock_enabled.is_some() || self.logon_wake_mode.is_some()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogonWakeMode {
+    InputTriggered,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct WindowsCredentialEnrollmentPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_account_username: Option<String>,
+    #[serde(default = "default_control_user_id")]
+    pub user_id: String,
+    #[serde(default = "default_control_user_sid")]
+    pub user_sid: String,
+    #[serde(default)]
+    pub account_type: WindowsCredentialAccountType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_ref: Option<String>,
+}
+
+impl WindowsCredentialEnrollmentPayload {
+    pub fn has_valid_safe_fields(&self) -> bool {
+        !self.user_id.trim().is_empty()
+            && !self.user_sid.trim().is_empty()
+            && self
+                .credential_ref
+                .as_deref()
+                .is_none_or(|credential_ref| !credential_ref.trim().is_empty())
+            && self
+                .windows_account_username
+                .as_deref()
+                .is_none_or(|username| !username.trim().is_empty())
+    }
+
+    pub fn resolved_credential_ref(&self) -> String {
+        self.credential_ref
+            .clone()
+            .unwrap_or_else(|| format!("windows-credential-{}", self.user_id))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsCredentialAccountType {
+    #[default]
+    Local,
+    MicrosoftAccount,
+    Domain,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct WindowsCredentialEnrollmentOutcome {
+    pub windows_account_username: String,
+    pub user_id: String,
+    pub user_sid: String,
+    pub account_type: WindowsCredentialAccountType,
+    pub credential_ref: String,
+}
+
+fn default_control_user_id() -> String {
+    "dev-user".to_owned()
+}
+
+fn default_control_user_sid() -> String {
+    "S-1-5-21-winfaceunlock-pending".to_owned()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -380,5 +478,89 @@ mod tests {
             status.service_config.registry_config_state,
             RegistryConfigState::Present
         );
+    }
+
+    #[test]
+    fn settings_request_round_trips_snake_case_operation() -> Result<(), serde_json::Error> {
+        let request = ControlRequestEnvelope {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            correlation_id: "control-settings-test-1".to_owned(),
+            operation: ControlOperation::UpdateSettings,
+            payload: json!(ControlSettingsPatch {
+                presence_lock_enabled: Some(true),
+                logon_wake_mode: Some(LogonWakeMode::InputTriggered),
+            }),
+        };
+
+        let json_text = serde_json::to_string(&request)?;
+        assert!(json_text.contains("\"operation\":\"update_settings\""));
+        assert!(json_text.contains("\"presence_lock_enabled\":true"));
+        assert!(json_text.contains("\"logon_wake_mode\":\"input_triggered\""));
+
+        let decoded: ControlRequestEnvelope = serde_json::from_str(&json_text)?;
+        assert_eq!(decoded, request);
+        Ok(())
+    }
+
+    #[test]
+    fn settings_patch_distinguishes_empty_patch_from_false_update() {
+        assert!(!ControlSettingsPatch::default().has_updates());
+        assert!(
+            ControlSettingsPatch {
+                presence_lock_enabled: Some(false),
+                logon_wake_mode: None,
+            }
+            .has_updates()
+        );
+        assert!(
+            ControlSettingsPatch {
+                presence_lock_enabled: None,
+                logon_wake_mode: Some(LogonWakeMode::InputTriggered),
+            }
+            .has_updates()
+        );
+    }
+
+    #[test]
+    fn credential_enrollment_request_round_trips_without_password() -> Result<(), serde_json::Error>
+    {
+        let request = ControlRequestEnvelope {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            correlation_id: "control-credential-test-1".to_owned(),
+            operation: ControlOperation::EnrollWindowsCredential,
+            payload: json!(WindowsCredentialEnrollmentPayload {
+                windows_account_username: Some("Leo16".to_owned()),
+                user_id: "dev-user".to_owned(),
+                user_sid: "S-1-5-21-winfaceunlock-pending".to_owned(),
+                account_type: WindowsCredentialAccountType::Local,
+                credential_ref: None,
+            }),
+        };
+
+        let json_text = serde_json::to_string(&request)?;
+        assert!(json_text.contains("\"operation\":\"enroll_windows_credential\""));
+        assert!(json_text.contains("\"windows_account_username\":\"Leo16\""));
+        assert!(!json_text.contains("password"));
+
+        let decoded: ControlRequestEnvelope = serde_json::from_str(&json_text)?;
+        assert_eq!(decoded, request);
+        Ok(())
+    }
+
+    #[test]
+    fn credential_enrollment_payload_defaults_to_runtime_dev_user() -> Result<(), serde_json::Error>
+    {
+        let payload: WindowsCredentialEnrollmentPayload = serde_json::from_value(json!({}))?;
+
+        assert_eq!(payload.windows_account_username, None);
+        assert_eq!(payload.user_id, "dev-user");
+        assert_eq!(payload.user_sid, "S-1-5-21-winfaceunlock-pending");
+        assert_eq!(payload.account_type, WindowsCredentialAccountType::Local);
+        assert_eq!(
+            payload.resolved_credential_ref(),
+            "windows-credential-dev-user"
+        );
+        assert!(payload.has_valid_safe_fields());
+        Ok(())
     }
 }

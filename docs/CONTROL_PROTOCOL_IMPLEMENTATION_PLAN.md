@@ -204,8 +204,13 @@ passes.
 
 ### Goal
 
-Connect the official Tauri frontend to the runtime control protocol for status
-only.
+Expose the runtime control protocol to the official Tauri frontend without
+changing the established UI surface.
+
+The Tauri frontend must call the backend only from explicit user events or
+from a deliberately designed control workflow. Do not call the backend from
+page mount just to check whether it is connected, and do not add periodic
+status polling unless the product explicitly adds a live status surface.
 
 ### Target Files
 
@@ -218,32 +223,37 @@ apps/control-tauri/src/
 ### Tauri Command
 
 ```text
-get_dashboard_status
+handle_control_request
 ```
 
 The command should:
 
-1. create a control request envelope
+1. accept a control request envelope from the frontend adapter
 2. call the control backend handler
-3. return a typed response or typed UI DTO
+3. return the typed control response envelope
 4. preserve `correlation_id` for troubleshooting
 5. avoid leaking backend internals into React components
+6. avoid owning frontend state or UI flow decisions
 
-### Frontend Mapping
+### Frontend Adapter
 
-React should consume a small frontend model:
+React should use a small adapter function:
 
 ```text
-dashboard.connection_state
-dashboard.service.label
-dashboard.service.detail
-dashboard.provider.label
-dashboard.config.label
-dashboard.data.label
+sendControlRequest(operation, payload)
 ```
 
-React must not directly understand registry keys, service manager internals,
-credential store paths, or pipe names.
+Rules:
+
+1. The adapter is a transport boundary, not a dashboard store.
+2. The adapter must not start requests on module import or page mount.
+3. A button click or form submit may call the adapter and use that response for
+   that specific action.
+4. Runtime status can still exist as a backend operation, but it must not be
+   injected into the current UI unless a status surface is intentionally
+   designed.
+5. React must not directly understand registry keys, service manager internals,
+   credential store paths, or pipe names.
 
 ### Tests and Checks
 
@@ -257,14 +267,15 @@ cd src-tauri
 cargo check --target x86_64-pc-windows-msvc
 ```
 
-Then, if the UI is touched, run the Tauri app and visually confirm that the
-dashboard status renders without breaking the existing layout.
+If a React component is touched, verify the visual surface still matches the
+approved frontend. Also verify there is no automatic backend request on page
+load and no timer-driven polling.
 
 ## Phase C3: Settings Read and Patch
 
 ### Goal
 
-Add runtime settings after the status loop is stable.
+Add runtime settings through the same event-driven control contract.
 
 ### Operations
 
@@ -279,22 +290,81 @@ Start with:
 
 ```text
 presence_lock_enabled
+logon_wake_mode = input_triggered
+```
+
+Only add a field when the frontend control maps to a real backend-owned
+setting with clear persistence and runtime semantics. Do not wire UI controls
+to placeholder settings that no backend component reads.
+
+Candidate later settings, after their UI semantics are explicitly mapped:
+
+```text
 presence_detector_kind
 presence_tracking_mode
 camera_id
 match_threshold
 ```
 
-Do not add face enrollment or credential binding to this phase.
+`logon_wake_mode` covers the future LogonUI unlock wake modes behind the
+frontend labels "敲击键盘", "后台静默", and "智能混合". Its design and rollout
+requirements live in:
+
+```text
+docs/LOGON_WAKE_MODES_DESIGN.md
+```
+
+`input_triggered` maps to the existing Provider-side input wake path and is the
+only `logon_wake_mode` value that should be wired for now. Do not expose
+`background_automatic` or `hybrid` until the low-frequency LogonUI scan
+scheduler, cancellation, single-flight protection, cooldown, observability,
+and VM validation are in place.
+
+Do not add face enrollment to this phase. Credential binding belongs to the
+separate event-driven credential enrollment phase below.
 
 ### Acceptance
 
 1. Settings can be read from backend state.
 2. Partial updates preserve unrelated settings.
 3. Validation failures return explicit error codes.
-4. UI displays backend-confirmed state after save.
+4. A settings view may read settings once when opened because its purpose is
+   to show backend state.
+5. UI writes happen only from explicit user events and map the write response
+   back into that specific control flow.
+6. No global connection check, status strip, page-load dashboard request, or
+   periodic polling is introduced.
 
-## Phase C4: Face Management
+## Phase C4: Credential Binding
+
+### Goal
+
+Bind the Windows credential used after successful face authentication through
+the runtime control protocol.
+
+### Operations
+
+```text
+enroll_windows_credential
+```
+
+### Rules
+
+1. The frontend triggers the operation only from the account credential submit
+   event.
+2. The control envelope carries only safe metadata such as
+   `windows_account_username`, `user_id`, `user_sid`, `account_type`, and
+   `credential_ref`.
+3. The password must not be serialized into the normal control request payload
+   or any response `safe_details`.
+4. A local adapter may pass the password through a one-shot secret side channel
+   that is immediately consumed by the backend.
+5. The backend owns credential store paths, default `user_id`, and
+   `credential_ref` generation.
+6. Responses distinguish invalid payload, missing secret, unavailable
+   credential store, failed enrollment, and successful enrollment.
+
+## Phase C5: Face Management
 
 ### Goal
 
@@ -319,7 +389,7 @@ delete_face_template
    - credential store unavailable
    - operation failed
 
-## Phase C5: Enrollment
+## Phase C6: Enrollment
 
 ### Goal
 
@@ -338,7 +408,8 @@ finish_enrollment
 ### Rules
 
 1. Enrollment state belongs to the backend.
-2. The frontend renders backend state.
+2. The frontend sends enrollment events through the adapter and renders only
+   the state needed for that flow.
 3. Progress events must use the same protocol family.
 4. Do not introduce a Tauri-only enrollment protocol.
 5. Camera ownership must be explicit before implementation.
@@ -350,10 +421,11 @@ Execute in this order:
 ```text
 1. Phase C0: control_protocol
 2. Phase C1: control_backend status handler
-3. Phase C2: Tauri status adapter
+3. Phase C2: Tauri event-driven adapter
 4. Phase C3: settings
-5. Phase C4: face management
-6. Phase C5: enrollment
+5. Phase C4: credential binding
+6. Phase C5: face management
+7. Phase C6: enrollment
 ```
 
 Do not start a later phase until the previous phase has a working test or
@@ -366,7 +438,7 @@ The first milestone is complete when:
 1. `control_protocol` exists and has serialization tests.
 2. `control_backend` handles `get_dashboard_status`.
 3. Tauri calls the runtime control path, not setup backend.
-4. The React dashboard displays backend-derived status.
+4. React exposes an event-driven protocol adapter without page-load polling.
 5. Existing Tauri visual behavior remains unchanged.
 6. The implementation can support a future WinUI 3 frontend by adding only a
    new frontend adapter.
