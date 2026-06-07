@@ -1,11 +1,13 @@
+use control_backend::ControlHandler;
+use control_protocol::{ControlRequestEnvelope, ControlResponseEnvelope};
+use control_status::WindowsDashboardStatusProvider;
 use tauri::{Manager, PhysicalPosition, PhysicalSize};
 
 #[tauri::command]
-fn get_backend_status() -> serde_json::Value {
-    serde_json::json!({
-        "connection_state": "disconnected",
-        "message": "后端未连接，前端仍可独立运行。"
-    })
+fn handle_control_request(request: ControlRequestEnvelope) -> ControlResponseEnvelope {
+    let handler =
+        ControlHandler::new(WindowsDashboardStatusProvider::from_environment_or_default());
+    handler.handle_request(request)
 }
 
 fn configure_webview2_low_memory_mode() {
@@ -47,7 +49,9 @@ fn fit_main_window_to_monitor(app: &tauri::App) -> tauri::Result<()> {
     let max_height = work_height * MAX_SCREEN_SCALE;
     let target_area = work_width * work_height * TARGET_SCREEN_AREA;
 
-    let mut width = (target_area * aspect_ratio).sqrt().clamp(MIN_WIDTH, max_width);
+    let mut width = (target_area * aspect_ratio)
+        .sqrt()
+        .clamp(MIN_WIDTH, max_width);
     let mut height = (width / aspect_ratio).clamp(MIN_HEIGHT, max_height);
 
     if height >= max_height {
@@ -76,7 +80,7 @@ pub fn run() {
             fit_main_window_to_monitor(app)?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_backend_status])
+        .invoke_handler(tauri::generate_handler![handle_control_request])
         .run(tauri::generate_context!())
         .expect("error while running WinFaceUnlock control panel");
 }
