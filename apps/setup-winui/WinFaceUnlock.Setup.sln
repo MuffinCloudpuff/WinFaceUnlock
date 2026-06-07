@@ -1,0 +1,39 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WinFaceUnlock.Setup.BackendClient", "WinFaceUnlock.Setup.BackendClient\WinFaceUnlock.Setup.BackendClient.csproj", "{6C817FB0-6DD5-4AD3-AC9C-5D3D163B3910}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WinFaceUnlock.Setup.App", "WinFaceUnlock.Setup.App\WinFaceUnlock.Setup.App.csproj", "{C7D5D7EF-DFA0-4BDE-8EEA-3946EB64AA14}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WinFaceUnlock.Control.App", "WinFaceUnlock.Control.App\WinFaceUnlock.Control.App.csproj", "{0E72E61E-3E52-4A8C-9369-BF7739F2E14B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WinFaceUnlock.Setup.BackendClient.Tests", "WinFaceUnlock.Setup.BackendClient.Tests\WinFaceUnlock.Setup.BackendClient.Tests.csproj", "{586A15C5-58A3-488C-9B42-41240C76126F}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{6C817FB0-6DD5-4AD3-AC9C-5D3D163B3910}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{6C817FB0-6DD5-4AD3-AC9C-5D3D163B3910}.Debug|x64.Build.0 = Debug|Any CPU
+		{6C817FB0-6DD5-4AD3-AC9C-5D3D163B3910}.Release|x64.ActiveCfg = Release|Any CPU
+		{6C817FB0-6DD5-4AD3-AC9C-5D3D163B3910}.Release|x64.Build.0 = Release|Any CPU
+		{C7D5D7EF-DFA0-4BDE-8EEA-3946EB64AA14}.Debug|x64.ActiveCfg = Debug|x64
+		{C7D5D7EF-DFA0-4BDE-8EEA-3946EB64AA14}.Debug|x64.Build.0 = Debug|x64
+		{C7D5D7EF-DFA0-4BDE-8EEA-3946EB64AA14}.Release|x64.ActiveCfg = Release|x64
+		{C7D5D7EF-DFA0-4BDE-8EEA-3946EB64AA14}.Release|x64.Build.0 = Release|x64
+		{0E72E61E-3E52-4A8C-9369-BF7739F2E14B}.Debug|x64.ActiveCfg = Debug|x64
+		{0E72E61E-3E52-4A8C-9369-BF7739F2E14B}.Debug|x64.Build.0 = Debug|x64
+		{0E72E61E-3E52-4A8C-9369-BF7739F2E14B}.Release|x64.ActiveCfg = Release|x64
+		{0E72E61E-3E52-4A8C-9369-BF7739F2E14B}.Release|x64.Build.0 = Release|x64
+		{586A15C5-58A3-488C-9B42-41240C76126F}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{586A15C5-58A3-488C-9B42-41240C76126F}.Debug|x64.Build.0 = Debug|Any CPU
+		{586A15C5-58A3-488C-9B42-41240C76126F}.Release|x64.ActiveCfg = Release|Any CPU
+		{586A15C5-58A3-488C-9B42-41240C76126F}.Release|x64.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

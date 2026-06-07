@@ -191,6 +191,17 @@ impl ServiceManagerFacade {
             .open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS)?;
         Ok(service.query_status()?)
     }
+
+    pub fn query_service_status_if_exists(&self) -> Result<Option<ServiceStatus>, InstallerError> {
+        match self
+            .manager
+            .open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS)
+        {
+            Ok(service) => Ok(Some(service.query_status()?)),
+            Err(error) if is_service_missing_error(&error) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
 }
 
 fn service_configuration_access() -> ServiceAccess {

@@ -12,6 +12,8 @@ members = [
     "crates/hardware_binding",
     "crates/installer_cli",
     "crates/ipc",
+    "crates/setup_api",
+    "crates/setup_bootstrapper",
     "crates/video_provider",
     "crates/win_service",
     "crates/windows_provider",

@@ -7,13 +7,19 @@ license.workspace = true
 
 [dependencies]
 common_protocol = { path = "../common_protocol" }
+setup_api = { path = "../setup_api" }
 windows_provider = { path = "../windows_provider" }
+serde_json = "1.0"
 windows-service = "0.8.1"
+win_service = { path = "../win_service" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security_Credentials",
     "Win32_System_Registry",
+    "Win32_UI_Shell",
 ] }
 
 [lints]

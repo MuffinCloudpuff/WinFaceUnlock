@@ -1,7 +1,7 @@
 use std::{
     fmt, fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 const APP_DATA_DIR_NAME: &str = "WinFaceUnlock";
@@ -64,6 +64,8 @@ fn apply_restricted_acl(path: &Path) -> Result<(), ResourceDirectoryError> {
         .arg("/grant:r")
         .arg("*S-1-5-18:(OI)(CI)F")
         .arg("*S-1-5-32-544:(OI)(CI)F")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()?;
     if status.success() {
         Ok(())

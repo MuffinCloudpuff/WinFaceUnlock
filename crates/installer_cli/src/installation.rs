@@ -32,7 +32,7 @@ impl InstallerOrchestrator {
         if let Some(config) = &plan.auth_config {
             ServiceAuthRegistry::configure_local_camera(config)?;
         } else {
-            println!("installer_step_skipped: configure-service-auth");
+            eprintln!("installer_step_skipped: configure-service-auth");
         }
 
         log_step("install-or-repair-service");
@@ -84,7 +84,7 @@ impl InstallerOrchestrator {
             log_step("delete-resource-data");
             plan.resource_plan.delete_data()?;
         } else {
-            println!("installer_step_skipped: delete-resource-data");
+            eprintln!("installer_step_skipped: delete-resource-data");
         }
         Ok(())
     }
@@ -97,7 +97,7 @@ impl InstallerOrchestrator {
 }
 
 fn log_step(name: &str) {
-    println!("installer_step: {name}");
+    eprintln!("installer_step: {name}");
 }
 
 #[cfg(test)]

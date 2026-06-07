@@ -1,0 +1,578 @@
+<Window
+    x:Class="WinFaceUnlock.Control.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="WinFaceUnlock">
+
+    <Grid Background="#FAFBFE" MinWidth="860" MinHeight="560">
+        <Grid.Resources>
+            <Storyboard x:Key="HomeEntranceStoryboard">
+                <DoubleAnimation
+                    Storyboard.TargetName="NavPill"
+                    Storyboard.TargetProperty="Opacity"
+                    From="0"
+                    To="1"
+                    Duration="0:0:0.42">
+                    <DoubleAnimation.EasingFunction>
+                        <CircleEase EasingMode="EaseOut" />
+                    </DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation
+                    Storyboard.TargetName="NavPillTransform"
+                    Storyboard.TargetProperty="TranslateY"
+                    From="-10"
+                    To="0"
+                    Duration="0:0:0.42">
+                    <DoubleAnimation.EasingFunction>
+                        <BackEase EasingMode="EaseOut" Amplitude="0.25" />
+                    </DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation
+                    Storyboard.TargetName="FaceBlurLayer"
+                    Storyboard.TargetProperty="Opacity"
+                    From="0.58"
+                    To="0"
+                    BeginTime="0:0:0.10"
+                    Duration="0:0:0.42">
+                    <DoubleAnimation.EasingFunction>
+                        <CircleEase EasingMode="EaseOut" />
+                    </DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation
+                    Storyboard.TargetName="FaceBlurScale"
+                    Storyboard.TargetProperty="ScaleX"
+                    From="1.16"
+                    To="1"
+                    BeginTime="0:0:0.10"
+                    Duration="0:0:0.42">
+                    <DoubleAnimation.EasingFunction>
+                        <CircleEase EasingMode="EaseOut" />
+                    </DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation
+                    Storyboard.TargetName="FaceBlurScale"
+                    Storyboard.TargetProperty="ScaleY"
+                    From="1.16"
+                    To="1"
+                    BeginTime="0:0:0.10"
+                    Duration="0:0:0.42">
+                    <DoubleAnimation.EasingFunction>
+                        <CircleEase EasingMode="EaseOut" />
+                    </DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation
+                    Storyboard.TargetName="FaceSharpLayer"
+                    Storyboard.TargetProperty="Opacity"
+                    From="0"
+                    To="1"
+                    BeginTime="0:0:0.10"
+                    Duration="0:0:0.48">
+                    <DoubleAnimation.EasingFunction>
+                        <CircleEase EasingMode="EaseOut" />
+                    </DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation
+                    Storyboard.TargetName="FaceSharpScale"
+                    Storyboard.TargetProperty="ScaleX"
+                    From="0.9"
+                    To="1"
+                    BeginTime="0:0:0.10"
+                    Duration="0:0:0.48">
+                    <DoubleAnimation.EasingFunction>
+                        <BackEase EasingMode="EaseOut" Amplitude="0.2" />
+                    </DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation
+                    Storyboard.TargetName="FaceSharpScale"
+                    Storyboard.TargetProperty="ScaleY"
+                    From="0.9"
+                    To="1"
+                    BeginTime="0:0:0.10"
+                    Duration="0:0:0.48">
+                    <DoubleAnimation.EasingFunction>
+                        <BackEase EasingMode="EaseOut" Amplitude="0.2" />
+                    </DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+            </Storyboard>
+            <Storyboard x:Key="HomeContentEntranceStoryboard">
+                <DoubleAnimation
+                    Storyboard.TargetName="FaceBlurLayer"
+                    Storyboard.TargetProperty="Opacity"
+                    From="0.58"
+                    To="0"
+                    Duration="0:0:0.42">
+                    <DoubleAnimation.EasingFunction>
+                        <CircleEase EasingMode="EaseOut" />
+                    </DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation
+                    Storyboard.TargetName="FaceBlurScale"
+                    Storyboard.TargetProperty="ScaleX"
+                    From="1.16"
+                    To="1"
+                    Duration="0:0:0.42">
+                    <DoubleAnimation.EasingFunction>
+                        <CircleEase EasingMode="EaseOut" />
+                    </DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation
+                    Storyboard.TargetName="FaceBlurScale"
+                    Storyboard.TargetProperty="ScaleY"
+                    From="1.16"
+                    To="1"
+                    Duration="0:0:0.42">
+                    <DoubleAnimation.EasingFunction>
+                        <CircleEase EasingMode="EaseOut" />
+                    </DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation
+                    Storyboard.TargetName="FaceSharpLayer"
+                    Storyboard.TargetProperty="Opacity"
+                    From="0"
+                    To="1"
+                    Duration="0:0:0.48">
+                    <DoubleAnimation.EasingFunction>
+                        <CircleEase EasingMode="EaseOut" />
+                    </DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation
+                    Storyboard.TargetName="FaceSharpScale"
+                    Storyboard.TargetProperty="ScaleX"
+                    From="0.9"
+                    To="1"
+                    Duration="0:0:0.48">
+                    <DoubleAnimation.EasingFunction>
+                        <BackEase EasingMode="EaseOut" Amplitude="0.2" />
+                    </DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation
+                    Storyboard.TargetName="FaceSharpScale"
+                    Storyboard.TargetProperty="ScaleY"
+                    From="0.9"
+                    To="1"
+                    Duration="0:0:0.48">
+                    <DoubleAnimation.EasingFunction>
+                        <BackEase EasingMode="EaseOut" Amplitude="0.2" />
+                    </DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+            </Storyboard>
+        </Grid.Resources>
+
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Canvas IsHitTestVisible="False" Opacity="0.86">
+            <Ellipse Width="860" Height="500" Canvas.Left="-175" Canvas.Top="-115">
+                <Ellipse.Fill>
+                    <RadialGradientBrush Center="0.5,0.5" GradientOrigin="0.5,0.5" RadiusX="0.5" RadiusY="0.5">
+                        <GradientStop Color="#E8F1F9" Offset="0" />
+                        <GradientStop Color="#88E8F1F9" Offset="0.42" />
+                        <GradientStop Color="#00E8F1F9" Offset="1" />
+                    </RadialGradientBrush>
+                </Ellipse.Fill>
+            </Ellipse>
+            <Ellipse Width="690" Height="570" Canvas.Left="1365" Canvas.Top="160">
+                <Ellipse.Fill>
+                    <RadialGradientBrush Center="0.5,0.5" GradientOrigin="0.5,0.5" RadiusX="0.5" RadiusY="0.5">
+                        <GradientStop Color="#F0F5FB" Offset="0" />
+                        <GradientStop Color="#88F0F5FB" Offset="0.44" />
+                        <GradientStop Color="#00F0F5FB" Offset="1" />
+                    </RadialGradientBrush>
+                </Ellipse.Fill>
+            </Ellipse>
+            <Ellipse Width="860" Height="410" Canvas.Left="305" Canvas.Top="672">
+                <Ellipse.Fill>
+                    <RadialGradientBrush Center="0.5,0.5" GradientOrigin="0.5,0.5" RadiusX="0.5" RadiusY="0.5">
+                        <GradientStop Color="#E0EFF8" Offset="0" />
+                        <GradientStop Color="#88E0EFF8" Offset="0.42" />
+                        <GradientStop Color="#00E0EFF8" Offset="1" />
+                    </RadialGradientBrush>
+                </Ellipse.Fill>
+            </Ellipse>
+        </Canvas>
+
+        <Grid
+            x:Name="AppTitleBar"
+            Padding="16,0"
+            Background="Transparent">
+            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Viewbox Width="16" Height="16" VerticalAlignment="Center">
+                    <Canvas Width="24" Height="24">
+                        <Path Data="M20,13 C20,18 16.5,20.5 12,22 C7.5,20.5 4,18 4,13 L4,5 L12,2 L20,5 Z"
+                              Stroke="#0066B8"
+                              StrokeThickness="2.5"
+                              StrokeLineJoin="Round"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round"
+                              Fill="Transparent" />
+                    </Canvas>
+                </Viewbox>
+                <TextBlock
+                    Text="{Binding AppTitle}"
+                    FontSize="14"
+                    FontWeight="Medium"
+                    Foreground="#334155"
+                    VerticalAlignment="Center" />
+            </StackPanel>
+        </Grid>
+
+        <Grid Grid.Row="1" Padding="0,2,0,0">
+            <Border
+                x:Name="NavPill"
+                HorizontalAlignment="Center"
+                Background="#99FFFFFF"
+                BorderBrush="#80FFFFFF"
+                BorderThickness="1"
+                CornerRadius="24"
+                Padding="4"
+                Opacity="0"
+                RenderTransformOrigin="0.5,0.5">
+                <Border.RenderTransform>
+                    <CompositeTransform x:Name="NavPillTransform" TranslateY="-10" />
+                </Border.RenderTransform>
+                <StackPanel Orientation="Horizontal" Spacing="2">
+                    <Button
+                        Command="{Binding ShowHomeCommand}"
+                        Background="{Binding HomeTabBackground}"
+                        Foreground="{Binding HomeTabForeground}"
+                        BorderThickness="0"
+                        CornerRadius="20"
+                        Padding="22,9">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Viewbox Width="16" Height="16" VerticalAlignment="Center">
+                                <Canvas Width="24" Height="24">
+                                    <Path Data="M3,10.5 L12,3 L21,10.5 M5,10 L5,20 L19,20 L19,10 M9,20 L9,14 L15,14 L15,20"
+                                          Stroke="{Binding HomeTabForeground}"
+                                          StrokeThickness="2.4"
+                                          StrokeLineJoin="Round"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"
+                                          Fill="Transparent" />
+                                </Canvas>
+                            </Viewbox>
+                            <TextBlock Text="首页" FontSize="14" FontWeight="Medium" />
+                        </StackPanel>
+                    </Button>
+
+                    <Button
+                        Command="{Binding ShowAccountCommand}"
+                        Background="{Binding AccountTabBackground}"
+                        Foreground="{Binding AccountTabForeground}"
+                        BorderThickness="0"
+                        CornerRadius="20"
+                        Padding="22,9">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Viewbox Width="16" Height="16" VerticalAlignment="Center">
+                                <Canvas Width="24" Height="24">
+                                    <Path Data="M19,21 C19,18.8 15.4,17 12,17 C8.6,17 5,18.8 5,21 M12,13 C9.8,13 8,11.2 8,9 C8,6.8 9.8,5 12,5 C14.2,5 16,6.8 16,9 C16,11.2 14.2,13 12,13"
+                                          Stroke="{Binding AccountTabForeground}"
+                                          StrokeThickness="2"
+                                          StrokeLineJoin="Round"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"
+                                          Fill="Transparent" />
+                                </Canvas>
+                            </Viewbox>
+                            <TextBlock Text="帐号" FontSize="14" FontWeight="Medium" />
+                        </StackPanel>
+                    </Button>
+
+                    <Button
+                        Command="{Binding ShowSettingsCommand}"
+                        Background="{Binding SettingsTabBackground}"
+                        Foreground="{Binding SettingsTabForeground}"
+                        BorderThickness="0"
+                        CornerRadius="20"
+                        Padding="22,9">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Viewbox Width="16" Height="16" VerticalAlignment="Center">
+                                <Canvas Width="24" Height="24">
+                                    <Path Data="M12,15.5 C10.1,15.5 8.5,13.9 8.5,12 C8.5,10.1 10.1,8.5 12,8.5 C13.9,8.5 15.5,10.1 15.5,12 C15.5,13.9 13.9,15.5 12,15.5 M19.4,15 C19.2,15.5 19,15.9 18.7,16.4 L20,18.4 L18.4,20 L16.4,18.7 C15.9,19 15.5,19.2 15,19.4 L14.5,22 L9.5,22 L9,19.4 C8.5,19.2 8.1,19 7.6,18.7 L5.6,20 L4,18.4 L5.3,16.4 C5,15.9 4.8,15.5 4.6,15 L2,14.5 L2,9.5 L4.6,9 C4.8,8.5 5,8.1 5.3,7.6 L4,5.6 L5.6,4 L7.6,5.3 C8.1,5 8.5,4.8 9,4.6 L9.5,2 L14.5,2 L15,4.6 C15.5,4.8 15.9,5 16.4,5.3 L18.4,4 L20,5.6 L18.7,7.6 C19,8.1 19.2,8.5 19.4,9 L22,9.5 L22,14.5 Z"
+                                          Stroke="{Binding SettingsTabForeground}"
+                                          StrokeThickness="1.7"
+                                          StrokeLineJoin="Round"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"
+                                          Fill="Transparent" />
+                                </Canvas>
+                            </Viewbox>
+                            <TextBlock Text="设置" FontSize="14" FontWeight="Medium" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <Grid Grid.Row="2" Padding="24">
+            <Grid Visibility="{Binding HomeVisibility}">
+                <StackPanel
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Spacing="112">
+                    <Grid
+                        x:Name="FaceVisual"
+                        Width="160"
+                        Height="160">
+                        <Ellipse Width="160" Height="160" Opacity="0.18">
+                            <Ellipse.Fill>
+                                <RadialGradientBrush Center="0.5,0.5" GradientOrigin="0.5,0.5" RadiusX="0.5" RadiusY="0.5">
+                                    <GradientStop Color="#0066B8" Offset="0" />
+                                    <GradientStop Color="#000066B8" Offset="1" />
+                                </RadialGradientBrush>
+                            </Ellipse.Fill>
+                        </Ellipse>
+                        <Viewbox
+                            x:Name="FaceBlurLayer"
+                            Width="118"
+                            Height="118"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            Opacity="0"
+                            RenderTransformOrigin="0.5,0.5">
+                            <Viewbox.RenderTransform>
+                                <ScaleTransform x:Name="FaceBlurScale" ScaleX="1.16" ScaleY="1.16" />
+                            </Viewbox.RenderTransform>
+                            <Image Width="118" Height="118">
+                                <Image.Source>
+                                    <SvgImageSource UriSource="ms-appx:///Assets/scanface-blur.svg" />
+                                </Image.Source>
+                            </Image>
+                        </Viewbox>
+                        <Viewbox
+                            x:Name="FaceSharpLayer"
+                            Width="112"
+                            Height="112"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            Opacity="0"
+                            RenderTransformOrigin="0.5,0.5">
+                            <Viewbox.RenderTransform>
+                                <ScaleTransform x:Name="FaceSharpScale" ScaleX="0.9" ScaleY="0.9" />
+                            </Viewbox.RenderTransform>
+                            <Image Width="112" Height="112">
+                                <Image.Source>
+                                    <SvgImageSource UriSource="ms-appx:///Assets/scanface-sharp.svg" />
+                                </Image.Source>
+                            </Image>
+                        </Viewbox>
+                    </Grid>
+
+                    <Button
+                        x:Name="EnrollmentButton"
+                        Content="开始录入"
+                        Background="#0066B8"
+                        Foreground="White"
+                        BorderThickness="0"
+                        CornerRadius="24"
+                        Width="304"
+                        Height="44"
+                        FontSize="16"
+                        FontWeight="Normal"
+                        RenderTransformOrigin="0.5,0.5"
+                        PointerEntered="EnrollmentButton_OnPointerEntered"
+                        PointerExited="EnrollmentButton_OnPointerExited"
+                        PointerPressed="EnrollmentButton_OnPointerPressed"
+                        PointerReleased="EnrollmentButton_OnPointerReleased">
+                        <Button.RenderTransform>
+                            <ScaleTransform x:Name="EnrollmentButtonScale" ScaleX="1" ScaleY="1" />
+                        </Button.RenderTransform>
+                        <Button.Resources>
+                            <SolidColorBrush x:Key="ButtonBackground" Color="#0066B8" />
+                            <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#005A9E" />
+                            <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#004C87" />
+                            <SolidColorBrush x:Key="ButtonBackgroundDisabled" Color="#94A3B8" />
+                            <SolidColorBrush x:Key="ButtonForeground" Color="White" />
+                            <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="White" />
+                            <SolidColorBrush x:Key="ButtonForegroundPressed" Color="White" />
+                            <SolidColorBrush x:Key="ButtonForegroundDisabled" Color="White" />
+                            <SolidColorBrush x:Key="ButtonBorderBrush" Color="Transparent" />
+                            <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent" />
+                            <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent" />
+                            <SolidColorBrush x:Key="ButtonBorderBrushDisabled" Color="Transparent" />
+                        </Button.Resources>
+                    </Button>
+                </StackPanel>
+            </Grid>
+
+            <Grid Visibility="{Binding AccountVisibility}">
+                <StackPanel
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Width="320"
+                    Spacing="28">
+                    <StackPanel Spacing="12" HorizontalAlignment="Center">
+                        <Border
+                            Width="96"
+                            Height="96"
+                            Background="White"
+                            BorderBrush="#E2E8F0"
+                            BorderThickness="1"
+                            CornerRadius="48">
+                            <TextBlock
+                                Text="&#xE77B;"
+                                FontFamily="Segoe MDL2 Assets"
+                                FontSize="42"
+                                Foreground="#94A3B8"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center" />
+                        </Border>
+                        <TextBlock
+                            Text="Admin User"
+                            FontSize="20"
+                            FontWeight="SemiBold"
+                            Foreground="#1E293B"
+                            HorizontalAlignment="Center" />
+                    </StackPanel>
+
+                    <Border
+                        Background="White"
+                        BorderBrush="#CBD5E1"
+                        BorderThickness="1"
+                        CornerRadius="12"
+                        Padding="14,0">
+                        <Grid Height="48">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="28" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="36" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock
+                                Text="&#xE72E;"
+                                FontFamily="Segoe MDL2 Assets"
+                                FontSize="16"
+                                Foreground="#94A3B8"
+                                VerticalAlignment="Center" />
+                            <TextBox
+                                Grid.Column="1"
+                                PlaceholderText="PIN"
+                                Text="{Binding Pin, Mode=TwoWay}"
+                                BorderThickness="0"
+                                Background="Transparent"
+                                FontFamily="Consolas"
+                                FontSize="16"
+                                TextAlignment="Center"
+                                VerticalAlignment="Center" />
+                            <Button
+                                Grid.Column="2"
+                                Content="&#xE72A;"
+                                FontFamily="Segoe MDL2 Assets"
+                                Background="#007ACC"
+                                Foreground="White"
+                                BorderThickness="0"
+                                CornerRadius="8"
+                                Width="30"
+                                Height="30"
+                                VerticalAlignment="Center" />
+                        </Grid>
+                    </Border>
+                </StackPanel>
+            </Grid>
+
+            <ScrollViewer Visibility="{Binding SettingsVisibility}">
+                <StackPanel
+                    Width="640"
+                    HorizontalAlignment="Center"
+                    Spacing="28"
+                    Padding="0,8,0,48">
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="安全控制" FontSize="14" FontWeight="SemiBold" Foreground="#64748B" Margin="16,0,0,0" />
+                        <Border Background="#B3FFFFFF" BorderBrush="#CCD6E0" BorderThickness="1" CornerRadius="16">
+                            <StackPanel>
+                                <Grid Padding="16">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Width="38" Height="38" Background="#EFF6FF" CornerRadius="10">
+                                        <TextBlock Text="&#xE77B;" FontFamily="Segoe MDL2 Assets" FontSize="18" Foreground="#007ACC" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Margin="14,0">
+                                        <TextBlock Text="离座落锁" FontSize="16" FontWeight="SemiBold" Foreground="#1E293B" />
+                                        <TextBlock Text="检测到离开电脑前时自动锁定屏幕" FontSize="12" Foreground="#64748B" />
+                                    </StackPanel>
+                                    <ToggleSwitch Grid.Column="2" IsOn="{Binding AutoLockEnabled}" />
+                                </Grid>
+
+                                <Border Height="1" Background="#EEF2F7" />
+
+                                <Grid Padding="16">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Width="38" Height="38" Background="#FEF2F2" CornerRadius="10">
+                                        <TextBlock Text="&#xEA18;" FontFamily="Segoe MDL2 Assets" FontSize="18" Foreground="#EF4444" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Margin="14,0">
+                                        <TextBlock Text="防偷窥 / 入侵者抓拍" FontSize="16" FontWeight="SemiBold" Foreground="#1E293B" />
+                                        <TextBlock Text="他人试图解锁或偷看屏幕时自动拍下照片" FontSize="12" Foreground="#64748B" />
+                                    </StackPanel>
+                                    <ToggleSwitch Grid.Column="2" IsOn="{Binding IntruderSnapshotEnabled}" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="识别与管理" FontSize="14" FontWeight="SemiBold" Foreground="#64748B" Margin="16,0,0,0" />
+                        <Border Background="#B3FFFFFF" BorderBrush="#CCD6E0" BorderThickness="1" CornerRadius="16">
+                            <StackPanel>
+                                <Grid Padding="16">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Width="38" Height="38" Background="#F5F3FF" CornerRadius="10">
+                                        <TextBlock Text="&#xE8B7;" FontFamily="Segoe MDL2 Assets" FontSize="18" Foreground="#7C3AED" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Margin="14,0">
+                                        <TextBlock Text="人脸管理" FontSize="16" FontWeight="SemiBold" Foreground="#1E293B" />
+                                        <TextBlock Text="录入、更新或移除授权登入的人脸信息" FontSize="12" Foreground="#64748B" />
+                                    </StackPanel>
+                                </Grid>
+
+                                <StackPanel Orientation="Horizontal" Spacing="16" Margin="60,0,0,16">
+                                    <StackPanel Spacing="6" HorizontalAlignment="Center">
+                                        <Border Width="48" Height="48" Background="#F8FAFC" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="24">
+                                            <TextBlock Text="&#xE77B;" FontFamily="Segoe MDL2 Assets" FontSize="18" Foreground="#94A3B8" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                        </Border>
+                                        <TextBlock Text="Admin" FontSize="12" Foreground="#475569" HorizontalAlignment="Center" />
+                                    </StackPanel>
+                                    <StackPanel Spacing="6" HorizontalAlignment="Center">
+                                        <Border Width="48" Height="48" Background="#F8FAFC" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="24">
+                                            <TextBlock Text="&#xE77B;" FontFamily="Segoe MDL2 Assets" FontSize="18" Foreground="#94A3B8" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                        </Border>
+                                        <TextBlock Text="家属" FontSize="12" Foreground="#475569" HorizontalAlignment="Center" />
+                                    </StackPanel>
+                                </StackPanel>
+
+                                <Border Height="1" Background="#EEF2F7" />
+
+                                <StackPanel Padding="16" Spacing="12">
+                                    <TextBlock Text="人脸识别触发方式" FontSize="16" FontWeight="SemiBold" Foreground="#1E293B" />
+                                    <TextBlock Text="选择适合你使用习惯的面部扫描唤醒方式" FontSize="12" Foreground="#64748B" />
+                                    <Grid Background="#80F1F5F9" CornerRadius="12" Padding="4">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Button Content="敲击键盘" BorderThickness="0" Background="Transparent" Foreground="#64748B" />
+                                        <Button Grid.Column="1" Content="后台静默" BorderThickness="0" Background="Transparent" Foreground="#64748B" />
+                                        <Button Grid.Column="2" Content="智能混合" BorderThickness="0" Background="#007ACC" Foreground="White" CornerRadius="8" />
+                                    </Grid>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+    </Grid>
+</Window>

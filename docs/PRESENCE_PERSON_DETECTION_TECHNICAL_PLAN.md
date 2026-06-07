@@ -110,6 +110,49 @@ unknown face -> 可选审计和安全加速
 - OpenCV SSD MobileNet DNN 示例：`https://docs.opencv.org/4.x/d4/d2f/tf_det_tutorial_dnn_conversion.html`
 - OpenCV DNN efficiency：`https://github.com/alalek/opencv/wiki/DNN-Efficiency`
 
+### YOLO / YOLOX 性能备忘
+
+后续可以评估 YOLOX-Nano、YOLOX-Tiny、YOLO-Fastest 或低输入尺寸 YOLOv8n，但这不应阻塞 Phase 8 封包和安装链路。
+
+当前 `opencv-dnn-person` 中 YOLOv8 的实际部署方式是：
+
+```text
+OpenCV DNN
+-> read_net_from_onnx
+-> CPU 默认后端
+-> 640x640 输入
+-> 每帧 blob_from_image + forward + Rust 后处理/NMS
+```
+
+这和很多高 FPS 游戏检测/外挂项目不同。那些项目通常使用：
+
+```text
+GPU / TensorRT / DirectML / OpenVINO / ncnn
+FP16 或 INT8
+更小输入尺寸，例如 320 或 416
+YOLO-tiny / YOLOX-Nano / YOLO-Fastest 等小模型
+屏幕局部 ROI，而不是全帧摄像头
+```
+
+因此“某些 YOLO CPU 能跑到 30 FPS”和“当前服务中 YOLOv8n CPU 开销高”并不矛盾。前者通常依赖更小模型、更小输入、量化或更适合边缘设备的推理后端；后者是通用 OpenCV DNN CPU 路径，且 640x640 对后台服务偏重。
+
+对 WinFaceUnlock 来说，Presence Lock 不需要长期 30 FPS。后台安全服务的目标是低误锁、低打扰和可接受资源占用。推荐运行策略仍是：
+
+```text
+稳定在场状态: 1-2 FPS
+可疑离开状态: 短暂提高到 3-5 FPS
+调试/benchmark: 允许临时跑更高 FPS
+```
+
+后续模型优化顺序：
+
+1. 保持封包协议稳定，模型作为 payload 中的相对路径资产。
+2. 用现有 `presence-person-benchmark` 比较当前 YOLOv8n 640x640、YOLOv8n 320/416、MobileNet-SSD 和可获得的 YOLOX-Nano。
+3. 如果 YOLOX-Nano 在 CPU 上明显更稳，新增模型枚举和默认 payload 路径，例如 `models\yolox_nano.onnx`。
+4. 如果 CPU 仍不可接受，再评估 ONNX Runtime DirectML、OpenVINO 或 ncnn；不要为了单个模型把 Python sidecar 带回主线。
+
+Phase 8 封包设计已经支持模型替换：安装请求使用 `payload_root_dir` 加相对 `source_path`/`target_relative_path`，服务配置使用相对模型路径再解析到 `install_dir`。因此以后换成 YOLOX 只需要更新 payload 模型文件、模型枚举/配置和安装请求路径，然后重新打包。
+
 ### 为什么第一版不选 Pose
 
 MediaPipe Pose、MoveNet、BlazePose 等模型可以在现代桌面设备上实时运行，但它们输出人体关键点，解决的是姿态估计问题。
