@@ -151,6 +151,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "control_backend"
+version = "0.1.0"
+dependencies = [
+ "control_protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "control_protocol"
 version = "0.1.0"
 dependencies = [

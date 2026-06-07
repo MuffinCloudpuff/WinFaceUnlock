@@ -1,0 +1,13 @@
+[package]
+name = "control_backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+control_protocol = { path = "../control_protocol" }
+serde_json = "1.0"
+
+[lints]
+workspace = true
