@@ -1,0 +1,8 @@
+{
+  "name": "WinFaceUnlock",
+  "description": "A Windows-style face unlock interface prototype.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
