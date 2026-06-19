@@ -14,6 +14,8 @@ use crate::{
     quality::{FaceQualityPolicy, reject_reason_for_quality, score_face_sample},
 };
 
+const MIN_FRONTAL_POSE_BASELINE_SAMPLES: usize = 3;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GuidedEnrollmentConfig {
     pub frames_per_step: u32,
@@ -85,6 +87,10 @@ pub struct GuidedFaceEnrollmentService<M, P> {
     candidates_by_group: HashMap<FacePoseGroup, Vec<CandidateSample>>,
     rejected_metadata: Vec<FaceTemplateSampleMetadata>,
     primary_embedding: Option<face_engine::FaceEmbedding>,
+    frontal_yaw_baseline_deg: Option<f32>,
+    frontal_pitch_baseline_deg: Option<f32>,
+    frontal_yaw_samples: Vec<f32>,
+    frontal_pitch_samples: Vec<f32>,
 }
 
 impl<M, P> GuidedFaceEnrollmentService<M, P>
@@ -100,6 +106,10 @@ where
             candidates_by_group: HashMap::new(),
             rejected_metadata: Vec::new(),
             primary_embedding: None,
+            frontal_yaw_baseline_deg: None,
+            frontal_pitch_baseline_deg: None,
+            frontal_yaw_samples: Vec::new(),
+            frontal_pitch_samples: Vec::new(),
         }
     }
 
@@ -151,7 +161,8 @@ where
 
         let face = &faces[0];
         let embedding = self.model_provider.extract(frame, face)?;
-        let pose_estimate = self.pose_provider.estimate_pose(frame, face).ok();
+        let raw_pose_estimate = self.pose_provider.estimate_pose(frame, face).ok();
+        let pose_estimate = self.calibrated_pose_estimate(step, raw_pose_estimate);
         let embedding_consistency_score = self.primary_embedding.as_ref().map(|primary| {
             self.model_provider
                 .compare(primary, &embedding)
@@ -176,7 +187,8 @@ where
             reject_reason = Some(FaceSampleRejectReason::EmbeddingInconsistentWithPrimary);
         }
 
-        let pose = pose_estimate.unwrap_or_else(|| FacePoseEstimate::without_blink(0.0, 0.0, 0.0));
+        let pose =
+            raw_pose_estimate.unwrap_or_else(|| FacePoseEstimate::without_blink(0.0, 0.0, 0.0));
         let metadata = FaceTemplateSampleMetadata {
             sample_id: format!("{}-{}-{frame_index}", step.label(), frame_timestamp_ms),
             pose_group: step.pose_group(),
@@ -210,6 +222,7 @@ where
                 detected_faces: faces,
             });
         }
+        self.record_frontal_pose_baseline(step, raw_pose_estimate);
 
         let recognition_model = self.model_provider.recognition_model();
         let template = FaceTemplate {
@@ -226,7 +239,6 @@ where
         if step == GuidedEnrollmentStep::FrontalPrimary && self.primary_embedding.is_none() {
             self.primary_embedding = Some(template.embedding.clone());
         }
-
         self.candidates_by_group
             .entry(metadata.pose_group)
             .or_default()
@@ -270,7 +282,8 @@ where
         }
 
         let face = &faces[0];
-        let pose_estimate = self.pose_provider.estimate_pose(frame, face).ok();
+        let raw_pose_estimate = self.pose_provider.estimate_pose(frame, face).ok();
+        let pose_estimate = self.calibrated_pose_estimate(step, raw_pose_estimate);
         let embedding_consistency_score =
             if step != GuidedEnrollmentStep::FrontalPrimary && self.primary_embedding.is_some() {
                 let embedding = self.model_provider.extract(frame, face)?;
@@ -311,6 +324,41 @@ where
             pose_estimate,
             detected_faces: faces,
         })
+    }
+
+    fn calibrated_pose_estimate(
+        &self,
+        _step: GuidedEnrollmentStep,
+        pose_estimate: Option<FacePoseEstimate>,
+    ) -> Option<FacePoseEstimate> {
+        let mut pose = pose_estimate?;
+        if let Some(baseline) = self.frontal_yaw_baseline_deg {
+            pose.yaw_deg -= baseline;
+        }
+        if let Some(baseline) = self.frontal_pitch_baseline_deg {
+            pose.pitch_deg -= baseline;
+        }
+        Some(pose)
+    }
+
+    fn record_frontal_pose_baseline(
+        &mut self,
+        step: GuidedEnrollmentStep,
+        pose_estimate: Option<FacePoseEstimate>,
+    ) {
+        if step != GuidedEnrollmentStep::FrontalPrimary || self.frontal_yaw_baseline_deg.is_some() {
+            return;
+        }
+        let Some(pose) = pose_estimate else {
+            return;
+        };
+        self.frontal_yaw_samples.push(pose.yaw_deg);
+        self.frontal_pitch_samples.push(pose.pitch_deg);
+        if self.frontal_yaw_samples.len() >= MIN_FRONTAL_POSE_BASELINE_SAMPLES {
+            // ponytail: session median handles camera angle; persist per-camera only if needed.
+            self.frontal_yaw_baseline_deg = Some(median(&self.frontal_yaw_samples));
+            self.frontal_pitch_baseline_deg = Some(median(&self.frontal_pitch_samples));
+        }
     }
 
     pub fn finish(
@@ -562,9 +610,22 @@ fn pose_group_sort_key(pose_group: FacePoseGroup) -> u8 {
     }
 }
 
+fn median(values: &[f32]) -> f32 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    sorted[sorted.len() / 2]
+}
+
 #[cfg(test)]
 mod tests {
-    use face_engine::{FaceEmbedding, FacePoseGroup, FaceTemplate, FaceTemplateRef};
+    use std::collections::VecDeque;
+
+    use face_engine::{
+        DetectedFace, FaceBox, FaceEmbedding, FaceEngineError, FaceMatch, FaceMatchDecision,
+        FaceModelDescriptor, FaceModelProvider, FacePoseGroup, FaceTemplate, FaceTemplateRef,
+    };
+    use face_pose::{FacePoseCapabilities, FacePoseError, FacePoseProvider};
+    use video_provider::{PixelFormat, VideoFrame};
 
     use super::*;
 
@@ -601,5 +662,143 @@ mod tests {
             &candidate,
             0.98
         ));
+    }
+
+    #[test]
+    fn guided_steps_use_frontal_pose_as_session_baseline() -> Result<(), FaceEngineError> {
+        let mut enrollment = GuidedFaceEnrollmentService::new(
+            StubModelProvider,
+            SequencePoseProvider {
+                poses: VecDeque::from([
+                    FacePoseEstimate::without_blink(1.0, 14.0, 0.0),
+                    FacePoseEstimate::without_blink(2.0, 15.0, 0.0),
+                    FacePoseEstimate::without_blink(3.0, 16.0, 0.0),
+                    FacePoseEstimate::without_blink(20.0, 15.0, 0.0),
+                    FacePoseEstimate::without_blink(2.0, 0.0, 0.0),
+                ]),
+            },
+            GuidedEnrollmentConfig::default(),
+        );
+        let frame = textured_frame();
+
+        for frame_index in 0..3 {
+            let frontal = enrollment.observe_frame(
+                &frame,
+                &UserId("user".to_owned()),
+                GuidedEnrollmentStep::FrontalPrimary,
+                frame_index,
+                i64::from(frame_index),
+            )?;
+            assert!(frontal.accepted_for_step);
+        }
+
+        let yaw_right =
+            enrollment.preview_frame_for_step(&frame, GuidedEnrollmentStep::YawRightMild, 1)?;
+        assert!(yaw_right.accepted_for_step);
+        assert_eq!(yaw_right.pose_estimate.map(|pose| pose.yaw_deg), Some(18.0));
+
+        let pitch_up =
+            enrollment.preview_frame_for_step(&frame, GuidedEnrollmentStep::PitchUpMild, 1)?;
+
+        assert!(pitch_up.accepted_for_step);
+        assert!(pitch_up.pose_fit_score >= 0.25);
+        assert_eq!(
+            pitch_up.pose_estimate.map(|pose| pose.pitch_deg),
+            Some(-15.0)
+        );
+        Ok(())
+    }
+
+    #[derive(Clone)]
+    struct StubModelProvider;
+
+    impl FaceModelProvider for StubModelProvider {
+        fn load_models(&mut self) -> Result<(), FaceEngineError> {
+            Ok(())
+        }
+
+        fn unload_models(&mut self) {}
+
+        fn recognition_model(&self) -> &FaceModelDescriptor {
+            static MODEL: std::sync::LazyLock<FaceModelDescriptor> =
+                std::sync::LazyLock::new(|| FaceModelDescriptor {
+                    model_family: "stub".to_owned(),
+                    model_version: "test".to_owned(),
+                });
+            &MODEL
+        }
+
+        fn detect(&mut self, _frame: &VideoFrame) -> Result<Vec<DetectedFace>, FaceEngineError> {
+            Ok(vec![DetectedFace {
+                bounds: FaceBox {
+                    x: 25.0,
+                    y: 25.0,
+                    width: 50.0,
+                    height: 50.0,
+                },
+                landmarks: vec![
+                    face_engine::FaceLandmark { x: 40.0, y: 40.0 },
+                    face_engine::FaceLandmark { x: 60.0, y: 40.0 },
+                    face_engine::FaceLandmark { x: 50.0, y: 50.0 },
+                    face_engine::FaceLandmark { x: 43.0, y: 65.0 },
+                    face_engine::FaceLandmark { x: 57.0, y: 65.0 },
+                ],
+                confidence: 0.99,
+            }])
+        }
+
+        fn extract(
+            &mut self,
+            _frame: &VideoFrame,
+            _face: &DetectedFace,
+        ) -> Result<FaceEmbedding, FaceEngineError> {
+            Ok(FaceEmbedding {
+                values: vec![1.0, 0.0],
+            })
+        }
+
+        fn compare(&self, _enrolled: &FaceEmbedding, _candidate: &FaceEmbedding) -> FaceMatch {
+            FaceMatch {
+                score: 1.0,
+                decision: FaceMatchDecision::MatchAccepted,
+            }
+        }
+    }
+
+    struct SequencePoseProvider {
+        poses: VecDeque<FacePoseEstimate>,
+    }
+
+    impl FacePoseProvider for SequencePoseProvider {
+        fn provider_name(&self) -> &'static str {
+            "sequence"
+        }
+
+        fn capabilities(&self) -> FacePoseCapabilities {
+            FacePoseCapabilities::HEAD_POSE_ONLY
+        }
+
+        fn estimate_pose(
+            &mut self,
+            _frame: &VideoFrame,
+            _face: &DetectedFace,
+        ) -> Result<FacePoseEstimate, FacePoseError> {
+            Ok(self
+                .poses
+                .pop_front()
+                .unwrap_or_else(|| FacePoseEstimate::without_blink(0.0, 0.0, 0.0)))
+        }
+    }
+
+    fn textured_frame() -> VideoFrame {
+        let data = (0..10_000)
+            .map(|index| if index % 2 == 0 { 80 } else { 180 })
+            .collect();
+        VideoFrame {
+            width: 100,
+            height: 100,
+            format: PixelFormat::Gray8,
+            data,
+        }
     }
 }

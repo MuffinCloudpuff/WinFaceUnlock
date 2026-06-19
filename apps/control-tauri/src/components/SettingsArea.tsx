@@ -1,138 +1,19 @@
-import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Camera, Keyboard, ScanFace, ShieldAlert, UserCog, User, Plus, X } from 'lucide-react';
-import {
-  getControlSettings,
-  isControlRuntimeAvailable,
-  type LogonWakeMode,
-  updateControlSettings,
-} from '../controlProtocol';
-
-type TriggerMode = 'keyboard' | 'silent' | 'hybrid';
+import { Camera, Keyboard, ScanFace, ShieldAlert, UserCog, User, X } from 'lucide-react';
+import { useSettingsArea, type TriggerMode } from '../bindings/useSettingsArea';
 
 export function SettingsArea() {
-  const [autoLock, setAutoLock] = useState(true);
-  const autoLockRequestId = useRef(0);
-  const [intruderSnap, setIntruderSnap] = useState(true);
-  const [triggerMode, setTriggerMode] = useState<TriggerMode>('hybrid');
-  const triggerModeRequestId = useRef(0);
-
-  const [enrolledFaces, setEnrolledFaces] = useState([
-    { id: 1, name: 'Admin' },
-    { id: 2, name: '家属' }
-  ]);
-
-  const [intruders, setIntruders] = useState([
-    { id: 1, time: '今天 10:42' },
-    { id: 2, time: '昨天 15:20' }
-  ]);
-
-  useEffect(() => {
-    if (!isControlRuntimeAvailable()) {
-      return;
-    }
-
-    let isMounted = true;
-    getControlSettings()
-      .then((response) => {
-        if (!isMounted || response.operation_status !== 'completed') {
-          return;
-        }
-        setAutoLock(response.safe_details.presence_lock_enabled);
-        const backendTriggerMode = logonWakeModeToTriggerMode(
-          response.safe_details.logon_wake_mode,
-        );
-        if (backendTriggerMode) {
-          setTriggerMode(backendTriggerMode);
-        }
-      })
-      .catch((error) => {
-        console.warn('Failed to load WinFaceUnlock settings.', error);
-      });
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
-  const handleAutoLockChange = (nextChecked: boolean) => {
-    const previousChecked = autoLock;
-    setAutoLock(nextChecked);
-
-    if (!isControlRuntimeAvailable()) {
-      return;
-    }
-
-    const requestId = autoLockRequestId.current + 1;
-    autoLockRequestId.current = requestId;
-
-    updateControlSettings({ presence_lock_enabled: nextChecked })
-      .then((response) => {
-        if (requestId !== autoLockRequestId.current) {
-          return;
-        }
-
-        if (response.operation_status === 'completed') {
-          setAutoLock(response.safe_details.presence_lock_enabled);
-          return;
-        }
-
-        setAutoLock(previousChecked);
-        console.warn('WinFaceUnlock settings update was not completed.', response);
-      })
-      .catch((error) => {
-        if (requestId !== autoLockRequestId.current) {
-          return;
-        }
-        setAutoLock(previousChecked);
-        console.warn('Failed to update WinFaceUnlock settings.', error);
-      });
-  };
-
-  const handleTriggerModeChange = (nextMode: TriggerMode) => {
-    if (nextMode !== 'keyboard') {
-      if (!isControlRuntimeAvailable()) {
-        setTriggerMode(nextMode);
-      } else {
-        console.warn('Logon wake mode is not implemented yet.', nextMode);
-      }
-      return;
-    }
-
-    const previousMode = triggerMode;
-    setTriggerMode(nextMode);
-
-    if (!isControlRuntimeAvailable()) {
-      return;
-    }
-
-    const requestId = triggerModeRequestId.current + 1;
-    triggerModeRequestId.current = requestId;
-
-    updateControlSettings({ logon_wake_mode: 'input_triggered' })
-      .then((response) => {
-        if (requestId !== triggerModeRequestId.current) {
-          return;
-        }
-
-        if (response.operation_status === 'completed') {
-          setTriggerMode(
-            logonWakeModeToTriggerMode(response.safe_details.logon_wake_mode) ?? nextMode,
-          );
-          return;
-        }
-
-        setTriggerMode(previousMode);
-        console.warn('WinFaceUnlock logon wake mode update was not completed.', response);
-      })
-      .catch((error) => {
-        if (requestId !== triggerModeRequestId.current) {
-          return;
-        }
-        setTriggerMode(previousMode);
-        console.warn('Failed to update WinFaceUnlock logon wake mode.', error);
-      });
-  };
+  const {
+    autoLock,
+    intruderSnap,
+    triggerMode,
+    enrolledFaces,
+    intruders,
+    setIntruderSnap,
+    changeAutoLock: handleAutoLockChange,
+    changeTriggerMode: handleTriggerModeChange,
+    deleteFace: handleFaceDelete,
+  } = useSettingsArea();
 
   return (
     <div className="relative z-50 flex min-h-0 flex-1 flex-col items-center justify-start gap-8 overflow-y-auto overscroll-contain px-6 pt-8 pb-20 w-full max-w-2xl mx-auto scrollbar-hide">
@@ -234,7 +115,7 @@ export function SettingsArea() {
                       <User className="h-5 w-5 text-slate-400" />
                     </div>
                     <button 
-                      onClick={() => setEnrolledFaces(prev => prev.filter(f => f.id !== face.id))}
+                      onClick={() => handleFaceDelete(face.id)}
                       className="absolute top-0 right-0 bg-white rounded-full p-0.5 shadow-sm border border-slate-200 text-slate-400 hover:text-red-500 hover:border-red-200 transition-colors z-10 opacity-0 group-hover:opacity-100"
                     >
                       <X className="h-3 w-3" />
@@ -287,13 +168,6 @@ export function SettingsArea() {
 
     </div>
   );
-}
-
-function logonWakeModeToTriggerMode(mode?: LogonWakeMode): TriggerMode | undefined {
-  if (mode === 'input_triggered') {
-    return 'keyboard';
-  }
-  return undefined;
 }
 
 function Switch({ checked, onChange }: { checked: boolean, onChange: (c: boolean) => void }) {

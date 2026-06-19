@@ -9,6 +9,15 @@ export default defineConfig(() => {
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
+        '@winfaceunlock/control-client': path.resolve(
+          __dirname,
+          '../../packages/control-client/src',
+        ),
+        '@winfaceunlock/control-tauri-transport': path.resolve(
+          __dirname,
+          '../../packages/control-tauri-transport/src',
+        ),
+        '@tauri-apps/api': path.resolve(__dirname, 'node_modules/@tauri-apps/api'),
       },
     },
     server: {

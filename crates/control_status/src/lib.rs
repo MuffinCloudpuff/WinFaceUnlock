@@ -3,12 +3,14 @@
 use std::{
     fmt, fs,
     path::{Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 
 use common_protocol::SERVICE_NAME;
 use control_protocol::{
     ControlSettingsPatch, ControlSettingsSnapshot, DashboardStatus, DataDirectorySummary,
-    LogonWakeMode, PathPresence, PresenceMonitorState, PresenceRuntimeSummary,
+    FaceRecognitionModelSummary, FaceTemplateKind, FaceTemplateList, FaceTemplateSourceState,
+    FaceTemplateSummary, LogonWakeMode, PathPresence, PresenceMonitorState, PresenceRuntimeSummary,
     ProviderRegistrationState, ProviderStatusSummary, RegistryConfigState, ServiceConfigSummary,
     ServiceInstallationState, ServiceRuntimeState, ServiceStatusSummary,
 };
@@ -33,6 +35,7 @@ const REG_PRESENCE_DETECTOR_KIND: &str = "PresenceDetectorKind";
 const REG_PRESENCE_TRACKING_MODE: &str = "PresenceTrackingMode";
 const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
+pub const ACTIVE_SERVICE_FACE_TEMPLATE_REF: &str = "active-service-template";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlStatusPaths {
@@ -85,6 +88,43 @@ impl Default for WindowsDashboardStatusProvider {
     }
 }
 
+pub struct WindowsFaceTemplateStatusStore {
+    paths: ControlStatusPaths,
+}
+
+impl WindowsFaceTemplateStatusStore {
+    pub fn from_environment_or_default() -> Self {
+        Self {
+            paths: ControlStatusPaths::from_environment_or_default(),
+        }
+    }
+
+    pub fn with_paths(paths: ControlStatusPaths) -> Self {
+        Self { paths }
+    }
+
+    pub fn load_face_templates(&self) -> Result<FaceTemplateList, FaceTemplateStatusError> {
+        load_face_template_list(&WindowsStatusSource { paths: &self.paths })
+    }
+
+    pub fn load_active_face_template_path(&self) -> Result<PathBuf, FaceTemplateStatusError> {
+        load_active_face_template_path(&WindowsStatusSource { paths: &self.paths })
+    }
+
+    pub fn apply_active_face_template_path(
+        &self,
+        template_path: &Path,
+    ) -> Result<(), FaceTemplateStatusError> {
+        apply_active_face_template_path(&WindowsFaceTemplateConfigWriter, template_path)
+    }
+}
+
+impl Default for WindowsFaceTemplateStatusStore {
+    fn default() -> Self {
+        Self::from_environment_or_default()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WindowsControlSettingsStore;
 
@@ -117,6 +157,60 @@ pub enum ControlStatusError {
     ElevationRequired(String),
     PermissionDenied(String),
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FaceTemplateStatusError {
+    ServiceConfigUnavailable(String),
+    TemplateConfigMissing(String),
+    TemplateFileMissing(String),
+    TemplateParseFailed(String),
+    TemplateEmpty(String),
+    PermissionDenied(String),
+}
+
+impl FaceTemplateStatusError {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::ServiceConfigUnavailable(message)
+            | Self::TemplateConfigMissing(message)
+            | Self::TemplateFileMissing(message)
+            | Self::TemplateParseFailed(message)
+            | Self::TemplateEmpty(message)
+            | Self::PermissionDenied(message) => message,
+        }
+    }
+}
+
+trait FaceTemplateConfigWriter {
+    fn write_active_face_template_path(
+        &self,
+        template_path: &Path,
+    ) -> Result<(), FaceTemplateStatusError>;
+}
+
+struct WindowsFaceTemplateConfigWriter;
+
+impl FaceTemplateConfigWriter for WindowsFaceTemplateConfigWriter {
+    fn write_active_face_template_path(
+        &self,
+        template_path: &Path,
+    ) -> Result<(), FaceTemplateStatusError> {
+        registry::write_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_FACE_TEMPLATE_PATH,
+            &template_path.display().to_string(),
+        )
+        .map_err(face_template_registry_write_error)
+    }
+}
+
+impl fmt::Display for FaceTemplateStatusError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl std::error::Error for FaceTemplateStatusError {}
 
 impl ControlStatusError {
     pub fn message(&self) -> &str {
@@ -197,6 +291,158 @@ fn load_dashboard_status(
         data_directory: source.query_data_directory_status()?,
         presence_runtime: source.query_presence_runtime_status()?,
     })
+}
+
+fn load_face_template_list(
+    source: &impl StatusSource,
+) -> Result<FaceTemplateList, FaceTemplateStatusError> {
+    let template_path = load_active_face_template_path(source)?;
+
+    Ok(FaceTemplateList {
+        templates: vec![read_active_service_face_template_summary(&template_path)?],
+    })
+}
+
+fn load_active_face_template_path(
+    source: &impl StatusSource,
+) -> Result<PathBuf, FaceTemplateStatusError> {
+    let service_config = source
+        .query_service_config_status()
+        .map_err(face_template_service_config_error)?;
+    if !service_config.registry_config_exists {
+        return Err(FaceTemplateStatusError::TemplateConfigMissing(
+            "service configuration is missing a face template path".to_owned(),
+        ));
+    }
+
+    let template_path = service_config
+        .face_template_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            FaceTemplateStatusError::TemplateConfigMissing(
+                "service configuration is missing a face template path".to_owned(),
+            )
+        })?;
+
+    Ok(template_path)
+}
+
+fn apply_active_face_template_path(
+    writer: &impl FaceTemplateConfigWriter,
+    template_path: &Path,
+) -> Result<(), FaceTemplateStatusError> {
+    if template_path.as_os_str().is_empty() {
+        return Err(FaceTemplateStatusError::TemplateConfigMissing(
+            "face template path is empty".to_owned(),
+        ));
+    }
+    writer.write_active_face_template_path(template_path)
+}
+
+fn read_active_service_face_template_summary(
+    template_path: &Path,
+) -> Result<FaceTemplateSummary, FaceTemplateStatusError> {
+    summarize_selected_face_template_file(
+        template_path,
+        ACTIVE_SERVICE_FACE_TEMPLATE_REF,
+        FaceTemplateSourceState::ActiveServiceTemplate,
+    )
+}
+
+pub fn summarize_selected_face_template_file(
+    template_path: &Path,
+    face_template_ref: impl Into<String>,
+    source_state: FaceTemplateSourceState,
+) -> Result<FaceTemplateSummary, FaceTemplateStatusError> {
+    let metadata = fs::metadata(template_path).map_err(face_template_file_read_error)?;
+    let bytes = fs::read(template_path).map_err(face_template_file_read_error)?;
+    let selected_template_set: SelectedTemplateSetFile =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            FaceTemplateStatusError::TemplateParseFailed(format!(
+                "active face template file is invalid: {error}"
+            ))
+        })?;
+    let selected_template_count = selected_template_set.selected_template_count();
+    if selected_template_count == 0 {
+        return Err(FaceTemplateStatusError::TemplateEmpty(
+            "active face template file does not contain selected unlock templates".to_owned(),
+        ));
+    }
+
+    Ok(FaceTemplateSummary {
+        face_template_ref: face_template_ref.into(),
+        user_id: selected_template_set.user_id.clone(),
+        display_name: Some(selected_template_set.user_id),
+        template_kind: FaceTemplateKind::SelectedTemplateSet,
+        recognition_model: FaceRecognitionModelSummary {
+            model_family: selected_template_set.recognizer_model_family,
+            model_version: selected_template_set.recognizer_model_version,
+        },
+        selected_template_count,
+        rejected_sample_count: selected_template_set
+            .quality_summary
+            .and_then(|summary| summary.rejected_sample_count),
+        created_at_unix_ms: selected_template_set.enrollment_created_at_unix_ms,
+        updated_at_unix_ms: metadata_modified_unix_ms(&metadata),
+        source_state,
+    })
+}
+
+#[derive(Deserialize)]
+struct SelectedTemplateSetFile {
+    user_id: String,
+    recognizer_model_family: String,
+    recognizer_model_version: String,
+    enrollment_created_at_unix_ms: Option<i64>,
+    #[serde(default)]
+    templates: Vec<SelectedTemplateFileEntry>,
+    quality_summary: Option<SelectedTemplateQualitySummary>,
+}
+
+impl SelectedTemplateSetFile {
+    fn selected_template_count(&self) -> u32 {
+        self.quality_summary
+            .as_ref()
+            .and_then(|summary| summary.selected_template_count)
+            .unwrap_or_else(|| {
+                self.templates
+                    .iter()
+                    .filter(|template| template.selected_for_unlock)
+                    .count()
+                    .try_into()
+                    .unwrap_or(u32::MAX)
+            })
+    }
+}
+
+#[derive(Deserialize)]
+struct SelectedTemplateFileEntry {
+    #[serde(default = "default_selected_for_unlock")]
+    selected_for_unlock: bool,
+}
+
+#[derive(Deserialize)]
+struct SelectedTemplateQualitySummary {
+    selected_template_count: Option<u32>,
+    rejected_sample_count: Option<u32>,
+}
+
+fn default_selected_for_unlock() -> bool {
+    true
+}
+
+fn metadata_modified_unix_ms(metadata: &fs::Metadata) -> Option<i64> {
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis()
+        .try_into()
+        .ok()
 }
 
 fn map_service_status(status: Option<ObservedServiceStatus>) -> ServiceStatusSummary {
@@ -555,6 +801,45 @@ fn service_config_error(error: RegistryReadError) -> ControlStatusError {
     } else {
         ControlStatusError::ServiceConfigUnavailable(format!(
             "service config registry status cannot be read: {error}"
+        ))
+    }
+}
+
+fn face_template_service_config_error(error: ControlStatusError) -> FaceTemplateStatusError {
+    match error {
+        ControlStatusError::PermissionDenied(message) => {
+            FaceTemplateStatusError::PermissionDenied(message)
+        }
+        other => FaceTemplateStatusError::ServiceConfigUnavailable(format!(
+            "service face template configuration cannot be read: {other}"
+        )),
+    }
+}
+
+fn face_template_registry_write_error(error: RegistryWriteError) -> FaceTemplateStatusError {
+    if error.is_access_denied() {
+        FaceTemplateStatusError::PermissionDenied(
+            "service face template configuration update requires elevation".to_owned(),
+        )
+    } else {
+        FaceTemplateStatusError::ServiceConfigUnavailable(format!(
+            "service face template configuration cannot be updated: {error}"
+        ))
+    }
+}
+
+fn face_template_file_read_error(error: std::io::Error) -> FaceTemplateStatusError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        FaceTemplateStatusError::TemplateFileMissing(
+            "configured face template file is missing".to_owned(),
+        )
+    } else if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
+        FaceTemplateStatusError::PermissionDenied(
+            "configured face template file access denied".to_owned(),
+        )
+    } else {
+        FaceTemplateStatusError::TemplateParseFailed(format!(
+            "configured face template file cannot be read: {error}"
         ))
     }
 }
@@ -1106,6 +1391,86 @@ mod tests {
     }
 
     #[test]
+    fn face_template_list_reads_active_service_template_summary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let template_path = unique_temp_path("selected_templates.json");
+        fs::write(
+            &template_path,
+            r#"{
+                "user_id": "dev-user",
+                "recognizer_model_family": "opencv_sface",
+                "recognizer_model_version": "2021dec",
+                "enrollment_created_at_unix_ms": 1782000000000,
+                "quality_summary": {
+                    "selected_template_count": 2,
+                    "rejected_sample_count": 1
+                },
+                "templates": [
+                    { "selected_for_unlock": true },
+                    { "selected_for_unlock": true }
+                ]
+            }"#,
+        )?;
+        let source = FakeStatusSource {
+            service_config: Ok(ObservedServiceConfigStatus {
+                registry_config_exists: true,
+                auth_mode: Some("local-camera".to_owned()),
+                face_template_path: Some(template_path.display().to_string()),
+                presence_lock_enabled: Some("true".to_owned()),
+                presence_detector_kind: None,
+                presence_tracking_mode: None,
+            }),
+            ..FakeStatusSource::default()
+        };
+
+        let templates = load_face_template_list(&source)?;
+        let _ = fs::remove_file(template_path);
+        let summary = templates
+            .templates
+            .first()
+            .ok_or("expected one active service template summary")?;
+
+        assert_eq!(templates.templates.len(), 1);
+        assert_eq!(summary.face_template_ref, ACTIVE_SERVICE_FACE_TEMPLATE_REF);
+        assert_eq!(summary.user_id, "dev-user");
+        assert_eq!(summary.selected_template_count, 2);
+        assert_eq!(summary.rejected_sample_count, Some(1));
+        assert_eq!(summary.recognition_model.model_family, "opencv_sface");
+        assert_eq!(summary.recognition_model.model_version, "2021dec");
+        assert_eq!(
+            summary.source_state,
+            FaceTemplateSourceState::ActiveServiceTemplate
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn face_template_list_distinguishes_missing_template_config() -> Result<(), &'static str> {
+        let source = FakeStatusSource {
+            service_config: Ok(ObservedServiceConfigStatus {
+                registry_config_exists: true,
+                auth_mode: Some("local-camera".to_owned()),
+                face_template_path: None,
+                presence_lock_enabled: Some("true".to_owned()),
+                presence_detector_kind: None,
+                presence_tracking_mode: None,
+            }),
+            ..FakeStatusSource::default()
+        };
+
+        let error = match load_face_template_list(&source) {
+            Ok(_) => return Err("missing face template config should fail distinctly"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            FaceTemplateStatusError::TemplateConfigMissing(_)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn presence_runtime_file_state_maps_to_protocol_state() {
         let status = PresenceRuntimeStatusFile {
             state: "disabled".to_owned(),
@@ -1229,5 +1594,17 @@ mod tests {
         );
         assert_eq!(source.auto_wake_on_advise.borrow().as_deref(), Some("true"));
         Ok(())
+    }
+
+    fn unique_temp_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "winfaceunlock-control-status-{}-{}-{name}",
+            std::process::id(),
+            nanos
+        ))
     }
 }

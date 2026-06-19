@@ -104,6 +104,15 @@ pub enum ControlOperation {
     UpdateSettings,
     GetWindowsCredentialAccount,
     EnrollWindowsCredential,
+    ListFaceTemplates,
+    DeleteFaceTemplate,
+    ListCameras,
+    StartFaceEnrollment,
+    GetFaceEnrollmentStatus,
+    GetFaceEnrollmentPreview,
+    CancelFaceEnrollment,
+    FinishFaceEnrollment,
+    RunFaceAuthSelfTest,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -127,12 +136,36 @@ pub enum ControlErrorCode {
     InvalidSettingsRequest,
     InvalidCredentialAccountRequest,
     InvalidCredentialEnrollmentRequest,
+    InvalidFaceTemplateRequest,
+    InvalidFaceEnrollmentRequest,
+    InvalidAuthSelfTestRequest,
     DashboardStatusUnavailable,
     SettingsUnavailable,
     SettingsPersistenceFailed,
     CredentialAccountUnavailable,
     CredentialEnrollmentUnavailable,
     CredentialEnrollmentFailed,
+    FaceTemplateStoreUnavailable,
+    FaceTemplateConfigMissing,
+    FaceTemplateFileMissing,
+    FaceTemplateParseFailed,
+    FaceTemplateEmpty,
+    FaceTemplateNotFound,
+    ActiveTemplateDeleteBlocked,
+    FaceTemplateDeleteFailed,
+    FaceEnrollmentUnavailable,
+    FaceEnrollmentAlreadyRunning,
+    FaceEnrollmentSessionNotFound,
+    CameraUnavailable,
+    FaceModelUnavailable,
+    FaceEnrollmentFailed,
+    FaceEnrollmentCancelled,
+    FaceTemplateMissing,
+    CredentialMissing,
+    AuthMatchFailed,
+    GrantIssueFailed,
+    CredentialMaterialUnavailable,
+    AuthSelfTestFailed,
     ServiceStatusUnavailable,
     ProviderStatusUnavailable,
     ServiceConfigUnavailable,
@@ -237,6 +270,234 @@ fn default_control_user_id() -> String {
 
 fn default_control_user_sid() -> String {
     "S-1-5-21-winfaceunlock-pending".to_owned()
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FaceTemplateList {
+    pub templates: Vec<FaceTemplateSummary>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FaceTemplateSummary {
+    pub face_template_ref: String,
+    pub user_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub template_kind: FaceTemplateKind,
+    pub recognition_model: FaceRecognitionModelSummary,
+    pub selected_template_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejected_sample_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at_unix_ms: Option<i64>,
+    pub source_state: FaceTemplateSourceState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FaceTemplateKind {
+    SelectedTemplateSet,
+    RepositoryTemplate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FaceTemplateSourceState {
+    ActiveServiceTemplate,
+    RepositoryTemplate,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FaceRecognitionModelSummary {
+    pub model_family: String,
+    pub model_version: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct DeleteFaceTemplatePayload {
+    pub face_template_ref: String,
+}
+
+impl DeleteFaceTemplatePayload {
+    pub fn has_valid_ref(&self) -> bool {
+        !self.face_template_ref.trim().is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct DeleteFaceTemplateOutcome {
+    pub face_template_ref: String,
+    pub template_deleted: bool,
+    pub service_auth_requires_reconfiguration: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct CameraDeviceList {
+    pub cameras: Vec<CameraDeviceSummary>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct CameraDeviceSummary {
+    pub camera_id: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FaceEnrollmentStartPayload {
+    #[serde(default = "default_control_user_id")]
+    pub user_id: String,
+    #[serde(default = "default_camera_id")]
+    pub camera_id: String,
+    #[serde(default)]
+    pub enrollment_profile: FaceEnrollmentProfile,
+    #[serde(default)]
+    pub allow_partial_enrollment: bool,
+}
+
+impl FaceEnrollmentStartPayload {
+    pub fn has_valid_fields(&self) -> bool {
+        !self.user_id.trim().is_empty() && !self.camera_id.trim().is_empty()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FaceEnrollmentProfile {
+    #[default]
+    GuidedStandard,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FaceEnrollmentSessionPayload {
+    pub enrollment_session_id: String,
+}
+
+impl FaceEnrollmentSessionPayload {
+    pub fn has_valid_session_id(&self) -> bool {
+        !self.enrollment_session_id.trim().is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FaceEnrollmentSessionStatus {
+    pub enrollment_session_id: String,
+    pub session_state: FaceEnrollmentSessionState,
+    pub user_id: String,
+    pub camera_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_instruction_code: Option<String>,
+    pub accepted_sample_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_sample_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_frame_result: Option<FaceEnrollmentFrameResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template_summary: Option<FaceTemplateEnrollmentSummary>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FaceEnrollmentPreviewFrame {
+    pub enrollment_session_id: String,
+    pub preview_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_updated_at_unix_ms: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FaceEnrollmentSessionState {
+    Starting,
+    Running,
+    WaitingForFace,
+    WaitingForPose,
+    Capturing,
+    Finishing,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FaceEnrollmentFrameResult {
+    FaceAccepted,
+    NoFaceDetected,
+    MultipleFacesDetected,
+    PoseNotReady,
+    QualityRejected,
+    ModelUnavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FaceTemplateEnrollmentSummary {
+    pub selected_template_count: u32,
+    pub rejected_sample_count: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FaceEnrollmentFinishOutcome {
+    pub enrollment_session_id: String,
+    pub session_state: FaceEnrollmentSessionState,
+    pub face_template_ref: String,
+    pub user_id: String,
+    pub template_summary: FaceTemplateEnrollmentSummary,
+    pub service_auth_configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_auth_configuration_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FaceAuthSelfTestPayload {
+    #[serde(default = "default_face_auth_self_test_session_id")]
+    pub session_id: String,
+    #[serde(default = "default_require_credential_ready")]
+    pub require_credential_ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_id: Option<String>,
+}
+
+impl FaceAuthSelfTestPayload {
+    pub fn has_valid_fields(&self) -> bool {
+        !self.session_id.trim().is_empty()
+            && self
+                .camera_id
+                .as_deref()
+                .is_none_or(|camera_id| !camera_id.trim().is_empty())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct FaceAuthSelfTestOutcome {
+    pub session_id: String,
+    pub auth_match_passed: bool,
+    pub grant_issued: bool,
+    pub credential_material_ready: bool,
+    pub credential_decryption_succeeded: bool,
+    pub pipe_delivery_confirmed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_match_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_face_template_ref: Option<String>,
+}
+
+fn default_camera_id() -> String {
+    "opencv-index:0".to_owned()
+}
+
+fn default_face_auth_self_test_session_id() -> String {
+    "control-auth-self-test".to_owned()
+}
+
+fn default_require_credential_ready() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -611,6 +872,152 @@ mod tests {
             "windows-credential-dev-user"
         );
         assert!(payload.has_valid_safe_fields());
+        Ok(())
+    }
+
+    #[test]
+    fn face_template_list_request_round_trips_snake_case_operation() -> Result<(), serde_json::Error>
+    {
+        let request = ControlRequestEnvelope {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            correlation_id: "control-face-list-test-1".to_owned(),
+            operation: ControlOperation::ListFaceTemplates,
+            payload: json!({}),
+        };
+
+        let json_text = serde_json::to_string(&request)?;
+        assert!(json_text.contains("\"operation\":\"list_face_templates\""));
+
+        let decoded: ControlRequestEnvelope = serde_json::from_str(&json_text)?;
+        assert_eq!(decoded, request);
+        Ok(())
+    }
+
+    #[test]
+    fn face_template_summary_round_trips_without_template_material() -> Result<(), serde_json::Error>
+    {
+        let template_list = FaceTemplateList {
+            templates: vec![FaceTemplateSummary {
+                face_template_ref: "active-service-template".to_owned(),
+                user_id: "dev-user".to_owned(),
+                display_name: Some("Leo16".to_owned()),
+                template_kind: FaceTemplateKind::SelectedTemplateSet,
+                recognition_model: FaceRecognitionModelSummary {
+                    model_family: "opencv_sface".to_owned(),
+                    model_version: "2021dec".to_owned(),
+                },
+                selected_template_count: 5,
+                rejected_sample_count: Some(1),
+                created_at_unix_ms: Some(1_782_000_000_000),
+                updated_at_unix_ms: Some(1_782_000_000_500),
+                source_state: FaceTemplateSourceState::ActiveServiceTemplate,
+            }],
+        };
+
+        let json_text = serde_json::to_string(&template_list)?;
+        assert!(json_text.contains("\"template_kind\":\"selected_template_set\""));
+        assert!(json_text.contains("\"source_state\":\"active_service_template\""));
+        assert!(!json_text.contains("embedding"));
+        assert!(!json_text.contains("image"));
+        assert!(!json_text.contains("password"));
+
+        let decoded: FaceTemplateList = serde_json::from_str(&json_text)?;
+        assert_eq!(decoded, template_list);
+        Ok(())
+    }
+
+    #[test]
+    fn face_enrollment_start_payload_defaults_to_guided_standard() -> Result<(), serde_json::Error>
+    {
+        let payload: FaceEnrollmentStartPayload = serde_json::from_value(json!({}))?;
+
+        assert_eq!(payload.user_id, "dev-user");
+        assert_eq!(payload.camera_id, "opencv-index:0");
+        assert_eq!(
+            payload.enrollment_profile,
+            FaceEnrollmentProfile::GuidedStandard
+        );
+        assert!(!payload.allow_partial_enrollment);
+        assert!(payload.has_valid_fields());
+        Ok(())
+    }
+
+    #[test]
+    fn face_enrollment_status_round_trips_structured_state() -> Result<(), serde_json::Error> {
+        let status = FaceEnrollmentSessionStatus {
+            enrollment_session_id: "face-enrollment-1".to_owned(),
+            session_state: FaceEnrollmentSessionState::WaitingForPose,
+            user_id: "dev-user".to_owned(),
+            camera_id: "opencv-index:0".to_owned(),
+            current_step: Some("frontal".to_owned()),
+            current_instruction_code: Some("look_at_camera".to_owned()),
+            accepted_sample_count: 3,
+            required_sample_count: Some(6),
+            last_frame_result: Some(FaceEnrollmentFrameResult::PoseNotReady),
+            template_summary: None,
+        };
+
+        let json_text = serde_json::to_string(&status)?;
+        assert!(json_text.contains("\"session_state\":\"waiting_for_pose\""));
+        assert!(json_text.contains("\"last_frame_result\":\"pose_not_ready\""));
+
+        let decoded: FaceEnrollmentSessionStatus = serde_json::from_str(&json_text)?;
+        assert_eq!(decoded, status);
+        Ok(())
+    }
+
+    #[test]
+    fn face_enrollment_finish_outcome_round_trips_service_config_boundary()
+    -> Result<(), serde_json::Error> {
+        let outcome = FaceEnrollmentFinishOutcome {
+            enrollment_session_id: "face-enrollment-1".to_owned(),
+            session_state: FaceEnrollmentSessionState::Completed,
+            face_template_ref: "face-enrollment-template-face-enrollment-1".to_owned(),
+            user_id: "dev-user".to_owned(),
+            template_summary: FaceTemplateEnrollmentSummary {
+                selected_template_count: 2,
+                rejected_sample_count: 1,
+            },
+            service_auth_configured: false,
+            service_auth_configuration_error: Some(
+                "service face template configuration update requires elevation".to_owned(),
+            ),
+        };
+
+        let json_text = serde_json::to_string(&outcome)?;
+        assert!(json_text.contains("\"session_state\":\"completed\""));
+        assert!(json_text.contains("\"service_auth_configured\":false"));
+        assert!(json_text.contains("service_auth_configuration_error"));
+        assert!(!json_text.contains("\"success\""));
+        assert!(!json_text.contains("selected_templates"));
+        assert!(!json_text.contains("embedding"));
+
+        let decoded: FaceEnrollmentFinishOutcome = serde_json::from_str(&json_text)?;
+        assert_eq!(decoded, outcome);
+        Ok(())
+    }
+
+    #[test]
+    fn face_auth_self_test_outcome_keeps_auth_layers_distinct() -> Result<(), serde_json::Error> {
+        let outcome = FaceAuthSelfTestOutcome {
+            session_id: "control-auth-self-test-1".to_owned(),
+            auth_match_passed: true,
+            grant_issued: true,
+            credential_material_ready: true,
+            credential_decryption_succeeded: true,
+            pipe_delivery_confirmed: false,
+            best_match_score: Some(0.81),
+            matched_face_template_ref: Some("active-service-template".to_owned()),
+        };
+
+        let json_text = serde_json::to_string(&outcome)?;
+        assert!(json_text.contains("\"auth_match_passed\":true"));
+        assert!(json_text.contains("\"grant_issued\":true"));
+        assert!(json_text.contains("\"pipe_delivery_confirmed\":false"));
+        assert!(!json_text.contains("\"success\""));
+
+        let decoded: FaceAuthSelfTestOutcome = serde_json::from_str(&json_text)?;
+        assert_eq!(decoded, outcome);
         Ok(())
     }
 }

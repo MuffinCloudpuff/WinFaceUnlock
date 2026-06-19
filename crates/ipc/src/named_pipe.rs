@@ -317,6 +317,9 @@ fn pipe_security_sddl(security: &PipeSecurity) -> Result<String, ProtocolError> 
     if security.allow_administrators {
         sddl.push_str("(A;;GA;;;BA)");
     }
+    if security.allow_interactive_users {
+        sddl.push_str("(A;;GRGW;;;IU)");
+    }
     if security.allow_service_sid {
         sddl.push_str("(A;;GA;;;OW)");
     }
@@ -350,6 +353,7 @@ mod tests {
 
         assert!(sddl.contains("(A;;GA;;;SY)"));
         assert!(sddl.contains("(A;;GA;;;BA)"));
+        assert!(sddl.contains("(A;;GRGW;;;IU)"));
         assert!(sddl.contains("(A;;GA;;;OW)"));
         assert!(!sddl.contains("WD"));
         Ok(())
@@ -360,6 +364,7 @@ mod tests {
         let result = PipeSecurityDescriptor::from_pipe_security(&PipeSecurity {
             allow_local_system: false,
             allow_administrators: false,
+            allow_interactive_users: false,
             allow_service_sid: false,
         });
 

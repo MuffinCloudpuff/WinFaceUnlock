@@ -1,4 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use common_protocol::{
     AuthFailureReason, AuthGrant, AuthSource, ProtectedCredential, ProtectedCredentialMaterial,
@@ -30,6 +33,10 @@ pub trait ProtectedCredentialMaterialResolver {
     ) -> Result<ProtectedCredentialMaterial, ProtocolError>;
 }
 
+pub trait FaceTemplateConfigApplier {
+    fn apply_face_template(&mut self, template_path: &Path) -> Result<(), ProtocolError>;
+}
+
 pub trait UnixTimeMillisClock {
     fn now_unix_ms(&self) -> i64;
 }
@@ -47,23 +54,31 @@ impl UnixTimeMillisClock for SystemUnixTimeMillisClock {
     }
 }
 
-pub struct ServiceRequestHandler<I, R, C> {
+pub struct ServiceRequestHandler<I, R, A, C> {
     grant_issuer: I,
     credential_resolver: R,
+    face_template_applier: A,
     clock: C,
     grant_registry: GrantRegistry,
 }
 
-impl<I, R, C> ServiceRequestHandler<I, R, C>
+impl<I, R, A, C> ServiceRequestHandler<I, R, A, C>
 where
     I: AuthGrantIssuer,
     R: ProtectedCredentialResolver + ProtectedCredentialMaterialResolver,
+    A: FaceTemplateConfigApplier,
     C: UnixTimeMillisClock,
 {
-    pub fn new(grant_issuer: I, credential_resolver: R, clock: C) -> Self {
+    pub fn new(
+        grant_issuer: I,
+        credential_resolver: R,
+        face_template_applier: A,
+        clock: C,
+    ) -> Self {
         Self {
             grant_issuer,
             credential_resolver,
+            face_template_applier,
             clock,
             grant_registry: GrantRegistry::default(),
         }
@@ -121,6 +136,9 @@ where
                 self.grant_registry.remove_grants_for_session(&session_id);
                 Ok(ServiceEvent::AuthCancelled { session_id })
             }
+            ServiceRequest::ApplyFaceTemplate { template_path } => {
+                self.handle_apply_face_template(template_path)
+            }
             ServiceRequest::HealthCheck => Ok(ServiceEvent::HealthOk),
         }
     }
@@ -142,6 +160,18 @@ where
             }
             Err(reason) => Ok(ServiceEvent::AuthFailed { session_id, reason }),
         }
+    }
+
+    fn handle_apply_face_template(
+        &mut self,
+        template_path: PathBuf,
+    ) -> Result<ServiceEvent, ProtocolError> {
+        if template_path.as_os_str().is_empty() {
+            return Err(ProtocolError::InvalidMessage);
+        }
+        self.face_template_applier
+            .apply_face_template(&template_path)?;
+        Ok(ServiceEvent::FaceTemplateApplied { template_path })
     }
 }
 
@@ -204,6 +234,17 @@ mod tests {
     }
 
     struct FixedCredentialResolver;
+    struct RecordingFaceTemplateApplier {
+        applied_template_paths: Vec<PathBuf>,
+    }
+
+    impl RecordingFaceTemplateApplier {
+        fn new() -> Self {
+            Self {
+                applied_template_paths: Vec::new(),
+            }
+        }
+    }
 
     impl ProtectedCredentialResolver for FixedCredentialResolver {
         fn resolve_protected_credential(
@@ -232,11 +273,20 @@ mod tests {
         }
     }
 
+    impl FaceTemplateConfigApplier for RecordingFaceTemplateApplier {
+        fn apply_face_template(&mut self, template_path: &Path) -> Result<(), ProtocolError> {
+            self.applied_template_paths
+                .push(template_path.to_path_buf());
+            Ok(())
+        }
+    }
+
     #[test]
     fn handler_issues_grant_then_redeems_protected_credential_once() -> Result<(), ProtocolError> {
         let mut handler = ServiceRequestHandler::new(
             SuccessfulGrantIssuer,
             FixedCredentialResolver,
+            RecordingFaceTemplateApplier::new(),
             FixedClock { now_unix_ms: 1_000 },
         );
 
@@ -275,6 +325,7 @@ mod tests {
         let mut handler = ServiceRequestHandler::new(
             SuccessfulGrantIssuer,
             FixedCredentialResolver,
+            RecordingFaceTemplateApplier::new(),
             FixedClock { now_unix_ms: 1_000 },
         );
 
@@ -297,6 +348,7 @@ mod tests {
         let mut handler = ServiceRequestHandler::new(
             SuccessfulGrantIssuer,
             FixedCredentialResolver,
+            RecordingFaceTemplateApplier::new(),
             FixedClock { now_unix_ms: 1_000 },
         );
 
@@ -328,6 +380,7 @@ mod tests {
         let mut handler = ServiceRequestHandler::new(
             FailingGrantIssuer,
             FixedCredentialResolver,
+            RecordingFaceTemplateApplier::new(),
             FixedClock { now_unix_ms: 1_000 },
         );
 
@@ -351,6 +404,7 @@ mod tests {
         let mut handler = ServiceRequestHandler::new(
             SuccessfulGrantIssuer,
             FixedCredentialResolver,
+            RecordingFaceTemplateApplier::new(),
             FixedClock { now_unix_ms: 1_000 },
         );
 
@@ -374,6 +428,24 @@ mod tests {
             }
         );
         assert_eq!(fetch_result, Err(ProtocolError::InvalidMessage));
+        Ok(())
+    }
+
+    #[test]
+    fn handler_applies_face_template_via_config_applier() -> Result<(), ProtocolError> {
+        let mut handler = ServiceRequestHandler::new(
+            SuccessfulGrantIssuer,
+            FixedCredentialResolver,
+            RecordingFaceTemplateApplier::new(),
+            FixedClock { now_unix_ms: 1_000 },
+        );
+        let template_path = PathBuf::from(r"C:\ProgramData\WinFaceUnlock\selected_templates.json");
+
+        let event = handler.handle_request(ServiceRequest::ApplyFaceTemplate {
+            template_path: template_path.clone(),
+        })?;
+
+        assert_eq!(event, ServiceEvent::FaceTemplateApplied { template_path });
         Ok(())
     }
 }

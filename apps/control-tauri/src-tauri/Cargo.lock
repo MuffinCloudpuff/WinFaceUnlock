@@ -410,8 +410,12 @@ dependencies = [
 name = "control_backend"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "common_protocol",
  "control_protocol",
  "control_status",
+ "ipc",
+ "serde",
  "serde_json",
 ]
 
@@ -3996,6 +4000,7 @@ name = "video_provider"
 version = "0.1.0"
 dependencies = [
  "opencv",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -4276,6 +4281,7 @@ name = "win_service"
 version = "0.1.0"
 dependencies = [
  "common_protocol",
+ "control_status",
  "credential_store",
  "face_auth",
  "face_engine",

@@ -114,6 +114,16 @@ run_auth_self_test
 These operation names are examples of the intended contract shape. The final
 Rust enum names can be adjusted, but the semantic boundaries must remain.
 
+The detailed execution plan for face template management, face enrollment, and
+face auth self-test lives in:
+
+```text
+docs/FACE_RUNTIME_CONTROL_INTEGRATION_PLAN.md
+```
+
+That plan is the source of truth for exposing existing face capabilities through
+runtime control instead of extending setup-only compatibility operations.
+
 ### Auth IPC Domain
 
 Auth IPC is the Credential Provider to Service authentication protocol. It
@@ -429,6 +439,12 @@ delete_face_template
 The response should return stable template references and display metadata. The
 frontend must not infer database paths or delete template files directly.
 
+The phase-level contract and rollout order are defined in:
+
+```text
+docs/FACE_RUNTIME_CONTROL_INTEGRATION_PLAN.md
+```
+
 ### Phase C4: Enrollment
 
 Implement enrollment as a stateful runtime control flow:
@@ -442,6 +458,12 @@ finish_enrollment
 
 If progress streaming is needed, use control events over the same protocol
 family. Do not introduce a Tauri-only enrollment protocol.
+
+The enrollment flow must follow the backend-owned session model described in:
+
+```text
+docs/FACE_RUNTIME_CONTROL_INTEGRATION_PLAN.md
+```
 
 ## Regression Checklist
 

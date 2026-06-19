@@ -1,4 +1,4 @@
-use std::{fmt, hash::Hash, time::Duration};
+use std::{fmt, hash::Hash, path::PathBuf, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -129,6 +129,9 @@ pub enum ServiceRequest {
     Cancel {
         session_id: SessionId,
     },
+    ApplyFaceTemplate {
+        template_path: PathBuf,
+    },
     HealthCheck,
 }
 
@@ -154,6 +157,9 @@ pub enum ServiceEvent {
     },
     AuthCancelled {
         session_id: SessionId,
+    },
+    FaceTemplateApplied {
+        template_path: PathBuf,
     },
     RequestRejected {
         reason: ProtocolError,

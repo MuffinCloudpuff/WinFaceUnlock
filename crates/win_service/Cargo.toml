@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 common_protocol = { path = "../common_protocol" }
+control_status = { path = "../control_status" }
 credential_store = { path = "../credential_store" }
 face_auth = { path = "../face_auth", default-features = false }
 face_engine = { path = "../face_engine" }

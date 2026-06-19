@@ -18,6 +18,15 @@
     "paths": {
       "@/*": [
         "./*"
+      ],
+      "@winfaceunlock/control-client": [
+        "../../packages/control-client/src"
+      ],
+      "@winfaceunlock/control-tauri-transport": [
+        "../../packages/control-tauri-transport/src"
+      ],
+      "@tauri-apps/api/*": [
+        "./node_modules/@tauri-apps/api/*"
       ]
     },
     "allowImportingTsExtensions": true,
@@ -25,7 +34,9 @@
   },
   "include": [
     "src",
-    "vite.config.ts"
+    "vite.config.ts",
+    "../../packages/control-client/src",
+    "../../packages/control-tauri-transport/src"
   ],
   "exclude": [
     "dist",

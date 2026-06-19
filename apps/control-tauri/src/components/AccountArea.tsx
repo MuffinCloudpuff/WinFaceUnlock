@@ -1,41 +1,12 @@
 import { User, KeyRound, ArrowRight } from 'lucide-react';
 import { motion } from 'motion/react';
-import { useEffect, useState } from 'react';
-import {
-  enrollWindowsCredential,
-  getWindowsCredentialAccount,
-  isControlRuntimeAvailable,
-  type WindowsCredentialAccountProfile,
-} from '../controlProtocol';
+import { useState } from 'react';
+import { isControlRuntimeAvailable } from '../bindings/controlTransport';
+import { useCredentialEnrollment } from '../bindings/useCredentialEnrollment';
 
 export function AccountArea() {
   const [pin, setPin] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [accountProfile, setAccountProfile] = useState<WindowsCredentialAccountProfile | null>(
-    null,
-  );
-
-  useEffect(() => {
-    if (!isControlRuntimeAvailable()) {
-      return;
-    }
-
-    let isMounted = true;
-    getWindowsCredentialAccount()
-      .then((response) => {
-        if (!isMounted || response.operation_status !== 'completed') {
-          return;
-        }
-        setAccountProfile(response.safe_details);
-      })
-      .catch((error) => {
-        console.warn('Failed to load WinFaceUnlock credential account.', error);
-      });
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+  const { accountProfile, isSubmitting, submitCredential } = useCredentialEnrollment();
 
   const handleCredentialSubmit = () => {
     if (pin.length === 0 || isSubmitting) {
@@ -43,34 +14,8 @@ export function AccountArea() {
     }
 
     const passwordSecret = pin;
-
-    if (!isControlRuntimeAvailable()) {
-      setPin('');
-      console.warn('WinFaceUnlock credential enrollment requires the Tauri runtime.');
-      return;
-    }
-
-    if (!accountProfile) {
-      console.warn('WinFaceUnlock credential account is not loaded yet.');
-      return;
-    }
-
     setPin('');
-    setIsSubmitting(true);
-    enrollWindowsCredential(passwordSecret, accountProfile)
-      .then((response) => {
-        if (response.operation_status !== 'completed') {
-          console.warn('WinFaceUnlock credential enrollment was not completed.', response);
-          return;
-        }
-        setAccountProfile(response.safe_details);
-      })
-      .catch((error) => {
-        console.warn('Failed to enroll WinFaceUnlock credential.', error);
-      })
-      .finally(() => {
-        setIsSubmitting(false);
-      });
+    submitCredential(passwordSecret);
   };
 
   return (

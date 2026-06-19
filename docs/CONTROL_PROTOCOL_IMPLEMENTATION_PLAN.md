@@ -376,6 +376,16 @@ enroll_windows_credential
 
 Add list/delete face template management through the runtime control protocol.
 
+The detailed face runtime rollout is tracked in:
+
+```text
+docs/FACE_RUNTIME_CONTROL_INTEGRATION_PLAN.md
+```
+
+For face work, that document defines the detailed F-phase sequence. This C5
+section only keeps the high-level dependency in the broader control protocol
+plan.
+
 ### Operations
 
 ```text
@@ -401,6 +411,13 @@ delete_face_template
 
 Add a structured enrollment flow after status, settings, and face management
 are stable.
+
+The enrollment contract, session states, cancellation requirement, and
+transitional diagnostics wrapper rules are defined in:
+
+```text
+docs/FACE_RUNTIME_CONTROL_INTEGRATION_PLAN.md
+```
 
 ### Operations
 

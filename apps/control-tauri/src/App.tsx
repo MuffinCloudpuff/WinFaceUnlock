@@ -1,7 +1,8 @@
-import { lazy, Suspense, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { TitleBar } from './components/TitleBar';
 import { NavPill, TabId } from './components/NavPill';
 import { ActionArea } from './components/ActionArea';
+import { FaceEnrollmentUiState, useFaceEnrollment } from './bindings/useFaceEnrollment';
 
 const AccountArea = lazy(() =>
   import('./components/AccountArea').then((module) => ({ default: module.AccountArea })),
@@ -9,9 +10,37 @@ const AccountArea = lazy(() =>
 const SettingsArea = lazy(() =>
   import('./components/SettingsArea').then((module) => ({ default: module.SettingsArea })),
 );
+const FACE_ENROLLMENT_SUCCESS_TRANSITION_MS = 2200;
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('home');
+  const faceEnrollment = useFaceEnrollment();
+  const { cancelAndResetEnrollment, resetEnrollment, uiState } = faceEnrollment;
+
+  useEffect(() => {
+    if (uiState !== 'completed') {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setActiveTab('account');
+      resetEnrollment();
+    }, FACE_ENROLLMENT_SUCCESS_TRANSITION_MS);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [resetEnrollment, uiState]);
+
+  const handleTabChange = useCallback(
+    (nextTab: TabId) => {
+      if (nextTab !== 'home' && shouldCancelFaceEnrollmentOnNavigation(uiState)) {
+        cancelAndResetEnrollment();
+      }
+      setActiveTab(nextTab);
+    },
+    [cancelAndResetEnrollment, uiState],
+  );
 
   return (
     <div className="relative flex h-screen w-full flex-col overflow-hidden bg-[#fafbfe] font-sans selection:bg-blue-200">
@@ -25,8 +54,8 @@ export default function App() {
       <TitleBar />
       
       <div className="relative z-10 flex min-h-0 flex-1 flex-col">
-        <NavPill activeTab={activeTab} onTabChange={setActiveTab} />
-        {activeTab === 'home' && <ActionArea />}
+        <NavPill activeTab={activeTab} onTabChange={handleTabChange} />
+        {activeTab === 'home' && <ActionArea enrollment={faceEnrollment} />}
         <Suspense fallback={null}>
           {activeTab === 'account' && <AccountArea />}
           {activeTab === 'settings' && <SettingsArea />}
@@ -36,4 +65,8 @@ export default function App() {
 
     </div>
   );
+}
+
+function shouldCancelFaceEnrollmentOnNavigation(uiState: FaceEnrollmentUiState): boolean {
+  return uiState === 'starting' || uiState === 'running' || uiState === 'finishing';
 }

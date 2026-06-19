@@ -9,5 +9,11 @@ build = "build.rs"
 [dependencies]
 opencv = { version = "0.98.2", default-features = false, features = ["clang-runtime", "videoio", "imgproc", "imgcodecs"] }
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }
+
 [lints]
 workspace = true

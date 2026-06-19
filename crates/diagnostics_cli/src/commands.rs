@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use common_protocol::{
     AccountType, AuthFailureReason, AuthGrant, AuthSource, CredentialRef, GrantId, Nonce,
     PIPE_NAME, ProtocolError, SERVICE_NAME, ServiceEvent, ServiceRequest, SessionId, UserId,
@@ -17,9 +18,9 @@ use face_auth::{
     GuidedFrameObservation, RecognitionTemplates, build_guided_enrollment_report,
 };
 use face_engine::{
-    FaceEngineError, FaceMatchDecision, FaceModelProvider, FaceTemplate, FaceTemplateCodecError,
-    FaceTemplateMatcher, FaceTemplateRef, FaceTemplateSet, OpenCvFaceModelConfig,
-    OpenCvFaceModelProvider,
+    FaceEngineError, FaceMatchDecision, FaceModelProvider, FaceSampleRejectReason, FaceTemplate,
+    FaceTemplateCodecError, FaceTemplateMatcher, FaceTemplateRef, FaceTemplateSet,
+    OpenCvFaceModelConfig, OpenCvFaceModelProvider,
 };
 use face_liveness::{MiniFasNetLivenessProviderConfig, ScreenReplayLivenessProviderConfig};
 use face_pose::{FacePoseProvider, LandmarkFacePoseProvider};
@@ -31,6 +32,7 @@ use ipc::{IpcClient, NamedPipeClient};
 use opencv::{
     core::{AlgorithmHint, Mat, MatTraitConst, Rect, Scalar, Vector},
     imgcodecs, imgproc,
+    prelude::VectorToVec,
 };
 use video_provider::{CameraId, OpenCvCameraProvider, OpenCvCameraProviderConfig, PixelFormat};
 use video_provider::{VideoError, VideoFrame, VideoFrameProvider};
@@ -73,6 +75,8 @@ const DEFAULT_SFACE_MODEL_PATH: &str = "models/face_recognition_sface_2021dec.on
 const DEFAULT_MINIFASNET_MODEL_PATH: &str = "models/minifasnet_v2.onnx";
 const DEFAULT_PROJECT_FACE_MATCH_THRESHOLD: f32 = 0.75;
 const DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD: f32 = 0.50;
+const ENROLLMENT_STATUS_FILE_NAME: &str = "enrollment_status.json";
+const PREVIEW_EVENT_PREFIX: &str = "WINFACEUNLOCK_PREVIEW_FRAME ";
 #[cfg(feature = "mediapipe-pose")]
 const DEFAULT_MEDIAPIPE_BRIDGE_DLL_PATH: &str = "native/winfaceunlock_mediapipe_bridge.dll";
 #[cfg(feature = "mediapipe-pose")]
@@ -551,8 +555,7 @@ fn run_enroll_camera(args: &[String]) -> Result<(), DiagnosticError> {
     let max_frames = optional_u32(args, "--max-frames")?.unwrap_or(30);
 
     let mut provider = build_camera_provider(args)?;
-    let sources = provider.list_sources()?;
-    let camera_id = selected_camera_id(args, &sources)?;
+    let camera_id = selected_camera_id_without_forced_scan(args, &provider)?;
     provider.open(&camera_id)?;
 
     let model_provider = build_loaded_model_provider(args)?;
@@ -591,7 +594,29 @@ fn run_guided_enroll(args: &[String]) -> Result<(), DiagnosticError> {
     let output_dir =
         PathBuf::from(argument_value(args, "--output-dir").unwrap_or("face-enrollment"));
     fs::create_dir_all(&output_dir).map_err(|_| DiagnosticError::IoFailed)?;
+    write_guided_enrollment_status(&output_dir, "starting", None, 0, None, None)?;
+    match run_guided_enroll_with_output_dir(args, &output_dir) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if guided_enrollment_status_is_still_starting(&output_dir) {
+                let _ = write_guided_enrollment_status(
+                    &output_dir,
+                    "failed",
+                    None,
+                    0,
+                    None,
+                    Some(guided_enrollment_startup_error_code(&error)),
+                );
+            }
+            Err(error)
+        }
+    }
+}
 
+fn run_guided_enroll_with_output_dir(
+    args: &[String],
+    output_dir: &Path,
+) -> Result<(), DiagnosticError> {
     let user_id = UserId(
         argument_value(args, "--user-id")
             .unwrap_or("dev-user")
@@ -605,7 +630,7 @@ fn run_guided_enroll(args: &[String]) -> Result<(), DiagnosticError> {
         optional_u32(args, "--max-wait-frames-per-step")?.unwrap_or(max_frames_per_step);
     let pose_ready_consecutive = optional_u32(args, "--pose-ready-consecutive")?.unwrap_or(3);
     let pose_ready_min_fit_score = optional_f32(args, "--pose-ready-min-fit")?.unwrap_or(0.25);
-    let frame_delay_ms = optional_u32(args, "--frame-delay-ms")?.unwrap_or(60);
+    let frame_delay_ms = optional_u32(args, "--frame-delay-ms")?.unwrap_or(0);
     let save_debug_images = args.iter().any(|arg| arg == "--save-debug-images");
     let allow_partial_enrollment = args.iter().any(|arg| arg == "--allow-partial-enrollment");
     let frame_match_threshold =
@@ -615,8 +640,7 @@ fn run_guided_enroll(args: &[String]) -> Result<(), DiagnosticError> {
         .unwrap_or_else(|| format!("guided-enrollment-{}", current_time_unix_ms()));
 
     let mut provider = build_camera_provider(args)?;
-    let sources = provider.list_sources()?;
-    let camera_id = selected_camera_id(args, &sources)?;
+    let camera_id = selected_camera_id_without_forced_scan(args, &provider)?;
     provider.open(&camera_id)?;
 
     let model_provider = build_loaded_model_provider(args)?;
@@ -634,6 +658,14 @@ fn run_guided_enroll(args: &[String]) -> Result<(), DiagnosticError> {
     let guided_steps = GuidedEnrollmentStep::supported_ordered_steps(pose_provider.capabilities());
     if guided_steps.is_empty() {
         provider.close();
+        write_guided_enrollment_status(
+            &output_dir,
+            "failed",
+            None,
+            0,
+            None,
+            Some("model_unavailable"),
+        )?;
         return Err(DiagnosticError::InvalidArgument);
     }
     let mut enrollment = GuidedFaceEnrollmentService::new(model_provider, pose_provider, config);
@@ -652,6 +684,14 @@ fn run_guided_enroll(args: &[String]) -> Result<(), DiagnosticError> {
     );
     let mut partial_enrollment_reasons = Vec::new();
     for (step_index, step) in guided_steps.iter().enumerate() {
+        write_guided_enrollment_status(
+            &output_dir,
+            "waiting_for_pose",
+            Some(*step),
+            0,
+            Some(pose_ready_consecutive),
+            None,
+        )?;
         println!(
             "[{}/{}] {}",
             step_index + 1,
@@ -665,8 +705,11 @@ fn run_guided_enroll(args: &[String]) -> Result<(), DiagnosticError> {
             && wait_attempted_frame_count < max_wait_frames_per_step
         {
             let frame = provider.read_frame()?;
+            emit_guided_enrollment_preview_frame(&enrollment_id, &frame, frame_index)?;
             let observation = enrollment.preview_frame_for_step(&frame, *step, frame_index)?;
-            if guided_observation_passes_pose_gate(&observation, pose_ready_min_fit_score) {
+            let last_frame_result =
+                frame_result_for_guided_observation(&observation, pose_ready_min_fit_score);
+            if guided_observation_passes_pose_ready_gate(&observation, pose_ready_min_fit_score) {
                 pose_ready_count = pose_ready_count.saturating_add(1);
                 println!(
                     "step={} waiting_for_pose=false pose_ready_count={}/{} quality_score={} pose_fit_score={} pose_estimate={:?}",
@@ -691,7 +734,14 @@ fn run_guided_enroll(args: &[String]) -> Result<(), DiagnosticError> {
                     );
                 }
             }
-
+            write_guided_enrollment_status(
+                &output_dir,
+                "waiting_for_pose",
+                Some(*step),
+                pose_ready_count,
+                Some(pose_ready_consecutive),
+                Some(last_frame_result),
+            )?;
             if save_debug_images {
                 save_guided_debug_images(
                     &mut enrollment,
@@ -714,12 +764,20 @@ fn run_guided_enroll(args: &[String]) -> Result<(), DiagnosticError> {
                 required_frame_count: pose_ready_consecutive,
                 attempted_frame_count: wait_attempted_frame_count,
             };
-            if allow_partial_enrollment {
+            if allow_partial_enrollment || guided_enrollment_step_is_optional(*step) {
                 println!("partial_enrollment_step_skipped: {incomplete_step}");
                 partial_enrollment_reasons.push(incomplete_step.to_string());
                 continue;
             }
             provider.close();
+            write_guided_enrollment_status(
+                &output_dir,
+                "failed",
+                Some(*step),
+                pose_ready_count,
+                Some(pose_ready_consecutive),
+                Some("pose_not_ready"),
+            )?;
             return Err(incomplete_step);
         }
 
@@ -727,6 +785,14 @@ fn run_guided_enroll(args: &[String]) -> Result<(), DiagnosticError> {
             "step={} pose_confirmed=true recording_started=true",
             step.label()
         );
+        write_guided_enrollment_status(
+            &output_dir,
+            "capturing",
+            Some(*step),
+            0,
+            Some(accepted_frames_per_step),
+            None,
+        )?;
 
         let mut accepted_frame_count = 0_u32;
         let mut attempted_frame_count = 0_u32;
@@ -734,6 +800,7 @@ fn run_guided_enroll(args: &[String]) -> Result<(), DiagnosticError> {
             && attempted_frame_count < max_frames_per_step
         {
             let frame = provider.read_frame()?;
+            emit_guided_enrollment_preview_frame(&enrollment_id, &frame, frame_index)?;
             let observation = enrollment.observe_frame(
                 &frame,
                 &user_id,
@@ -741,7 +808,9 @@ fn run_guided_enroll(args: &[String]) -> Result<(), DiagnosticError> {
                 frame_index,
                 current_time_unix_ms(),
             )?;
-            if guided_observation_passes_pose_gate(&observation, pose_ready_min_fit_score) {
+            let last_frame_result =
+                frame_result_for_guided_observation(&observation, pose_ready_min_fit_score);
+            if guided_observation_passes_sample_gate(&observation, pose_ready_min_fit_score) {
                 accepted_frame_count = accepted_frame_count.saturating_add(1);
                 println!(
                     "step={} recording_frame_count={}/{} quality_score={} pose_fit_score={} pose_estimate={:?}",
@@ -764,6 +833,14 @@ fn run_guided_enroll(args: &[String]) -> Result<(), DiagnosticError> {
                     observation.pose_estimate
                 );
             }
+            write_guided_enrollment_status(
+                &output_dir,
+                "capturing",
+                Some(*step),
+                accepted_frame_count,
+                Some(accepted_frames_per_step),
+                Some(last_frame_result),
+            )?;
             if save_debug_images {
                 save_guided_debug_images(
                     &mut enrollment,
@@ -786,17 +863,26 @@ fn run_guided_enroll(args: &[String]) -> Result<(), DiagnosticError> {
                 required_frame_count: accepted_frames_per_step,
                 attempted_frame_count,
             };
-            if allow_partial_enrollment {
+            if allow_partial_enrollment || guided_enrollment_step_is_optional(*step) {
                 println!("partial_enrollment_step_incomplete: {incomplete_step}");
                 partial_enrollment_reasons.push(incomplete_step.to_string());
                 continue;
             }
             provider.close();
+            write_guided_enrollment_status(
+                &output_dir,
+                "failed",
+                Some(*step),
+                accepted_frame_count,
+                Some(accepted_frames_per_step),
+                Some("quality_rejected"),
+            )?;
             return Err(incomplete_step);
         }
     }
 
     provider.close();
+    write_guided_enrollment_status(&output_dir, "finishing", None, 0, None, None)?;
     let template_set = enrollment.finish(
         user_id.clone(),
         enrollment_id,
@@ -848,6 +934,36 @@ fn run_guided_enroll(args: &[String]) -> Result<(), DiagnosticError> {
         );
     }
     Ok(())
+}
+
+fn guided_enrollment_startup_error_code(error: &DiagnosticError) -> &'static str {
+    match error {
+        DiagnosticError::Video(VideoError::CameraNotFound) => "camera_not_found",
+        DiagnosticError::Video(VideoError::OpenFailed) => "camera_open_failed",
+        DiagnosticError::Video(VideoError::CameraAlreadyOpen) => "camera_already_open",
+        DiagnosticError::Video(VideoError::CameraNotOpen) => "camera_not_open",
+        DiagnosticError::Video(VideoError::ReadFailed) => "camera_read_failed",
+        DiagnosticError::Video(VideoError::EmptyFrame) => "camera_empty_frame",
+        DiagnosticError::Video(VideoError::UnsupportedFormat) => "camera_unsupported_format",
+        DiagnosticError::Face(FaceEngineError::ModelPathMissing) => "model_path_missing",
+        DiagnosticError::Face(FaceEngineError::ModelLoadFailed) => "model_load_failed",
+        _ => "guided_enrollment_failed",
+    }
+}
+
+fn guided_enrollment_status_is_still_starting(output_dir: &Path) -> bool {
+    let status_path = output_dir.join(ENROLLMENT_STATUS_FILE_NAME);
+    let Ok(status_bytes) = fs::read(status_path) else {
+        return true;
+    };
+    let Ok(status) = serde_json::from_slice::<serde_json::Value>(&status_bytes) else {
+        return true;
+    };
+    status
+        .get("session_state")
+        .and_then(serde_json::Value::as_str)
+        .map(|session_state| session_state == "starting")
+        .unwrap_or(true)
 }
 
 fn run_enrollment_report(args: &[String]) -> Result<(), DiagnosticError> {
@@ -1110,7 +1226,149 @@ fn save_guided_debug_images(
     Ok(())
 }
 
-fn guided_observation_passes_pose_gate(
+fn write_guided_enrollment_status(
+    output_dir: &Path,
+    session_state: &str,
+    step: Option<GuidedEnrollmentStep>,
+    accepted_sample_count: u32,
+    required_sample_count: Option<u32>,
+    last_frame_result: Option<&str>,
+) -> Result<(), DiagnosticError> {
+    let current_step = step.map(GuidedEnrollmentStep::label);
+    let current_instruction_code = step.map(instruction_code_for_guided_step);
+    let status_path = output_dir.join(ENROLLMENT_STATUS_FILE_NAME);
+    let status = serde_json::json!({
+        "session_state": session_state,
+        "current_step": current_step,
+        "current_instruction_code": current_instruction_code,
+        "accepted_sample_count": accepted_sample_count,
+        "required_sample_count": required_sample_count,
+        "last_frame_result": last_frame_result,
+    });
+    fs::write(
+        status_path,
+        serde_json::to_vec_pretty(&status).map_err(|_| DiagnosticError::IoFailed)?,
+    )
+    .map_err(|_| DiagnosticError::IoFailed)
+}
+
+fn emit_guided_enrollment_preview_frame(
+    enrollment_id: &str,
+    frame: &video_provider::VideoFrame,
+    frame_index: u32,
+) -> Result<(), DiagnosticError> {
+    let image_base64 = encode_preview_frame_base64(frame)?;
+    let event = serde_json::json!({
+        "enrollment_session_id": enrollment_id,
+        "frame_seq": frame_index,
+        "updated_at_unix_ms": current_time_unix_ms(),
+        "mime_type": "image/jpeg",
+        "image_base64": image_base64,
+    });
+    println!(
+        "{PREVIEW_EVENT_PREFIX}{}",
+        serde_json::to_string(&event).map_err(|_| DiagnosticError::IoFailed)?
+    );
+    Ok(())
+}
+
+fn encode_preview_frame_base64(
+    frame: &video_provider::VideoFrame,
+) -> Result<String, DiagnosticError> {
+    let channels = match frame.format {
+        PixelFormat::Bgr8 | PixelFormat::Rgb8 => 3,
+        PixelFormat::Gray8 => 1,
+    };
+    let mat = Mat::from_slice(&frame.data).map_err(|_| DiagnosticError::IoFailed)?;
+    let mat = mat
+        .reshape(channels, frame.height as i32)
+        .map_err(|_| DiagnosticError::IoFailed)?;
+    let mut image = mat.try_clone().map_err(|_| DiagnosticError::IoFailed)?;
+    if frame.format == PixelFormat::Rgb8 {
+        let mut bgr = Mat::default();
+        imgproc::cvt_color(
+            &image,
+            &mut bgr,
+            imgproc::COLOR_RGB2BGR,
+            0,
+            AlgorithmHint::ALGO_HINT_DEFAULT,
+        )
+        .map_err(|_| DiagnosticError::IoFailed)?;
+        image = bgr;
+    }
+
+    let target_width = 480;
+    if image.cols() > target_width {
+        let target_height = (image.rows() * target_width / image.cols()).max(1);
+        let mut resized = Mat::default();
+        imgproc::resize(
+            &image,
+            &mut resized,
+            opencv::core::Size::new(target_width, target_height),
+            0.0,
+            0.0,
+            imgproc::INTER_AREA,
+        )
+        .map_err(|_| DiagnosticError::IoFailed)?;
+        image = resized;
+    }
+
+    let mut encoded = Vector::<u8>::new();
+    let params = Vector::from_slice(&[imgcodecs::IMWRITE_JPEG_QUALITY, 70]);
+    imgcodecs::imencode(".jpg", &image, &mut encoded, &params)
+        .map_err(|_| DiagnosticError::IoFailed)?
+        .then_some(())
+        .ok_or(DiagnosticError::IoFailed)?;
+    Ok(BASE64_STANDARD.encode(encoded.to_vec()))
+}
+
+fn instruction_code_for_guided_step(step: GuidedEnrollmentStep) -> &'static str {
+    match step {
+        GuidedEnrollmentStep::FrontalPrimary => "look_at_camera",
+        GuidedEnrollmentStep::YawLeftMild => "turn_head_left",
+        GuidedEnrollmentStep::YawRightMild => "turn_head_right",
+        GuidedEnrollmentStep::PitchDownMild => "tilt_head_down",
+        GuidedEnrollmentStep::PitchUpMild => "tilt_head_up",
+        GuidedEnrollmentStep::BlinkMotion => "blink_once",
+    }
+}
+
+fn guided_enrollment_step_is_optional(step: GuidedEnrollmentStep) -> bool {
+    matches!(
+        step,
+        GuidedEnrollmentStep::PitchDownMild | GuidedEnrollmentStep::PitchUpMild
+    )
+}
+
+fn frame_result_for_guided_observation(
+    observation: &GuidedFrameObservation,
+    min_pose_fit_score: f32,
+) -> &'static str {
+    if guided_observation_passes_pose_ready_gate(observation, min_pose_fit_score) {
+        return "face_accepted";
+    }
+
+    match observation.reject_reason {
+        Some(FaceSampleRejectReason::NoFaceDetected) => "no_face_detected",
+        Some(FaceSampleRejectReason::MultipleFacesDetected) => "multiple_faces_detected",
+        Some(FaceSampleRejectReason::PoseOutOfExpectedRange) => "pose_not_ready",
+        Some(_) => "quality_rejected",
+        None => "pose_not_ready",
+    }
+}
+
+fn guided_observation_passes_pose_ready_gate(
+    observation: &GuidedFrameObservation,
+    pose_ready_min_fit_score: f32,
+) -> bool {
+    matches!(
+        observation.reject_reason,
+        None | Some(FaceSampleRejectReason::BlurTooHigh)
+            | Some(FaceSampleRejectReason::UnderExposed)
+    ) && observation.pose_fit_score >= pose_ready_min_fit_score
+}
+
+fn guided_observation_passes_sample_gate(
     observation: &GuidedFrameObservation,
     pose_ready_min_fit_score: f32,
 ) -> bool {
@@ -2141,6 +2399,18 @@ fn selected_camera_id(
         .ok_or(DiagnosticError::Video(VideoError::CameraNotFound))
 }
 
+fn selected_camera_id_without_forced_scan(
+    args: &[String],
+    provider: &dyn video_provider::VideoFrameProvider,
+) -> Result<CameraId, DiagnosticError> {
+    if let Some(camera_id) = argument_value(args, "--camera-id") {
+        return Ok(CameraId(camera_id.to_owned()));
+    }
+
+    let sources = provider.list_sources()?;
+    selected_camera_id(args, &sources)
+}
+
 fn build_camera_provider(args: &[String]) -> Result<OpenCvCameraProvider, DiagnosticError> {
     Ok(OpenCvCameraProvider::new(OpenCvCameraProviderConfig {
         max_camera_index: 8,
@@ -2511,6 +2781,25 @@ mod tests {
                 max_ms: 30.0,
             }
         );
+    }
+
+    #[test]
+    fn guided_enrollment_pitch_steps_are_optional() {
+        assert!(!guided_enrollment_step_is_optional(
+            GuidedEnrollmentStep::FrontalPrimary
+        ));
+        assert!(!guided_enrollment_step_is_optional(
+            GuidedEnrollmentStep::YawLeftMild
+        ));
+        assert!(!guided_enrollment_step_is_optional(
+            GuidedEnrollmentStep::YawRightMild
+        ));
+        assert!(guided_enrollment_step_is_optional(
+            GuidedEnrollmentStep::PitchDownMild
+        ));
+        assert!(guided_enrollment_step_is_optional(
+            GuidedEnrollmentStep::PitchUpMild
+        ));
     }
 
     #[test]

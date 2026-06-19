@@ -33,8 +33,8 @@ pub fn score_face_sample(
     embedding_consistency_score: Option<f32>,
 ) -> FaceTemplateQualityScores {
     let face_size_score = score_face_size(frame, face);
-    let blur_score = score_blur(frame);
-    let illumination_score = score_illumination(frame);
+    let blur_score = score_face_region_blur(frame, face);
+    let illumination_score = score_face_region_illumination(frame, face);
     let alignment_score = score_alignment(face);
     let pose_fit_score = pose_fit_score(step.pose_target(), pose_estimate);
     let embedding_component = embedding_consistency_score.unwrap_or(1.0).clamp(0.0, 1.0);
@@ -109,8 +109,22 @@ fn score_blur(frame: &VideoFrame) -> f32 {
     }
 
     let gray = grayscale_values(frame);
-    let width = frame.width as usize;
-    let height = frame.height as usize;
+    score_blur_values(&gray, frame.width as usize, frame.height as usize)
+}
+
+fn score_face_region_blur(frame: &VideoFrame, face: &DetectedFace) -> f32 {
+    let Some(region) = face_region(frame, face, 0.20) else {
+        return score_blur(frame);
+    };
+    let gray = grayscale_values(frame);
+    score_blur_region(&gray, frame.width as usize, region).unwrap_or_else(|| score_blur(frame))
+}
+
+fn score_blur_values(gray: &[f32], width: usize, height: usize) -> f32 {
+    if width < 3 || height < 3 || gray.len() < width.saturating_mul(height) {
+        return 0.0;
+    }
+
     let mut laplacian_values = Vec::with_capacity((width - 2) * (height - 2));
 
     for y in 1..(height - 1) {
@@ -126,6 +140,27 @@ fn score_blur(frame: &VideoFrame) -> f32 {
 
     let variance = variance(&laplacian_values);
     (variance / 350.0).clamp(0.0, 1.0)
+}
+
+fn score_blur_region(gray: &[f32], frame_width: usize, region: FaceRegion) -> Option<f32> {
+    if region.width() < 3 || region.height() < 3 || gray.len() < frame_width * region.y_end {
+        return None;
+    }
+
+    let mut laplacian_values = Vec::with_capacity((region.width() - 2) * (region.height() - 2));
+    for y in (region.y_start + 1)..(region.y_end - 1) {
+        for x in (region.x_start + 1)..(region.x_end - 1) {
+            let center = gray[y * frame_width + x] * 4.0;
+            let neighbors = gray[(y - 1) * frame_width + x]
+                + gray[(y + 1) * frame_width + x]
+                + gray[y * frame_width + x - 1]
+                + gray[y * frame_width + x + 1];
+            laplacian_values.push(center - neighbors);
+        }
+    }
+
+    let variance = variance(&laplacian_values);
+    Some((variance / 350.0).clamp(0.0, 1.0))
 }
 
 fn score_illumination(frame: &VideoFrame) -> f32 {
@@ -145,6 +180,37 @@ fn score_illumination(frame: &VideoFrame) -> f32 {
     (mean_score * 0.65 + saturation_score * 0.35).clamp(0.0, 1.0)
 }
 
+fn score_face_region_illumination(frame: &VideoFrame, face: &DetectedFace) -> f32 {
+    let Some(region) = face_region(frame, face, 0.20) else {
+        return score_illumination(frame);
+    };
+    let gray = grayscale_values(frame);
+    let mut region_values = Vec::with_capacity(region.width() * region.height());
+    for y in region.y_start..region.y_end {
+        let row = y * frame.width as usize;
+        for x in region.x_start..region.x_end {
+            region_values.push(gray[row + x]);
+        }
+    }
+    score_illumination_values(&region_values).unwrap_or_else(|| score_illumination(frame))
+}
+
+fn score_illumination_values(gray: &[f32]) -> Option<f32> {
+    if gray.is_empty() {
+        return None;
+    }
+
+    let mean = gray.iter().sum::<f32>() / gray.len() as f32;
+    let mean_score = 1.0 - ((mean - 128.0).abs() / 128.0).clamp(0.0, 1.0);
+    let saturated_count = gray
+        .iter()
+        .filter(|value| **value < 8.0 || **value > 247.0)
+        .count();
+    let saturated_ratio = saturated_count as f32 / gray.len() as f32;
+    let saturation_score = 1.0 - (saturated_ratio / 0.25).clamp(0.0, 1.0);
+    Some((mean_score * 0.65 + saturation_score * 0.35).clamp(0.0, 1.0))
+}
+
 fn score_alignment(face: &DetectedFace) -> f32 {
     if face.landmarks.len() < 5 {
         return 0.0;
@@ -153,6 +219,52 @@ fn score_alignment(face: &DetectedFace) -> f32 {
         return 0.2;
     }
     face.confidence.clamp(0.0, 1.0)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FaceRegion {
+    x_start: usize,
+    y_start: usize,
+    x_end: usize,
+    y_end: usize,
+}
+
+impl FaceRegion {
+    fn width(self) -> usize {
+        self.x_end.saturating_sub(self.x_start)
+    }
+
+    fn height(self) -> usize {
+        self.y_end.saturating_sub(self.y_start)
+    }
+}
+
+fn face_region(frame: &VideoFrame, face: &DetectedFace, padding_ratio: f32) -> Option<FaceRegion> {
+    if frame.width == 0 || frame.height == 0 {
+        return None;
+    }
+
+    let padding_x = face.bounds.width.max(0.0) * padding_ratio;
+    let padding_y = face.bounds.height.max(0.0) * padding_ratio;
+    let x_start = (face.bounds.x - padding_x).floor().max(0.0) as usize;
+    let y_start = (face.bounds.y - padding_y).floor().max(0.0) as usize;
+    let x_end = (face.bounds.x + face.bounds.width + padding_x)
+        .ceil()
+        .min(frame.width as f32) as usize;
+    let y_end = (face.bounds.y + face.bounds.height + padding_y)
+        .ceil()
+        .min(frame.height as f32) as usize;
+
+    if x_end <= x_start || y_end <= y_start {
+        return None;
+    }
+
+    Some(FaceRegion {
+        x_start,
+        y_start,
+        x_end,
+        y_end,
+    })
 }
 
 fn grayscale_values(frame: &VideoFrame) -> Vec<f32> {

@@ -1,9 +1,13 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use common_protocol::{ProtocolError, ServiceEvent, ServiceRequest, UserId};
+use control_status::{FaceTemplateStatusError, WindowsFaceTemplateStatusStore};
 use ipc::{
-    IpcClient, IpcServer, NamedPipeClient, NamedPipeServer, PipeSecurity, ServiceRequestHandler,
-    SystemUnixTimeMillisClock,
+    FaceTemplateConfigApplier, IpcClient, IpcServer, NamedPipeClient, NamedPipeServer,
+    PipeSecurity, ServiceRequestHandler, SystemUnixTimeMillisClock,
 };
 
 use crate::{
@@ -77,8 +81,29 @@ pub(crate) type DevelopmentCredentialResolver =
 pub(crate) type DevelopmentServiceRequestHandler = ServiceRequestHandler<
     DevelopmentAuthGrantIssuer,
     DevelopmentCredentialResolver,
+    ServiceFaceTemplateConfigApplier,
     SystemUnixTimeMillisClock,
 >;
+
+pub struct ServiceFaceTemplateConfigApplier {
+    store: WindowsFaceTemplateStatusStore,
+}
+
+impl ServiceFaceTemplateConfigApplier {
+    fn from_environment_or_default() -> Self {
+        Self {
+            store: WindowsFaceTemplateStatusStore::from_environment_or_default(),
+        }
+    }
+}
+
+impl FaceTemplateConfigApplier for ServiceFaceTemplateConfigApplier {
+    fn apply_face_template(&mut self, template_path: &Path) -> Result<(), ProtocolError> {
+        self.store
+            .apply_active_face_template_path(template_path)
+            .map_err(face_template_status_error_to_protocol_error)
+    }
+}
 
 pub fn build_development_handler() -> Result<DevelopmentServiceRequestHandler, ProtocolError> {
     build_development_handler_with_paths(&ServiceCredentialStorePaths::from_environment_or_default())
@@ -96,8 +121,20 @@ pub(crate) fn build_development_handler_with_paths(
     Ok(ServiceRequestHandler::new(
         DevelopmentAuthGrantIssuer::from_environment(dev_user_id)?,
         StoreProtectedCredentialResolver::with_master_key(credential_store, master_key),
+        ServiceFaceTemplateConfigApplier::from_environment_or_default(),
         SystemUnixTimeMillisClock,
     ))
+}
+
+fn face_template_status_error_to_protocol_error(error: FaceTemplateStatusError) -> ProtocolError {
+    match error {
+        FaceTemplateStatusError::PermissionDenied(_) => ProtocolError::Unauthorized,
+        FaceTemplateStatusError::TemplateConfigMissing(_)
+        | FaceTemplateStatusError::TemplateFileMissing(_)
+        | FaceTemplateStatusError::TemplateParseFailed(_)
+        | FaceTemplateStatusError::TemplateEmpty(_)
+        | FaceTemplateStatusError::ServiceConfigUnavailable(_) => ProtocolError::InvalidMessage,
+    }
 }
 
 #[cfg(test)]
@@ -232,6 +269,7 @@ mod tests {
         handler: &mut ServiceRequestHandler<
             DevelopmentAuthGrantIssuer,
             DevelopmentCredentialResolver,
+            ServiceFaceTemplateConfigApplier,
             SystemUnixTimeMillisClock,
         >,
         request_limit: usize,

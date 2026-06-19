@@ -10,6 +10,7 @@ default = []
 mediapipe-pose = ["dep:face_pose_mediapipe", "face_pose_mediapipe/native-bridge"]
 
 [dependencies]
+base64 = "0.22.1"
 common_protocol = { path = "../common_protocol" }
 face_auth = { path = "../face_auth", features = ["enrollment"] }
 face_engine = { path = "../face_engine" }
