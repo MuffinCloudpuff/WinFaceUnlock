@@ -6,6 +6,10 @@ use opencv::{
     imgproc,
     prelude::MatTraitConstManual,
 };
+use ort::{
+    session::{Session, builder::GraphOptimizationLevel},
+    value::{Shape, Tensor},
+};
 use video_provider::{PixelFormat, VideoFrame};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -28,6 +32,37 @@ pub struct OpenCvDnnPersonDetectorConfig {
     pub swap_rb: bool,
     pub person_class_id: i32,
     pub nms_threshold: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OrtYoloV8PersonDetectorConfig {
+    pub model_path: PathBuf,
+    pub confidence_threshold: f32,
+    pub input_width: usize,
+    pub input_height: usize,
+    pub person_class_id: i32,
+    pub nms_threshold: f32,
+    pub intra_threads: usize,
+}
+
+impl OrtYoloV8PersonDetectorConfig {
+    pub fn new(model_path: PathBuf) -> Self {
+        Self {
+            model_path,
+            confidence_threshold: 0.50,
+            input_width: 640,
+            input_height: 640,
+            person_class_id: 0,
+            nms_threshold: 0.45,
+            intra_threads: 1,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PersonDetectorConfig {
+    OpenCvDnn(OpenCvDnnPersonDetectorConfig),
+    OrtYoloV8(OrtYoloV8PersonDetectorConfig),
 }
 
 impl OpenCvDnnPersonDetectorConfig {
@@ -112,9 +147,73 @@ pub trait PresenceDetector {
     ) -> Result<Vec<PersonDetection>, PresencePersonDetectorError>;
 }
 
+pub enum PersonDetector {
+    OpenCvDnn(OpenCvDnnPersonDetector),
+    OrtYoloV8(OrtYoloV8PersonDetector),
+}
+
+impl PersonDetector {
+    pub fn new(config: PersonDetectorConfig) -> Self {
+        match config {
+            PersonDetectorConfig::OpenCvDnn(config) => {
+                Self::OpenCvDnn(OpenCvDnnPersonDetector::new(config))
+            }
+            PersonDetectorConfig::OrtYoloV8(config) => {
+                Self::OrtYoloV8(OrtYoloV8PersonDetector::new(config))
+            }
+        }
+    }
+}
+
+impl PresenceDetector for PersonDetector {
+    fn load_model(&mut self) -> Result<(), PresencePersonDetectorError> {
+        match self {
+            Self::OpenCvDnn(detector) => detector.load_model(),
+            Self::OrtYoloV8(detector) => detector.load_model(),
+        }
+    }
+
+    fn unload_model(&mut self) {
+        match self {
+            Self::OpenCvDnn(detector) => detector.unload_model(),
+            Self::OrtYoloV8(detector) => detector.unload_model(),
+        }
+    }
+
+    fn detect_persons(
+        &mut self,
+        frame: &VideoFrame,
+    ) -> Result<Vec<PersonDetection>, PresencePersonDetectorError> {
+        match self {
+            Self::OpenCvDnn(detector) => detector.detect_persons(frame),
+            Self::OrtYoloV8(detector) => detector.detect_persons(frame),
+        }
+    }
+}
+
 pub struct OpenCvDnnPersonDetector {
     config: OpenCvDnnPersonDetectorConfig,
     net: Option<Net>,
+}
+
+pub struct OrtYoloV8PersonDetector {
+    config: OrtYoloV8PersonDetectorConfig,
+    session: Option<Session>,
+}
+
+impl OrtYoloV8PersonDetector {
+    pub fn new(config: OrtYoloV8PersonDetectorConfig) -> Self {
+        Self {
+            config,
+            session: None,
+        }
+    }
+
+    fn session_mut(&mut self) -> Result<&mut Session, PresencePersonDetectorError> {
+        self.session
+            .as_mut()
+            .ok_or(PresencePersonDetectorError::ModelNotLoaded)
+    }
 }
 
 impl OpenCvDnnPersonDetector {
@@ -217,6 +316,78 @@ impl PresenceDetector for OpenCvDnnPersonDetector {
                 self.config.nms_threshold,
             ),
         }
+    }
+}
+
+impl PresenceDetector for OrtYoloV8PersonDetector {
+    fn load_model(&mut self) -> Result<(), PresencePersonDetectorError> {
+        if !self.config.model_path.exists() {
+            return Err(PresencePersonDetectorError::ModelPathMissing);
+        }
+        let mut builder =
+            Session::builder().map_err(|_| PresencePersonDetectorError::ModelLoadFailed)?;
+        builder = builder
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|_| PresencePersonDetectorError::ModelLoadFailed)?;
+        builder = builder
+            .with_intra_threads(self.config.intra_threads.max(1))
+            .map_err(|_| PresencePersonDetectorError::ModelLoadFailed)?;
+        let session = builder
+            .commit_from_file(&self.config.model_path)
+            .map_err(|_| PresencePersonDetectorError::ModelLoadFailed)?;
+        self.session = Some(session);
+        Ok(())
+    }
+
+    fn unload_model(&mut self) {
+        self.session = None;
+    }
+
+    fn detect_persons(
+        &mut self,
+        frame: &VideoFrame,
+    ) -> Result<Vec<PersonDetection>, PresencePersonDetectorError> {
+        frame
+            .validate()
+            .map_err(|_| PresencePersonDetectorError::InvalidFrame)?;
+        let input_width = self.config.input_width;
+        let input_height = self.config.input_height;
+        let person_class_id = self.config.person_class_id;
+        let confidence_threshold = self.config.confidence_threshold;
+        let nms_threshold = self.config.nms_threshold;
+        let input = yolo_frame_to_nchw_input(frame, input_width, input_height)?;
+        let input_tensor = Tensor::<f32>::from_array((
+            Shape::new([1, 3, input_height as i64, input_width as i64]),
+            input.into_boxed_slice(),
+        ))
+        .map_err(|_| PresencePersonDetectorError::InferenceFailed)?;
+        let outputs = self
+            .session_mut()?
+            .run(ort::inputs![input_tensor])
+            .map_err(|_| PresencePersonDetectorError::InferenceFailed)?;
+        if outputs.len() == 0 {
+            return Err(PresencePersonDetectorError::UnsupportedOutputShape);
+        }
+        let output = &outputs[0];
+        let (shape, values) = output
+            .try_extract_tensor::<f32>()
+            .map_err(|_| PresencePersonDetectorError::UnsupportedOutputShape)?;
+        parse_yolov8_person_values(
+            values,
+            &shape
+                .iter()
+                .map(|dimension| *dimension as i32)
+                .collect::<Vec<_>>(),
+            YoloFrameGeometry {
+                frame_width: frame.width,
+                frame_height: frame.height,
+                input_width: input_width as i32,
+                input_height: input_height as i32,
+            },
+            person_class_id,
+            confidence_threshold,
+            nms_threshold,
+        )
     }
 }
 
@@ -350,6 +521,24 @@ fn parse_yolov8_person_detections(
         .data_typed::<f32>()
         .map_err(|_| PresencePersonDetectorError::InferenceFailed)?;
     let shape = mat_shape(output)?;
+    parse_yolov8_person_values(
+        values,
+        &shape,
+        geometry,
+        person_class_id,
+        confidence_threshold,
+        nms_threshold,
+    )
+}
+
+fn parse_yolov8_person_values(
+    values: &[f32],
+    shape: &[i32],
+    geometry: YoloFrameGeometry,
+    person_class_id: i32,
+    confidence_threshold: f32,
+    nms_threshold: f32,
+) -> Result<Vec<PersonDetection>, PresencePersonDetectorError> {
     let layout = YoloOutputLayout::from_shape(&shape)?;
     let candidates = match layout {
         YoloOutputLayout::AttributesByAnchor {
@@ -380,6 +569,40 @@ fn parse_yolov8_person_detections(
         candidates,
         nms_threshold,
     ))
+}
+
+fn yolo_frame_to_nchw_input(
+    frame: &VideoFrame,
+    input_width: usize,
+    input_height: usize,
+) -> Result<Vec<f32>, PresencePersonDetectorError> {
+    let image = video_frame_to_mat(frame)?;
+    let mut resized = Mat::default();
+    imgproc::resize(
+        &image,
+        &mut resized,
+        Size::new(input_width as i32, input_height as i32),
+        0.0,
+        0.0,
+        imgproc::INTER_LINEAR,
+    )
+    .map_err(|_| PresencePersonDetectorError::InvalidFrame)?;
+    let bytes = resized
+        .data_typed::<u8>()
+        .map_err(|_| PresencePersonDetectorError::InvalidFrame)?;
+    let pixel_count = input_width * input_height;
+    if bytes.len() < pixel_count * 3 {
+        return Err(PresencePersonDetectorError::InvalidFrame);
+    }
+
+    let mut input = vec![0.0_f32; pixel_count * 3];
+    for pixel_index in 0..pixel_count {
+        let bgr_index = pixel_index * 3;
+        input[pixel_index] = bytes[bgr_index + 2] as f32 / 255.0;
+        input[pixel_count + pixel_index] = bytes[bgr_index + 1] as f32 / 255.0;
+        input[2 * pixel_count + pixel_index] = bytes[bgr_index] as f32 / 255.0;
+    }
+    Ok(input)
 }
 
 fn mat_shape(mat: &Mat) -> Result<Vec<i32>, PresencePersonDetectorError> {

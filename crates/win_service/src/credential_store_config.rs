@@ -85,6 +85,31 @@ pub fn enroll_windows_credential(
     save_enrollment(&mut store, &master_key, enrollment)
 }
 
+pub fn is_credential_secret_configured(
+    paths: &ServiceCredentialStorePaths,
+    user_id: &UserId,
+    credential_ref: &CredentialRef,
+) -> Result<bool, ProtocolError> {
+    if !paths.master_key_path.is_file() || !paths.database_path.is_file() {
+        return Ok(false);
+    }
+
+    let ServiceCredentialStoreContext { store, .. } = open_service_credential_store(paths)?;
+    let configured = match (
+        store.get_user(user_id),
+        store.load_encrypted_credential_blob(credential_ref),
+    ) {
+        (Ok(user), Ok(_)) if user.credential_ref == *credential_ref => true,
+        (Err(CredentialStoreError::UserNotFound), _)
+        | (_, Err(CredentialStoreError::CredentialNotFound))
+        | (Ok(_), Ok(_)) => false,
+        (Err(error), _) | (_, Err(error)) => {
+            return Err(credential_store_error_to_protocol_error(error));
+        }
+    };
+    Ok(configured)
+}
+
 pub fn ensure_development_credential_if_missing(
     store: &mut ServiceCredentialStore,
     master_key: &MasterKey,
@@ -235,6 +260,48 @@ mod tests {
 
         assert_eq!(user.username, "Leo16");
         assert_eq!(user.credential_ref, CredentialRef("real-cred".to_owned()));
+        Ok(())
+    }
+
+    #[test]
+    fn credential_secret_configured_state_tracks_user_and_blob() -> Result<(), ProtocolError> {
+        let root = std::env::temp_dir().join(format!(
+            "winfaceunlock-store-state-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let paths = ServiceCredentialStorePaths::from_store_dir(root.clone());
+        let user_id = UserId("dev-user".to_owned());
+        let credential_ref = CredentialRef("real-cred".to_owned());
+
+        assert!(!is_credential_secret_configured(
+            &paths,
+            &user_id,
+            &credential_ref
+        )?);
+
+        enroll_windows_credential(
+            &paths,
+            WindowsCredentialEnrollment {
+                user_id: user_id.clone(),
+                user_sid: "S-1-5-real".to_owned(),
+                username: "Leo16".to_owned(),
+                account_type: AccountType::Local,
+                credential_ref: credential_ref.clone(),
+                password: "secret".to_owned(),
+            },
+        )?;
+
+        assert!(is_credential_secret_configured(
+            &paths,
+            &user_id,
+            &credential_ref
+        )?);
+
+        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 }

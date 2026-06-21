@@ -317,6 +317,10 @@ pub struct InstallSystemComponentsPayload {
     pub presence_person_model_relative_path: PathBuf,
     #[serde(default = "default_presence_person_model_config_relative_path")]
     pub presence_person_model_config_relative_path: PathBuf,
+    #[serde(default = "default_presence_pose_bridge_relative_path")]
+    pub presence_pose_bridge_relative_path: PathBuf,
+    #[serde(default = "default_presence_pose_model_relative_path")]
+    pub presence_pose_model_relative_path: PathBuf,
     #[serde(default = "default_camera_id")]
     pub camera_id: String,
     pub match_threshold: Option<f32>,
@@ -340,6 +344,8 @@ impl Default for InstallSystemComponentsPayload {
             presence_person_model_relative_path: default_presence_person_model_relative_path(),
             presence_person_model_config_relative_path:
                 default_presence_person_model_config_relative_path(),
+            presence_pose_bridge_relative_path: default_presence_pose_bridge_relative_path(),
+            presence_pose_model_relative_path: default_presence_pose_model_relative_path(),
             camera_id: default_camera_id(),
             match_threshold: None,
             required_consecutive_match_count: None,
@@ -380,6 +386,10 @@ pub struct ConfigurePresenceLockPayload {
     pub person_debug_output_dir: Option<PathBuf>,
     #[serde(default)]
     pub clear_person_debug_output_dir: bool,
+    pub pose_bridge_relative_path: Option<PathBuf>,
+    pub pose_model_relative_path: Option<PathBuf>,
+    pub pose_min_landmark_visibility: Option<f32>,
+    pub pose_min_landmark_presence: Option<f32>,
 }
 
 impl Default for ProviderModePayload {
@@ -469,7 +479,7 @@ fn default_service_binary_relative_path() -> PathBuf {
 }
 
 fn default_provider_binary_relative_path() -> PathBuf {
-    PathBuf::from("windows_provider.dll")
+    PathBuf::from(r"provider\windows_provider.dll")
 }
 
 fn default_face_template_relative_path() -> PathBuf {
@@ -489,11 +499,19 @@ fn default_minifasnet_model_relative_path() -> PathBuf {
 }
 
 fn default_presence_person_model_relative_path() -> PathBuf {
-    PathBuf::from(r"models\MobileNetSSD_deploy.caffemodel")
+    PathBuf::from(r"models\yolov8n.onnx")
 }
 
 fn default_presence_person_model_config_relative_path() -> PathBuf {
-    PathBuf::from(r"models\MobileNetSSD_deploy.prototxt")
+    PathBuf::new()
+}
+
+fn default_presence_pose_bridge_relative_path() -> PathBuf {
+    PathBuf::from(r"native\winfaceunlock_mediapipe_bridge.dll")
+}
+
+fn default_presence_pose_model_relative_path() -> PathBuf {
+    PathBuf::from(r"models\pose_landmarker_lite.task")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -719,6 +737,10 @@ mod tests {
         assert_eq!(
             payload.service_binary_relative_path,
             PathBuf::from("win_service.exe")
+        );
+        assert_eq!(
+            payload.provider_binary_relative_path,
+            PathBuf::from(r"provider\windows_provider.dll")
         );
         assert_eq!(
             payload.yunet_model_relative_path,

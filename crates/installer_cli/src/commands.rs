@@ -328,6 +328,34 @@ fn run_command(command: InstallerCommand) -> Result<(), InstallerError> {
                     .as_deref()
                     .unwrap_or("<unset>")
             );
+            println!(
+                "presence_pose_bridge_dll_path: {}",
+                status
+                    .presence_pose_bridge_dll_path
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
+            println!(
+                "presence_pose_model_path: {}",
+                status
+                    .presence_pose_model_path
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
+            println!(
+                "presence_pose_min_landmark_visibility: {}",
+                status
+                    .presence_pose_min_landmark_visibility
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
+            println!(
+                "presence_pose_min_landmark_presence: {}",
+                status
+                    .presence_pose_min_landmark_presence
+                    .as_deref()
+                    .unwrap_or("<unset>")
+            );
         }
         InstallerCommand::InstallProvider {
             provider_binary_path,
@@ -615,6 +643,18 @@ fn parse_service_auth_config(args: &[String]) -> Result<ServiceAuthRegistryConfi
         config.presence_person_model_config_path =
             Some(PathBuf::from(presence_person_model_config_path));
     }
+    if let Some(path) = argument_value(args, "--presence-pose-bridge-dll") {
+        config.presence_pose_bridge_dll_path = PathBuf::from(path);
+    }
+    if let Some(path) = argument_value(args, "--presence-pose-model") {
+        config.presence_pose_model_path = PathBuf::from(path);
+    }
+    if let Some(value) = optional_f32(args, "--presence-pose-min-landmark-visibility")? {
+        config.presence_pose_min_landmark_visibility = value;
+    }
+    if let Some(value) = optional_f32(args, "--presence-pose-min-landmark-presence")? {
+        config.presence_pose_min_landmark_presence = value;
+    }
     if let Some(minifasnet_crop_scale) = optional_f32(args, "--minifasnet-crop-scale")? {
         config.minifasnet_crop_scale = minifasnet_crop_scale;
     }
@@ -701,6 +741,16 @@ fn parse_presence_registry_patch(
     if has_flag(args, "--clear-presence-person-debug-output-dir") {
         patch.presence_person_debug_output_dir = Some(None);
     }
+    if let Some(path) = argument_value(args, "--presence-pose-bridge-dll") {
+        patch.presence_pose_bridge_dll_path = Some(PathBuf::from(path));
+    }
+    if let Some(path) = argument_value(args, "--presence-pose-model") {
+        patch.presence_pose_model_path = Some(PathBuf::from(path));
+    }
+    patch.presence_pose_min_landmark_visibility =
+        optional_f32(args, "--presence-pose-min-landmark-visibility")?;
+    patch.presence_pose_min_landmark_presence =
+        optional_f32(args, "--presence-pose-min-landmark-presence")?;
 
     if !presence_registry_patch_has_changes(&patch) {
         return Err(InstallerError::InvalidArguments(
@@ -728,9 +778,9 @@ fn optional_f32(args: &[String], name: &str) -> Result<Option<f32>, InstallerErr
 
 fn validate_presence_detector_kind(value: &str) -> Result<(), InstallerError> {
     match value {
-        "face-owner-match" | "opencv-dnn-person" => Ok(()),
+        "face-owner-match" | "opencv-dnn-person" | "mediapipe-pose-lite" => Ok(()),
         _ => Err(InstallerError::InvalidArguments(
-            "--presence-detector-kind must be face-owner-match or opencv-dnn-person".to_owned(),
+            "--presence-detector-kind must be face-owner-match, opencv-dnn-person, or mediapipe-pose-lite".to_owned(),
         )),
     }
 }
@@ -746,9 +796,9 @@ fn validate_presence_tracking_mode(value: &str) -> Result<(), InstallerError> {
 
 fn validate_presence_person_detector_model(value: &str) -> Result<(), InstallerError> {
     match value {
-        "mobilenet-ssd" | "yolov8-onnx" => Ok(()),
+        "mobilenet-ssd" | "yolov8-onnx" | "ort-yolov8-onnx" => Ok(()),
         _ => Err(InstallerError::InvalidArguments(
-            "--presence-person-detector-model must be mobilenet-ssd or yolov8-onnx".to_owned(),
+            "--presence-person-detector-model must be mobilenet-ssd, yolov8-onnx, or ort-yolov8-onnx".to_owned(),
         )),
     }
 }
@@ -765,7 +815,7 @@ fn apply_presence_person_detector_model_defaults(
             config.presence_person_model_config_path =
                 Some(PathBuf::from(r"models\MobileNetSSD_deploy.prototxt"));
         }
-        "yolov8-onnx" => {
+        "yolov8-onnx" | "ort-yolov8-onnx" => {
             config.presence_person_model_path = PathBuf::from(r"models\yolov8n.onnx");
             config.presence_person_model_config_path = None;
         }
@@ -785,7 +835,7 @@ fn apply_presence_person_detector_model_patch_defaults(
             patch.presence_person_model_config_path =
                 Some(Some(PathBuf::from(r"models\MobileNetSSD_deploy.prototxt")));
         }
-        "yolov8-onnx" => {
+        "yolov8-onnx" | "ort-yolov8-onnx" => {
             patch.presence_person_model_path = Some(PathBuf::from(r"models\yolov8n.onnx"));
             patch.presence_person_model_config_path = Some(None);
         }
@@ -809,6 +859,10 @@ fn presence_registry_patch_has_changes(patch: &ServicePresenceRegistryPatch) -> 
         || patch.presence_person_model_path.is_some()
         || patch.presence_person_model_config_path.is_some()
         || patch.presence_person_debug_output_dir.is_some()
+        || patch.presence_pose_bridge_dll_path.is_some()
+        || patch.presence_pose_model_path.is_some()
+        || patch.presence_pose_min_landmark_visibility.is_some()
+        || patch.presence_pose_min_landmark_presence.is_some()
 }
 
 fn default_service_binary_path() -> Result<PathBuf, InstallerError> {
@@ -1041,6 +1095,19 @@ fn print_presence_registry_patch(label: &str, patch: &ServicePresenceRegistryPat
         "presence_person_debug_output_dir",
         &patch.presence_person_debug_output_dir,
     );
+    print_optional_path(
+        "presence_pose_bridge_dll_path",
+        &patch.presence_pose_bridge_dll_path,
+    );
+    print_optional_path("presence_pose_model_path", &patch.presence_pose_model_path);
+    print_optional_f32(
+        "presence_pose_min_landmark_visibility",
+        patch.presence_pose_min_landmark_visibility,
+    );
+    print_optional_f32(
+        "presence_pose_min_landmark_presence",
+        patch.presence_pose_min_landmark_presence,
+    );
 }
 
 fn print_optional_bool(name: &str, value: Option<bool>) {
@@ -1103,10 +1170,10 @@ fn print_usage() {
     println!("  installer_cli service-status");
     println!("  installer_cli repair-service [--service-binary <path>] [--dry-run]");
     println!(
-        "  installer_cli configure-service-auth --face-template <path> [--camera-id opencv-index:0] [--yunet-model <path>] [--sface-model <path>] [--minifasnet-model <path>] [--minifasnet-crop-scale 2.7] [--minifasnet-min-live-score 0.80] [--minifasnet-min-spoof-score 0.70] [--minifasnet-max-spoof-frame-ratio 0.40] [--match-threshold 0.75] [--enable-presence-lock|--disable-presence-lock] [--presence-owner-match-threshold 0.50] [--presence-detector-kind face-owner-match|opencv-dnn-person] [--presence-tracking-mode face-policy|continuous-low-fps] [--presence-detector-fps 2.0] [--presence-person-detector-model mobilenet-ssd|yolov8-onnx] [--presence-person-suspect-fps 5.0] [--presence-person-confidence-threshold 0.50] [--presence-absent-required-frames 6] [--presence-boundary-margin-ratio 0.12] [--presence-movement-delta-ratio 0.04] [--presence-person-model <path>] [--presence-person-model-config <path>] [--presence-unload-model-when-idle] [--dry-run]"
+        "  installer_cli configure-service-auth --face-template <path> [--camera-id opencv-index:0] [--yunet-model <path>] [--sface-model <path>] [--minifasnet-model <path>] [--minifasnet-crop-scale 2.7] [--minifasnet-min-live-score 0.80] [--minifasnet-min-spoof-score 0.70] [--minifasnet-max-spoof-frame-ratio 0.40] [--match-threshold 0.75] [--enable-presence-lock|--disable-presence-lock] [--presence-owner-match-threshold 0.50] [--presence-detector-kind face-owner-match|opencv-dnn-person|mediapipe-pose-lite] [--presence-tracking-mode face-policy|continuous-low-fps] [--presence-detector-fps 2.0] [--presence-person-detector-model mobilenet-ssd|yolov8-onnx|ort-yolov8-onnx] [--presence-person-suspect-fps 5.0] [--presence-person-confidence-threshold 0.50] [--presence-absent-required-frames 6] [--presence-boundary-margin-ratio 0.12] [--presence-movement-delta-ratio 0.04] [--presence-person-model <path>] [--presence-person-model-config <path>] [--presence-pose-bridge-dll <path>] [--presence-pose-model <path>] [--presence-pose-min-landmark-visibility 0.45] [--presence-pose-min-landmark-presence 0.45] [--presence-unload-model-when-idle] [--dry-run]"
     );
     println!(
-        "  installer_cli configure-presence-lock [--enable-presence-lock|--disable-presence-lock] [--presence-detector-kind face-owner-match|opencv-dnn-person] [--presence-tracking-mode face-policy|continuous-low-fps] [--presence-detector-fps 2.0] [--presence-person-detector-model mobilenet-ssd|yolov8-onnx] [--presence-person-suspect-fps 5.0] [--presence-person-confidence-threshold 0.50] [--presence-absent-required-frames 6] [--presence-boundary-margin-ratio 0.12] [--presence-movement-delta-ratio 0.04] [--presence-person-model <path>] [--presence-person-model-config <path>|--clear-presence-person-model-config] [--presence-person-debug-output-dir <path>|--clear-presence-person-debug-output-dir] [--dry-run]"
+        "  installer_cli configure-presence-lock [--enable-presence-lock|--disable-presence-lock] [--presence-detector-kind face-owner-match|opencv-dnn-person|mediapipe-pose-lite] [--presence-tracking-mode face-policy|continuous-low-fps] [--presence-detector-fps 2.0] [--presence-person-detector-model mobilenet-ssd|yolov8-onnx|ort-yolov8-onnx] [--presence-person-suspect-fps 5.0] [--presence-person-confidence-threshold 0.50] [--presence-absent-required-frames 6] [--presence-boundary-margin-ratio 0.12] [--presence-movement-delta-ratio 0.04] [--presence-person-model <path>] [--presence-person-model-config <path>|--clear-presence-person-model-config] [--presence-person-debug-output-dir <path>|--clear-presence-person-debug-output-dir] [--presence-pose-bridge-dll <path>] [--presence-pose-model <path>] [--presence-pose-min-landmark-visibility 0.45] [--presence-pose-min-landmark-presence 0.45] [--dry-run]"
     );
     println!("  installer_cli service-auth-status");
     println!(

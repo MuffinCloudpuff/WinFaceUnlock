@@ -3,6 +3,7 @@ use opencv::{
     prelude::{MatTraitConst, MatTraitConstManual, VideoCaptureTrait, VideoCaptureTraitConst},
     videoio::{self, VideoCapture},
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{CameraId, CameraInfo, PixelFormat, VideoError, VideoFrame, VideoFrameProvider};
 
@@ -13,6 +14,7 @@ pub struct OpenCvCameraProviderConfig {
     pub max_camera_index: u32,
     pub requested_frame_width: Option<u32>,
     pub requested_frame_height: Option<u32>,
+    pub preferred_backend: Option<OpenCvCameraBackend>,
 }
 
 impl Default for OpenCvCameraProviderConfig {
@@ -21,6 +23,37 @@ impl Default for OpenCvCameraProviderConfig {
             max_camera_index: DEFAULT_MAX_CAMERA_INDEX,
             requested_frame_width: None,
             requested_frame_height: None,
+            preferred_backend: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpenCvCameraBackend {
+    Msmf,
+    Dshow,
+    Any,
+}
+
+impl OpenCvCameraBackend {
+    pub fn all() -> [Self; 3] {
+        [Self::Msmf, Self::Dshow, Self::Any]
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Msmf => "msmf",
+            Self::Dshow => "dshow",
+            Self::Any => "any",
+        }
+    }
+
+    pub fn videoio_id(self) -> i32 {
+        match self {
+            Self::Msmf => videoio::CAP_MSMF,
+            Self::Dshow => videoio::CAP_DSHOW,
+            Self::Any => videoio::CAP_ANY,
         }
     }
 }
@@ -47,25 +80,27 @@ impl OpenCvCameraProvider {
         config: &OpenCvCameraProviderConfig,
     ) -> Result<VideoCapture, VideoError> {
         #[cfg(windows)]
-        let backend = videoio::CAP_DSHOW;
+        let backends = preferred_backend_order(config.preferred_backend);
         #[cfg(not(windows))]
-        let backend = videoio::CAP_ANY;
+        let backends = [OpenCvCameraBackend::Any];
 
-        let mut capture =
-            VideoCapture::new(camera_index, backend).map_err(|_| VideoError::OpenFailed)?;
-        if let Some(width) = config.requested_frame_width {
-            let _ = capture.set(videoio::CAP_PROP_FRAME_WIDTH, f64::from(width));
-        }
-        if let Some(height) = config.requested_frame_height {
-            let _ = capture.set(videoio::CAP_PROP_FRAME_HEIGHT, f64::from(height));
+        for backend in backends {
+            let Ok(mut capture) = VideoCapture::new(camera_index, backend.videoio_id()) else {
+                continue;
+            };
+            if let Some(width) = config.requested_frame_width {
+                let _ = capture.set(videoio::CAP_PROP_FRAME_WIDTH, f64::from(width));
+            }
+            if let Some(height) = config.requested_frame_height {
+                let _ = capture.set(videoio::CAP_PROP_FRAME_HEIGHT, f64::from(height));
+            }
+
+            if capture.is_opened().unwrap_or(false) {
+                return Ok(capture);
+            }
         }
 
-        let camera_is_open = capture.is_opened().map_err(|_| VideoError::OpenFailed)?;
-        if !camera_is_open {
-            return Err(VideoError::OpenFailed);
-        }
-
-        Ok(capture)
+        Err(VideoError::OpenFailed)
     }
 
     fn frame_from_mat(frame: &Mat) -> Result<VideoFrame, VideoError> {
@@ -106,6 +141,34 @@ impl OpenCvCameraProvider {
             let _ = capture.release();
         }
         Ok(sources)
+    }
+}
+
+#[cfg(windows)]
+fn preferred_backend_order(
+    preferred_backend: Option<OpenCvCameraBackend>,
+) -> [OpenCvCameraBackend; 3] {
+    match preferred_backend {
+        Some(OpenCvCameraBackend::Msmf) => [
+            OpenCvCameraBackend::Msmf,
+            OpenCvCameraBackend::Dshow,
+            OpenCvCameraBackend::Any,
+        ],
+        Some(OpenCvCameraBackend::Dshow) => [
+            OpenCvCameraBackend::Dshow,
+            OpenCvCameraBackend::Msmf,
+            OpenCvCameraBackend::Any,
+        ],
+        Some(OpenCvCameraBackend::Any) => [
+            OpenCvCameraBackend::Any,
+            OpenCvCameraBackend::Msmf,
+            OpenCvCameraBackend::Dshow,
+        ],
+        None => [
+            OpenCvCameraBackend::Msmf,
+            OpenCvCameraBackend::Dshow,
+            OpenCvCameraBackend::Any,
+        ],
     }
 }
 

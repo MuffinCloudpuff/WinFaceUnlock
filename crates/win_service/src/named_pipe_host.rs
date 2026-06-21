@@ -1,13 +1,20 @@
 use std::{
     path::Path,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
 };
 
 use common_protocol::{ProtocolError, ServiceEvent, ServiceRequest, UserId};
-use control_status::{FaceTemplateStatusError, WindowsFaceTemplateStatusStore};
+use control_protocol::ControlSettingsPatch;
+use control_status::{
+    ControlStatusError, FaceTemplateStatusError, WindowsControlSettingsStore,
+    WindowsFaceTemplateStatusStore,
+};
 use ipc::{
-    FaceTemplateConfigApplier, IpcClient, IpcServer, NamedPipeClient, NamedPipeServer,
-    PipeSecurity, ServiceRequestHandler, SystemUnixTimeMillisClock,
+    IpcClient, IpcServer, NamedPipeClient, NamedPipeServer, PipeSecurity, ServiceConfigApplier,
+    ServiceRequestHandler, SystemUnixTimeMillisClock,
 };
 
 use crate::{
@@ -17,6 +24,8 @@ use crate::{
         ServiceCredentialStore, ServiceCredentialStorePaths,
         ensure_development_credential_if_missing, open_service_credential_store,
     },
+    presence_service::PresenceServiceCommand,
+    service_log::write_service_event_detail,
 };
 
 pub fn run_named_pipe_once(pipe_name: &str) -> Result<ServiceEvent, ProtocolError> {
@@ -29,7 +38,7 @@ pub fn run_named_pipe_requests(
     request_limit: usize,
 ) -> Result<Vec<ServiceEvent>, ProtocolError> {
     let mut server = NamedPipeServer::new(pipe_name);
-    let mut handler = build_development_handler()?;
+    let mut handler = build_development_handler_without_presence_reload()?;
     let mut events = Vec::with_capacity(request_limit);
 
     server.start(PipeSecurity::service_default())?;
@@ -50,18 +59,33 @@ pub fn run_named_pipe_requests(
 pub fn run_named_pipe_until_shutdown(
     pipe_name: &str,
     shutdown_requested: &AtomicBool,
+    presence_command_sender: mpsc::Sender<PresenceServiceCommand>,
 ) -> Result<(), ProtocolError> {
     let mut server = NamedPipeServer::new(pipe_name);
-    let mut handler = build_development_handler()?;
+    let mut handler = build_development_handler(presence_command_sender)?;
 
     server.start(PipeSecurity::service_default())?;
     while !shutdown_requested.load(Ordering::SeqCst) {
-        let request = server.receive()?;
+        let request = match server.receive() {
+            Ok(request) => request,
+            Err(error) => {
+                if shutdown_requested.load(Ordering::SeqCst) {
+                    break;
+                }
+                eprintln!("{pipe_name} request receive failed; keeping service alive: {error:?}");
+                continue;
+            }
+        };
         let event = match handler.handle_request(request) {
             Ok(event) => event,
             Err(reason) => ServiceEvent::RequestRejected { reason },
         };
-        server.send(event)?;
+        if let Err(error) = server.send(event) {
+            if shutdown_requested.load(Ordering::SeqCst) {
+                break;
+            }
+            eprintln!("{pipe_name} response send failed; keeping service alive: {error:?}");
+        }
     }
     server.stop();
 
@@ -86,31 +110,85 @@ pub(crate) type DevelopmentServiceRequestHandler = ServiceRequestHandler<
 >;
 
 pub struct ServiceFaceTemplateConfigApplier {
-    store: WindowsFaceTemplateStatusStore,
+    face_template_store: WindowsFaceTemplateStatusStore,
+    settings_store: WindowsControlSettingsStore,
+    presence_command_sender: Option<mpsc::Sender<PresenceServiceCommand>>,
 }
 
 impl ServiceFaceTemplateConfigApplier {
-    fn from_environment_or_default() -> Self {
+    fn from_environment_or_default(
+        presence_command_sender: Option<mpsc::Sender<PresenceServiceCommand>>,
+    ) -> Self {
         Self {
-            store: WindowsFaceTemplateStatusStore::from_environment_or_default(),
+            face_template_store: WindowsFaceTemplateStatusStore::from_environment_or_default(),
+            settings_store: WindowsControlSettingsStore::new(),
+            presence_command_sender,
         }
     }
 }
 
-impl FaceTemplateConfigApplier for ServiceFaceTemplateConfigApplier {
-    fn apply_face_template(&mut self, template_path: &Path) -> Result<(), ProtocolError> {
-        self.store
-            .apply_active_face_template_path(template_path)
+impl ServiceConfigApplier for ServiceFaceTemplateConfigApplier {
+    fn apply_face_template(
+        &mut self,
+        template_path: &Path,
+        camera_id: &str,
+    ) -> Result<(), ProtocolError> {
+        let install_dir = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .ok_or(ProtocolError::InvalidMessage)?;
+        self.face_template_store
+            .apply_local_camera_auth_config(template_path, camera_id, &install_dir)
             .map_err(face_template_status_error_to_protocol_error)
+    }
+
+    fn apply_control_settings(
+        &mut self,
+        patch: &ControlSettingsPatch,
+    ) -> Result<(), ProtocolError> {
+        self.settings_store
+            .update_settings(patch)
+            .map(|snapshot| {
+                write_service_event_detail(
+                    "ControlSettings.Applied",
+                    format!(
+                        "presence_lock_enabled={:?} logon_wake_mode={:?} snapshot_presence_lock_enabled={} snapshot_logon_wake_mode={:?}",
+                        patch.presence_lock_enabled,
+                        patch.logon_wake_mode,
+                        snapshot.presence_lock_enabled,
+                        snapshot.logon_wake_mode
+                    ),
+                );
+                if patch.presence_lock_enabled.is_some() {
+                    if let Some(sender) = &self.presence_command_sender {
+                        let _ = sender.send(PresenceServiceCommand::ReloadCurrentSession);
+                    }
+                }
+            })
+            .map_err(control_status_error_to_protocol_error)
     }
 }
 
-pub fn build_development_handler() -> Result<DevelopmentServiceRequestHandler, ProtocolError> {
-    build_development_handler_with_paths(&ServiceCredentialStorePaths::from_environment_or_default())
+pub fn build_development_handler(
+    presence_command_sender: mpsc::Sender<PresenceServiceCommand>,
+) -> Result<DevelopmentServiceRequestHandler, ProtocolError> {
+    build_development_handler_with_paths(
+        &ServiceCredentialStorePaths::from_environment_or_default(),
+        Some(presence_command_sender),
+    )
+}
+
+pub fn build_development_handler_without_presence_reload()
+-> Result<DevelopmentServiceRequestHandler, ProtocolError> {
+    build_development_handler_with_paths(
+        &ServiceCredentialStorePaths::from_environment_or_default(),
+        None,
+    )
 }
 
 pub(crate) fn build_development_handler_with_paths(
     paths: &ServiceCredentialStorePaths,
+    presence_command_sender: Option<mpsc::Sender<PresenceServiceCommand>>,
 ) -> Result<DevelopmentServiceRequestHandler, ProtocolError> {
     let dev_user_id = UserId("dev-user".to_owned());
     let context = open_service_credential_store(paths)?;
@@ -121,7 +199,7 @@ pub(crate) fn build_development_handler_with_paths(
     Ok(ServiceRequestHandler::new(
         DevelopmentAuthGrantIssuer::from_environment(dev_user_id)?,
         StoreProtectedCredentialResolver::with_master_key(credential_store, master_key),
-        ServiceFaceTemplateConfigApplier::from_environment_or_default(),
+        ServiceFaceTemplateConfigApplier::from_environment_or_default(presence_command_sender),
         SystemUnixTimeMillisClock,
     ))
 }
@@ -137,6 +215,17 @@ fn face_template_status_error_to_protocol_error(error: FaceTemplateStatusError) 
     }
 }
 
+fn control_status_error_to_protocol_error(error: ControlStatusError) -> ProtocolError {
+    match error {
+        ControlStatusError::PermissionDenied(_) | ControlStatusError::ElevationRequired(_) => {
+            ProtocolError::Unauthorized
+        }
+        ControlStatusError::SettingsUnavailable(_)
+        | ControlStatusError::SettingsPersistenceFailed(_) => ProtocolError::TransportUnavailable,
+        _ => ProtocolError::InvalidMessage,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -145,7 +234,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use common_protocol::{AuthSource, ServiceEvent, ServiceRequest, SessionId};
+    use common_protocol::{AuthSource, AuthTriggerSource, ServiceEvent, ServiceRequest, SessionId};
     use ipc::{IpcClient, NamedPipeClient};
 
     use super::*;
@@ -159,7 +248,7 @@ mod tests {
         let server_thread = thread::spawn(move || -> Result<ServiceEvent, ProtocolError> {
             let mut server = NamedPipeServer::new(server_pipe_name);
             let paths = unique_development_store_paths();
-            let mut handler = build_development_handler_with_paths(&paths)?;
+            let mut handler = build_development_handler_with_paths(&paths, None)?;
             server.start(PipeSecurity::service_default())?;
             ready_tx
                 .send(())
@@ -187,11 +276,12 @@ mod tests {
     #[test]
     fn development_handler_can_issue_manual_test_grant() -> Result<(), ProtocolError> {
         let paths = unique_development_store_paths();
-        let mut handler = build_development_handler_with_paths(&paths)?;
+        let mut handler = build_development_handler_with_paths(&paths, None)?;
 
         let event = handler.handle_request(ServiceRequest::WakeAuth {
             session_id: SessionId("session-1".to_owned()),
             source: AuthSource::ManualTest,
+            trigger_source: AuthTriggerSource::InputTriggered,
         })?;
 
         assert!(matches!(event, ServiceEvent::AuthSucceeded { .. }));
@@ -207,7 +297,7 @@ mod tests {
         let server_thread = thread::spawn(move || -> Result<Vec<ServiceEvent>, ProtocolError> {
             let mut server = NamedPipeServer::new(server_pipe_name);
             let paths = unique_development_store_paths();
-            let mut handler = build_development_handler_with_paths(&paths)?;
+            let mut handler = build_development_handler_with_paths(&paths, None)?;
             server.start(PipeSecurity::service_default())?;
             ready_tx
                 .send(())
@@ -223,6 +313,7 @@ mod tests {
         let wake_event = client.request(ServiceRequest::WakeAuth {
             session_id: SessionId("session-1".to_owned()),
             source: AuthSource::ManualTest,
+            trigger_source: AuthTriggerSource::InputTriggered,
         })?;
         client.disconnect();
         let ServiceEvent::AuthSucceeded { grant } = wake_event else {

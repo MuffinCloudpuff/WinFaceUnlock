@@ -33,6 +33,9 @@ use crate::{
     service_registry::ServiceAuthRegistry,
 };
 
+#[cfg(all(windows, not(test)))]
+use crate::service_manager::ServiceManagerFacade;
+
 pub fn run_from_stdio() -> Result<(), InstallerError> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
@@ -378,6 +381,14 @@ fn stage_payload(request: &SetupRequestEnvelope) -> SetupResponseEnvelope {
         return setup_preflight_failed_response(request, &payload, preflight_outcome);
     }
 
+    if let Err(error) = stop_existing_service_before_payload_staging(&payload.install_dir) {
+        return SetupResponseEnvelope::failed(
+            request,
+            format!("Stop existing service before payload staging failed: {error}"),
+            SetupErrorCode::StagePayloadFailed,
+        );
+    }
+
     match crate::setup_payload::stage_payload(&payload) {
         Ok(outcome) => {
             let staged_files = outcome
@@ -429,6 +440,23 @@ fn stage_payload(request: &SetupRequestEnvelope) -> SetupResponseEnvelope {
                 setup_error_code,
             )
         }
+    }
+}
+
+fn stop_existing_service_before_payload_staging(install_dir: &Path) -> Result<(), InstallerError> {
+    if !install_dir.join("win_service.exe").is_file() {
+        return Ok(());
+    }
+
+    #[cfg(all(windows, not(test)))]
+    {
+        return ServiceManagerFacade::connect()
+            .and_then(|manager| manager.stop_service_if_exists());
+    }
+
+    #[cfg(any(not(windows), test))]
+    {
+        Ok(())
     }
 }
 
@@ -1432,6 +1460,10 @@ fn configure_presence_lock(request: &SetupRequestEnvelope) -> SetupResponseEnvel
         "presence_person_model_path": patch.presence_person_model_path,
         "presence_person_model_config_path": patch.presence_person_model_config_path,
         "presence_person_debug_output_dir": patch.presence_person_debug_output_dir,
+        "presence_pose_bridge_dll_path": patch.presence_pose_bridge_dll_path,
+        "presence_pose_model_path": patch.presence_pose_model_path,
+        "presence_pose_min_landmark_visibility": patch.presence_pose_min_landmark_visibility,
+        "presence_pose_min_landmark_presence": patch.presence_pose_min_landmark_presence,
     });
 
     match ServiceAuthRegistry::configure_presence_lock(&patch) {

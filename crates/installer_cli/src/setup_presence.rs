@@ -9,10 +9,12 @@ use crate::service_registry::ServicePresenceRegistryPatch;
 
 const DETECTOR_KIND_FACE_OWNER_MATCH: &str = "face-owner-match";
 const DETECTOR_KIND_OPENCV_DNN_PERSON: &str = "opencv-dnn-person";
+const DETECTOR_KIND_MEDIAPIPE_POSE_LITE: &str = "mediapipe-pose-lite";
 const TRACKING_MODE_FACE_POLICY: &str = "face-policy";
 const TRACKING_MODE_CONTINUOUS_LOW_FPS: &str = "continuous-low-fps";
 const PERSON_DETECTOR_MODEL_MOBILENET_SSD: &str = "mobilenet-ssd";
 const PERSON_DETECTOR_MODEL_YOLOV8_ONNX: &str = "yolov8-onnx";
+const PERSON_DETECTOR_MODEL_ORT_YOLOV8_ONNX: &str = "ort-yolov8-onnx";
 
 pub fn build_presence_patch(
     payload: &ConfigurePresenceLockPayload,
@@ -66,6 +68,20 @@ pub fn build_presence_patch(
     } else if payload.clear_person_debug_output_dir {
         patch.presence_person_debug_output_dir = Some(None);
     }
+    if let Some(pose_bridge_relative_path) = &payload.pose_bridge_relative_path {
+        patch.presence_pose_bridge_dll_path = Some(resolve_install_relative_path(
+            required_install_dir(payload)?,
+            pose_bridge_relative_path,
+        )?);
+    }
+    if let Some(pose_model_relative_path) = &payload.pose_model_relative_path {
+        patch.presence_pose_model_path = Some(resolve_install_relative_path(
+            required_install_dir(payload)?,
+            pose_model_relative_path,
+        )?);
+    }
+    patch.presence_pose_min_landmark_visibility = payload.pose_min_landmark_visibility;
+    patch.presence_pose_min_landmark_presence = payload.pose_min_landmark_presence;
 
     if !patch_has_updates(&patch) {
         return Err(SetupPresenceError::NoPresenceUpdates);
@@ -94,7 +110,7 @@ fn apply_person_detector_model_defaults(
                 Path::new(r"models\MobileNetSSD_deploy.prototxt"),
             )?));
         }
-        PERSON_DETECTOR_MODEL_YOLOV8_ONNX => {
+        PERSON_DETECTOR_MODEL_YOLOV8_ONNX | PERSON_DETECTOR_MODEL_ORT_YOLOV8_ONNX => {
             patch.presence_person_model_path = Some(resolve_install_relative_path(
                 required_install_dir(payload)?,
                 Path::new(r"models\yolov8n.onnx"),
@@ -160,7 +176,9 @@ fn validate_relative_path(relative_path: &Path) -> Result<(), SetupPresenceError
 
 fn validate_detector_kind(value: &str) -> Result<(), SetupPresenceError> {
     match value {
-        DETECTOR_KIND_FACE_OWNER_MATCH | DETECTOR_KIND_OPENCV_DNN_PERSON => Ok(()),
+        DETECTOR_KIND_FACE_OWNER_MATCH
+        | DETECTOR_KIND_OPENCV_DNN_PERSON
+        | DETECTOR_KIND_MEDIAPIPE_POSE_LITE => Ok(()),
         other => Err(SetupPresenceError::InvalidPresenceValue {
             field_name: "detector_kind",
             value: other.to_owned(),
@@ -180,7 +198,9 @@ fn validate_tracking_mode(value: &str) -> Result<(), SetupPresenceError> {
 
 fn validate_person_detector_model(value: &str) -> Result<(), SetupPresenceError> {
     match value {
-        PERSON_DETECTOR_MODEL_MOBILENET_SSD | PERSON_DETECTOR_MODEL_YOLOV8_ONNX => Ok(()),
+        PERSON_DETECTOR_MODEL_MOBILENET_SSD
+        | PERSON_DETECTOR_MODEL_YOLOV8_ONNX
+        | PERSON_DETECTOR_MODEL_ORT_YOLOV8_ONNX => Ok(()),
         other => Err(SetupPresenceError::InvalidPresenceValue {
             field_name: "person_detector_model",
             value: other.to_owned(),
@@ -204,6 +224,10 @@ fn patch_has_updates(patch: &ServicePresenceRegistryPatch) -> bool {
         || patch.presence_person_model_path.is_some()
         || patch.presence_person_model_config_path.is_some()
         || patch.presence_person_debug_output_dir.is_some()
+        || patch.presence_pose_bridge_dll_path.is_some()
+        || patch.presence_pose_model_path.is_some()
+        || patch.presence_pose_min_landmark_visibility.is_some()
+        || patch.presence_pose_min_landmark_presence.is_some()
 }
 
 #[derive(Debug)]
@@ -287,6 +311,10 @@ mod tests {
             clear_person_model_config: false,
             person_debug_output_dir: None,
             clear_person_debug_output_dir: false,
+            pose_bridge_relative_path: None,
+            pose_model_relative_path: None,
+            pose_min_landmark_visibility: None,
+            pose_min_landmark_presence: None,
         })?;
 
         assert_eq!(patch.presence_lock_enabled, Some(true));
@@ -320,6 +348,10 @@ mod tests {
             clear_person_model_config: false,
             person_debug_output_dir: None,
             clear_person_debug_output_dir: false,
+            pose_bridge_relative_path: None,
+            pose_model_relative_path: None,
+            pose_min_landmark_visibility: None,
+            pose_min_landmark_presence: None,
         })?;
 
         assert_eq!(
@@ -351,11 +383,62 @@ mod tests {
             clear_person_model_config: false,
             person_debug_output_dir: None,
             clear_person_debug_output_dir: false,
+            pose_bridge_relative_path: None,
+            pose_model_relative_path: None,
+            pose_min_landmark_visibility: None,
+            pose_min_landmark_presence: None,
         });
 
         assert!(matches!(
             result,
             Err(SetupPresenceError::InstallDirRequired)
         ));
+    }
+
+    #[test]
+    fn mediapipe_pose_defaults_resolve_under_install_dir() -> Result<(), SetupPresenceError> {
+        let install_dir = PathBuf::from(r"D:\Apps\WinFaceUnlock");
+        let patch = build_presence_patch(&ConfigurePresenceLockPayload {
+            install_dir: Some(install_dir.clone()),
+            presence_lock_enabled: None,
+            presence_owner_match_threshold: None,
+            detector_kind: Some(DETECTOR_KIND_MEDIAPIPE_POSE_LITE.to_owned()),
+            tracking_mode: Some(TRACKING_MODE_CONTINUOUS_LOW_FPS.to_owned()),
+            detector_fps: None,
+            unload_model_when_idle: None,
+            person_confidence_threshold: None,
+            person_detector_model: None,
+            person_suspect_fps: None,
+            absent_required_frames: None,
+            boundary_margin_ratio: None,
+            movement_delta_ratio: None,
+            person_model_relative_path: None,
+            person_model_config_relative_path: None,
+            clear_person_model_config: false,
+            person_debug_output_dir: None,
+            clear_person_debug_output_dir: false,
+            pose_bridge_relative_path: Some(PathBuf::from(
+                r"native\winfaceunlock_mediapipe_bridge.dll",
+            )),
+            pose_model_relative_path: Some(PathBuf::from(r"models\pose_landmarker_lite.task")),
+            pose_min_landmark_visibility: Some(0.43),
+            pose_min_landmark_presence: Some(0.44),
+        })?;
+
+        assert_eq!(
+            patch.presence_detector_kind.as_deref(),
+            Some(DETECTOR_KIND_MEDIAPIPE_POSE_LITE)
+        );
+        assert_eq!(
+            patch.presence_pose_bridge_dll_path,
+            Some(install_dir.join(r"native\winfaceunlock_mediapipe_bridge.dll"))
+        );
+        assert_eq!(
+            patch.presence_pose_model_path,
+            Some(install_dir.join(r"models\pose_landmarker_lite.task"))
+        );
+        assert_eq!(patch.presence_pose_min_landmark_visibility, Some(0.43));
+        assert_eq!(patch.presence_pose_min_landmark_presence, Some(0.44));
+        Ok(())
     }
 }

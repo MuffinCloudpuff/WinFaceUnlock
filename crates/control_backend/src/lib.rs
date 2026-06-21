@@ -11,8 +11,8 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use common_protocol::{
-    AuthFailureReason, AuthSource, PIPE_NAME, ProtocolError, ServiceEvent, ServiceRequest,
-    SessionId,
+    AuthFailureReason, AuthSource, AuthTriggerSource, PIPE_NAME, ProtocolError, ServiceEvent,
+    ServiceRequest, SessionId,
 };
 use control_protocol::{
     CONTROL_PROTOCOL_VERSION, CameraDeviceList, CameraDeviceSummary, ControlErrorCode,
@@ -118,6 +118,7 @@ pub trait FaceEnrollmentTemplateApplier {
     fn apply_face_enrollment_template(
         &self,
         template_path: &Path,
+        camera_id: &str,
     ) -> Result<(), ControlBackendError>;
 }
 
@@ -157,6 +158,7 @@ where
             .send_service_request(ServiceRequest::WakeAuth {
                 session_id: session_id.clone(),
                 source: AuthSource::LocalCamera,
+                trigger_source: AuthTriggerSource::InputTriggered,
             })
             .map_err(auth_wake_protocol_error)?;
 
@@ -242,11 +244,13 @@ where
     fn apply_face_enrollment_template(
         &self,
         template_path: &Path,
+        camera_id: &str,
     ) -> Result<(), ControlBackendError> {
         let event = self
             .service_client
             .send_service_request(ServiceRequest::ApplyFaceTemplate {
                 template_path: template_path.to_path_buf(),
+                camera_id: camera_id.to_owned(),
             })
             .map_err(face_template_apply_protocol_error)?;
 
@@ -257,6 +261,58 @@ where
             }
             _ => Err(ControlBackendError::face_enrollment_failed(
                 "service returned an invalid face template apply response",
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ServiceIpcControlSettingsStore<C = NamedPipeFaceAuthServiceClient> {
+    service_client: C,
+    settings_reader: WindowsControlSettingsStore,
+}
+
+impl ServiceIpcControlSettingsStore<NamedPipeFaceAuthServiceClient> {
+    pub fn default_named_pipe() -> Self {
+        Self::new(NamedPipeFaceAuthServiceClient::default())
+    }
+}
+
+impl<C> ServiceIpcControlSettingsStore<C> {
+    pub fn new(service_client: C) -> Self {
+        Self {
+            service_client,
+            settings_reader: WindowsControlSettingsStore::new(),
+        }
+    }
+}
+
+impl<C> ControlSettingsStore for ServiceIpcControlSettingsStore<C>
+where
+    C: FaceAuthServiceClient,
+{
+    fn load_settings(&self) -> Result<ControlSettingsSnapshot, ControlBackendError> {
+        self.settings_reader
+            .load_settings()
+            .map_err(ControlBackendError::status_reader_error)
+    }
+
+    fn update_settings(
+        &self,
+        patch: &ControlSettingsPatch,
+    ) -> Result<ControlSettingsSnapshot, ControlBackendError> {
+        let event = self
+            .service_client
+            .send_service_request(ServiceRequest::ApplyControlSettings {
+                patch: patch.clone(),
+            })
+            .map_err(settings_update_protocol_error)?;
+
+        match event {
+            ServiceEvent::ControlSettingsApplied => self.load_settings(),
+            ServiceEvent::RequestRejected { reason } => Err(settings_update_protocol_error(reason)),
+            _ => Err(ControlBackendError::settings_persistence_failed(
+                "service returned an invalid settings update response",
             )),
         }
     }
@@ -431,8 +487,10 @@ where
                     )
                 })?;
                 let template_path = session.output_dir.join(SELECTED_TEMPLATES_FILE_NAME);
-                self.template_applier
-                    .apply_face_enrollment_template(&template_path)?;
+                self.template_applier.apply_face_enrollment_template(
+                    &template_path,
+                    &session.start_payload.camera_id,
+                )?;
                 Ok(FaceEnrollmentFinishOutcome {
                     enrollment_session_id: session.enrollment_session_id.clone(),
                     session_state: FaceEnrollmentSessionState::Completed,
@@ -2363,6 +2421,25 @@ fn face_template_apply_protocol_error(error: ProtocolError) -> ControlBackendErr
     }
 }
 
+fn settings_update_protocol_error(error: ProtocolError) -> ControlBackendError {
+    match error {
+        ProtocolError::TransportUnavailable => {
+            ControlBackendError::service_unavailable("service settings IPC is unavailable")
+        }
+        ProtocolError::Unauthorized => {
+            ControlBackendError::permission_denied("service rejected settings update authorization")
+        }
+        ProtocolError::InvalidMessage => {
+            ControlBackendError::settings_persistence_failed("service rejected settings payload")
+        }
+        ProtocolError::ExpiredGrant | ProtocolError::UsedGrant | ProtocolError::SessionMismatch => {
+            ControlBackendError::settings_persistence_failed(format!(
+                "service rejected settings update request: {error:?}"
+            ))
+        }
+    }
+}
+
 fn auth_failure_reason_to_control_error(reason: AuthFailureReason) -> ControlBackendError {
     match reason {
         AuthFailureReason::NoFaceDetected
@@ -2405,6 +2482,7 @@ mod tests {
         PresenceMonitorState, PresenceRuntimeSummary, ProviderRegistrationState,
         ProviderStatusSummary, RegistryConfigState, ServiceConfigSummary, ServiceInstallationState,
         ServiceRuntimeState, ServiceStatusSummary, WindowsCredentialAccountType,
+        WindowsCredentialSecretState,
     };
 
     use super::*;
@@ -2496,6 +2574,7 @@ mod tests {
                 user_sid: "S-1-5-21-real".to_owned(),
                 account_type: WindowsCredentialAccountType::Local,
                 credential_ref: "windows-credential-dev-user".to_owned(),
+                credential_secret_state: WindowsCredentialSecretState::Configured,
             }),
             result: Ok(WindowsCredentialEnrollmentOutcome {
                 windows_account_username: "Leo16".to_owned(),
@@ -2503,6 +2582,7 @@ mod tests {
                 user_sid: "S-1-5-21-winfaceunlock-pending".to_owned(),
                 account_type: WindowsCredentialAccountType::Local,
                 credential_ref: "windows-credential-dev-user".to_owned(),
+                credential_secret_state: WindowsCredentialSecretState::Configured,
             }),
             last_payload: Rc::new(RefCell::new(None)),
             last_password: Rc::new(RefCell::new(None)),
@@ -2756,6 +2836,7 @@ mod tests {
     #[derive(Clone)]
     struct RecordingFaceEnrollmentTemplateApplier {
         applied_template_paths: Arc<Mutex<Vec<PathBuf>>>,
+        applied_camera_ids: Arc<Mutex<Vec<String>>>,
         result: Result<(), ControlBackendError>,
     }
 
@@ -2763,6 +2844,7 @@ mod tests {
         fn successful() -> Self {
             Self {
                 applied_template_paths: Arc::new(Mutex::new(Vec::new())),
+                applied_camera_ids: Arc::new(Mutex::new(Vec::new())),
                 result: Ok(()),
             }
         }
@@ -2770,6 +2852,7 @@ mod tests {
         fn failed(error: ControlBackendError) -> Self {
             Self {
                 applied_template_paths: Arc::new(Mutex::new(Vec::new())),
+                applied_camera_ids: Arc::new(Mutex::new(Vec::new())),
                 result: Err(error),
             }
         }
@@ -2780,12 +2863,20 @@ mod tests {
                 .map(|paths| paths.clone())
                 .map_err(|_| "recording face enrollment template applier lock poisoned".to_owned())
         }
+
+        fn applied_camera_ids(&self) -> Result<Vec<String>, String> {
+            self.applied_camera_ids
+                .lock()
+                .map(|camera_ids| camera_ids.clone())
+                .map_err(|_| "recording face enrollment camera id lock poisoned".to_owned())
+        }
     }
 
     impl FaceEnrollmentTemplateApplier for RecordingFaceEnrollmentTemplateApplier {
         fn apply_face_enrollment_template(
             &self,
             template_path: &Path,
+            camera_id: &str,
         ) -> Result<(), ControlBackendError> {
             self.applied_template_paths
                 .lock()
@@ -2795,6 +2886,14 @@ mod tests {
                     )
                 })?
                 .push(template_path.to_path_buf());
+            self.applied_camera_ids
+                .lock()
+                .map_err(|_| {
+                    ControlBackendError::face_enrollment_failed(
+                        "recording face enrollment camera id lock poisoned",
+                    )
+                })?
+                .push(camera_id.to_owned());
             self.result.clone()
         }
     }
@@ -3662,6 +3761,10 @@ mod tests {
             applied_paths[0].file_name().and_then(|name| name.to_str()),
             Some(SELECTED_TEMPLATES_FILE_NAME)
         );
+        assert_eq!(
+            applied_template_paths.applied_camera_ids()?,
+            vec!["opencv-index:0"]
+        );
         let response_text = serde_json::to_string(&finish)?;
         assert!(!response_text.contains("embedding"));
         assert!(!response_text.contains("selected_templates"));
@@ -3728,12 +3831,15 @@ mod tests {
         let applier = ServiceIpcFaceEnrollmentTemplateApplier::new(service_client);
         let template_path = PathBuf::from(r"C:\ProgramData\WinFaceUnlock\selected.json");
 
-        let result = applier.apply_face_enrollment_template(&template_path);
+        let result = applier.apply_face_enrollment_template(&template_path, "opencv-index:1");
 
         assert!(result.is_ok());
         assert_eq!(
             requests.borrow().as_slice(),
-            &[ServiceRequest::ApplyFaceTemplate { template_path }]
+            &[ServiceRequest::ApplyFaceTemplate {
+                template_path,
+                camera_id: "opencv-index:1".to_owned(),
+            }]
         );
         Ok(())
     }
@@ -3907,6 +4013,7 @@ mod tests {
             &requests.borrow()[0],
             ServiceRequest::WakeAuth {
                 source: AuthSource::LocalCamera,
+                trigger_source: AuthTriggerSource::InputTriggered,
                 ..
             }
         ));
@@ -4116,7 +4223,7 @@ mod tests {
                 "user_sid": "S-1-5-21-winfaceunlock-pending",
                 "account_type": "local",
             })),
-            WindowsCredentialSecret::from_password("secret".to_owned()),
+            WindowsCredentialSecret::from_password("secret-password".to_owned()),
         );
 
         assert_eq!(response.operation_status, ControlOperationStatus::Completed);
@@ -4131,8 +4238,8 @@ mod tests {
                 .map(|payload| payload.user_id.as_str()),
             Some("dev-user")
         );
-        assert_eq!(last_password.borrow().as_deref(), Some("secret"));
-        assert!(!serde_json::to_string(&response)?.contains("secret"));
+        assert_eq!(last_password.borrow().as_deref(), Some("secret-password"));
+        assert!(!serde_json::to_string(&response)?.contains("secret-password"));
         Ok(())
     }
 

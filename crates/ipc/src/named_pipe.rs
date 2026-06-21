@@ -122,6 +122,15 @@ impl NamedPipeServer {
         self.client_connected = true;
         Ok(())
     }
+
+    pub fn disconnect_current_client(&mut self) {
+        if let Some(handle) = self.pipe_handle.as_ref() {
+            unsafe {
+                let _ = DisconnectNamedPipe(handle.raw);
+            }
+        }
+        self.client_connected = false;
+    }
 }
 
 impl crate::IpcServer for NamedPipeServer {
@@ -151,13 +160,19 @@ impl crate::IpcServer for NamedPipeServer {
 
     fn receive(&mut self) -> Result<ServiceRequest, ProtocolError> {
         self.connect_client_if_needed()?;
-        let frame = read_frame(self.pipe_handle()?)?;
-        decode_request(&frame)
+        let result = read_frame(self.pipe_handle()?).and_then(|frame| decode_request(&frame));
+        if result.is_err() {
+            self.disconnect_current_client();
+        }
+        result
     }
 
     fn send(&mut self, event: ServiceEvent) -> Result<(), ProtocolError> {
         let frame = encode_event(&event)?;
-        write_frame(self.pipe_handle()?, &frame)?;
+        if let Err(error) = write_frame(self.pipe_handle()?, &frame) {
+            self.disconnect_current_client();
+            return Err(error);
+        }
         unsafe {
             let _ = FlushFileBuffers(self.pipe_handle()?);
             let _ = DisconnectNamedPipe(self.pipe_handle()?);
@@ -175,6 +190,7 @@ impl crate::IpcServer for NamedPipeServer {
 pub struct NamedPipeClient {
     pipe_name: String,
     pipe_handle: Option<OwnedHandle>,
+    last_connect_error: Option<u32>,
 }
 
 impl NamedPipeClient {
@@ -182,6 +198,7 @@ impl NamedPipeClient {
         Self {
             pipe_name: pipe_name.into(),
             pipe_handle: None,
+            last_connect_error: None,
         }
     }
 
@@ -191,10 +208,15 @@ impl NamedPipeClient {
             .map(|handle| handle.raw)
             .ok_or(ProtocolError::TransportUnavailable)
     }
+
+    pub fn last_connect_error(&self) -> Option<u32> {
+        self.last_connect_error
+    }
 }
 
 impl crate::IpcClient for NamedPipeClient {
     fn connect(&mut self) -> Result<(), ProtocolError> {
+        self.last_connect_error = None;
         let pipe_name = to_wide_null(&self.pipe_name);
         for _ in 0..CLIENT_CONNECT_RETRY_COUNT {
             let handle = unsafe {
@@ -214,6 +236,7 @@ impl crate::IpcClient for NamedPipeClient {
             }
 
             let last_error = unsafe { GetLastError() };
+            self.last_connect_error = Some(last_error);
             if last_error != ERROR_PIPE_BUSY && last_error != ERROR_FILE_NOT_FOUND {
                 return Err(ProtocolError::TransportUnavailable);
             }
@@ -320,6 +343,9 @@ fn pipe_security_sddl(security: &PipeSecurity) -> Result<String, ProtocolError> 
     if security.allow_interactive_users {
         sddl.push_str("(A;;GRGW;;;IU)");
     }
+    if security.allow_authenticated_users {
+        sddl.push_str("(A;;GRGW;;;AU)");
+    }
     if security.allow_service_sid {
         sddl.push_str("(A;;GA;;;OW)");
     }
@@ -354,6 +380,7 @@ mod tests {
         assert!(sddl.contains("(A;;GA;;;SY)"));
         assert!(sddl.contains("(A;;GA;;;BA)"));
         assert!(sddl.contains("(A;;GRGW;;;IU)"));
+        assert!(sddl.contains("(A;;GRGW;;;AU)"));
         assert!(sddl.contains("(A;;GA;;;OW)"));
         assert!(!sddl.contains("WD"));
         Ok(())
@@ -365,6 +392,7 @@ mod tests {
             allow_local_system: false,
             allow_administrators: false,
             allow_interactive_users: false,
+            allow_authenticated_users: false,
             allow_service_sid: false,
         });
 
@@ -397,6 +425,56 @@ mod tests {
                 .join()
                 .map_err(|_| ProtocolError::TransportUnavailable)?;
         }
+        let mut client = NamedPipeClient::new(pipe_name);
+        client.connect()?;
+        let response = client.request(ServiceRequest::HealthCheck)?;
+        client.disconnect();
+
+        let server_result = server_thread
+            .join()
+            .map_err(|_| ProtocolError::TransportUnavailable)?;
+        assert_eq!(server_result, Ok(()));
+        assert_eq!(response, ServiceEvent::HealthOk);
+        Ok(())
+    }
+
+    #[test]
+    fn named_pipe_server_recovers_after_client_disconnects_before_request()
+    -> Result<(), ProtocolError> {
+        let pipe_name = unique_pipe_name();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (recovered_tx, recovered_rx) = mpsc::channel();
+        let server_pipe_name = pipe_name.clone();
+
+        let server_thread = thread::spawn(move || -> Result<(), ProtocolError> {
+            let mut server = NamedPipeServer::new(server_pipe_name);
+            server.start(PipeSecurity::service_default())?;
+            ready_tx
+                .send(())
+                .map_err(|_| ProtocolError::TransportUnavailable)?;
+
+            assert_eq!(server.receive(), Err(ProtocolError::TransportUnavailable));
+            recovered_tx
+                .send(())
+                .map_err(|_| ProtocolError::TransportUnavailable)?;
+
+            let request = server.receive()?;
+            assert_eq!(request, ServiceRequest::HealthCheck);
+            server.send(ServiceEvent::HealthOk)?;
+            server.stop();
+            Ok(())
+        });
+
+        ready_rx
+            .recv()
+            .map_err(|_| ProtocolError::TransportUnavailable)?;
+        let mut broken_client = NamedPipeClient::new(pipe_name.clone());
+        broken_client.connect()?;
+        broken_client.disconnect();
+        recovered_rx
+            .recv()
+            .map_err(|_| ProtocolError::TransportUnavailable)?;
+
         let mut client = NamedPipeClient::new(pipe_name);
         client.connect()?;
         let response = client.request(ServiceRequest::HealthCheck)?;

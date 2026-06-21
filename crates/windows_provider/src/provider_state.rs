@@ -142,11 +142,18 @@ impl ProviderState {
     }
 
     pub fn set_events(&self, events: Option<ICredentialProviderEvents>, advise_context: usize) {
-        if let Ok(mut inner) = self.inner.lock() {
+        let has_new_events = events.is_some();
+        let should_notify_ready_credential = if let Ok(mut inner) = self.inner.lock() {
             inner.events = events
                 .as_ref()
                 .and_then(|event_sink| AgileReference::new(event_sink).ok());
             inner.advise_context = advise_context;
+            has_new_events && inner.unlock_attempt.credential_material.is_some()
+        } else {
+            false
+        };
+        if should_notify_ready_credential {
+            self.notify_credentials_changed();
         }
     }
 
@@ -321,10 +328,7 @@ impl ProviderState {
     }
 
     fn session_id_for_current_process() -> SessionId {
-        SessionId(format!(
-            "credential-provider-session-{}",
-            std::process::id()
-        ))
+        SessionId("credential-provider-logon-auto-wake".to_owned())
     }
 
     pub fn notify_credentials_changed(&self) {
@@ -486,6 +490,33 @@ mod tests {
         assert_eq!(
             state.credential_status_message(),
             "Local face authentication is running (1/3)"
+        );
+    }
+
+    #[test]
+    fn hidden_mode_stays_hidden_while_wake_is_running() {
+        let state =
+            ProviderState::with_tile_visibility(ProviderTileVisibility::HiddenUntilCredentialReady);
+
+        assert!(matches!(
+            state.begin_wake_request(3),
+            WakeRequestStart::Started { .. }
+        ));
+        let plan = state.credential_count_plan();
+
+        assert_eq!(plan.credential_count, 0);
+        assert_eq!(
+            plan.default_credential_index,
+            CREDENTIAL_PROVIDER_NO_DEFAULT
+        );
+        assert!(!plan.auto_logon_with_default);
+    }
+
+    #[test]
+    fn wake_session_id_is_stable_across_provider_instances() {
+        assert_eq!(
+            ProviderState::session_id_for_current_process(),
+            SessionId("credential-provider-logon-auto-wake".to_owned())
         );
     }
 

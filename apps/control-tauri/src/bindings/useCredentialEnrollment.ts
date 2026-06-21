@@ -8,6 +8,7 @@ import { controlTransport, isControlRuntimeAvailable } from './controlTransport'
 
 export interface CredentialEnrollmentViewModel {
   accountProfile: WindowsCredentialAccountProfile | null;
+  credentialEnrollmentCompletedAt: number | null;
   isSubmitting: boolean;
   message?: string;
   submitCredential: (passwordSecret: string) => void;
@@ -16,6 +17,7 @@ export interface CredentialEnrollmentViewModel {
 export function useCredentialEnrollment(): CredentialEnrollmentViewModel {
   const [accountProfile, setAccountProfile] =
     useState<WindowsCredentialAccountProfile | null>(null);
+  const [credentialEnrollmentCompletedAt, setCredentialEnrollmentCompletedAt] = useState<number | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [message, setMessage] = useState<string>();
 
@@ -68,6 +70,7 @@ export function useCredentialEnrollment(): CredentialEnrollmentViewModel {
 
       setIsSubmitting(true);
       setMessage(undefined);
+      setCredentialEnrollmentCompletedAt(null);
       enrollWindowsCredential(controlTransport, passwordSecret, accountProfile)
         .then((response) => {
           if (response.operation_status !== 'completed') {
@@ -76,6 +79,7 @@ export function useCredentialEnrollment(): CredentialEnrollmentViewModel {
           }
 
           setAccountProfile(response.safe_details);
+          setCredentialEnrollmentCompletedAt(Date.now());
           setMessage(response.message);
         })
         .catch((error) => {
@@ -90,6 +94,7 @@ export function useCredentialEnrollment(): CredentialEnrollmentViewModel {
 
   return {
     accountProfile,
+    credentialEnrollmentCompletedAt,
     isSubmitting,
     message,
     submitCredential,

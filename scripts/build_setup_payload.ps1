@@ -48,11 +48,31 @@ function Resolve-BinaryDir {
     throw "Could not find built installer_cli.exe under target directories."
 }
 
+function Resolve-OrtRuntimeDllPath {
+    param(
+        [string]$BinaryDir,
+        [string]$ControlAppPublishDir
+    )
+
+    $candidatePaths = @(
+        (Join-Path $ControlAppPublishDir "onnxruntime.dll"),
+        (Join-Path $BinaryDir "onnxruntime.dll"),
+        (Join-Path $RepoRoot "target\setup-bundle\app\onnxruntime.dll")
+    )
+    foreach ($candidatePath in $candidatePaths) {
+        if (Test-Path $candidatePath -PathType Leaf) {
+            return $candidatePath
+        }
+    }
+    throw "Required ONNX Runtime DLL is missing. Build win_service with the ort dependency or publish the setup bundle first."
+}
+
 function Copy-RequiredFile {
     param(
         [string]$SourcePath,
         [string]$TargetRelativePath,
-        [System.Collections.ArrayList]$ManifestFiles
+        [System.Collections.ArrayList]$ManifestFiles,
+        [string]$FileId = ""
     )
 
     if (-not (Test-Path $SourcePath -PathType Leaf)) {
@@ -62,8 +82,13 @@ function Copy-RequiredFile {
     $targetParent = Split-Path -Parent $targetPath
     New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
     Copy-Item -LiteralPath $SourcePath -Destination $targetPath -Force
+    $manifestFileId = if ([string]::IsNullOrWhiteSpace($FileId)) {
+        [System.IO.Path]::GetFileNameWithoutExtension($TargetRelativePath).Replace("-", "_")
+    } else {
+        $FileId
+    }
     [void]$ManifestFiles.Add([ordered]@{
-        file_id = [System.IO.Path]::GetFileNameWithoutExtension($TargetRelativePath).Replace("-", "_")
+        file_id = $manifestFileId
         source_relative_path = $TargetRelativePath
         target_relative_path = $TargetRelativePath
         required = $true
@@ -170,6 +195,7 @@ function Write-RecoveryScript {
     })
 }
 
+Remove-Item -LiteralPath $PayloadDir -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $PayloadDir -Force | Out-Null
 $BinaryDir = Resolve-BinaryDir -Configuration $Configuration
 $ManifestFiles = [System.Collections.ArrayList]::new()
@@ -177,7 +203,10 @@ $ManifestFiles = [System.Collections.ArrayList]::new()
 Copy-RequiredFile -SourcePath (Join-Path $BinaryDir "installer_cli.exe") -TargetRelativePath "installer_cli.exe" -ManifestFiles $ManifestFiles
 Copy-RequiredFile -SourcePath (Join-Path $BinaryDir "diagnostics_cli.exe") -TargetRelativePath "diagnostics_cli.exe" -ManifestFiles $ManifestFiles
 Copy-RequiredFile -SourcePath (Join-Path $BinaryDir "win_service.exe") -TargetRelativePath "win_service.exe" -ManifestFiles $ManifestFiles
-Copy-RequiredFile -SourcePath (Join-Path $BinaryDir "windows_provider.dll") -TargetRelativePath "windows_provider.dll" -ManifestFiles $ManifestFiles
+$ProviderDllSourcePath = Join-Path $BinaryDir "windows_provider.dll"
+$ProviderDllHash = (Get-FileHash -LiteralPath $ProviderDllSourcePath -Algorithm SHA256).Hash.Substring(0, 12).ToLowerInvariant()
+$ProviderDllTargetRelativePath = "provider\windows_provider-$ProviderDllHash.dll"
+Copy-RequiredFile -SourcePath $ProviderDllSourcePath -TargetRelativePath $ProviderDllTargetRelativePath -ManifestFiles $ManifestFiles -FileId "windows_provider"
 Copy-RequiredDirectoryFiles `
     -SourceDir $ControlAppPublishDir `
     -PayloadSourceRootRelativePath "control-app" `
@@ -189,14 +218,18 @@ $ModelsDir = Join-Path $RepoRoot "models"
 Copy-RequiredFile -SourcePath (Join-Path $ModelsDir "face_detection_yunet_2023mar.onnx") -TargetRelativePath "models\face_detection_yunet_2023mar.onnx" -ManifestFiles $ManifestFiles
 Copy-RequiredFile -SourcePath (Join-Path $ModelsDir "face_recognition_sface_2021dec.onnx") -TargetRelativePath "models\face_recognition_sface_2021dec.onnx" -ManifestFiles $ManifestFiles
 Copy-RequiredFile -SourcePath (Join-Path $ModelsDir "minifasnet_v2.onnx") -TargetRelativePath "models\minifasnet_v2.onnx" -ManifestFiles $ManifestFiles
-Copy-OptionalFile -SourcePath (Join-Path $ModelsDir "yolov8n.onnx") -TargetRelativePath "models\yolov8n.onnx" -FileId "yolov8_person_model" -ManifestFiles $ManifestFiles
+Copy-RequiredFile -SourcePath (Join-Path $ModelsDir "yolov8n.onnx") -TargetRelativePath "models\yolov8n.onnx" -FileId "yolov8_person_model" -ManifestFiles $ManifestFiles
 Copy-OptionalFile -SourcePath (Join-Path $ModelsDir "MobileNetSSD_deploy.caffemodel") -TargetRelativePath "models\MobileNetSSD_deploy.caffemodel" -FileId "mobilenet_ssd_person_model" -ManifestFiles $ManifestFiles
 Copy-OptionalFile -SourcePath (Join-Path $ModelsDir "MobileNetSSD_deploy.prototxt") -TargetRelativePath "models\MobileNetSSD_deploy.prototxt" -FileId "mobilenet_ssd_person_config" -ManifestFiles $ManifestFiles
+Copy-OptionalFile -SourcePath (Join-Path $ModelsDir "pose_landmarker_lite.task") -TargetRelativePath "models\pose_landmarker_lite.task" -FileId "mediapipe_pose_lite_model" -ManifestFiles $ManifestFiles
+Copy-OptionalFile -SourcePath (Join-Path $RepoRoot "native\winfaceunlock_mediapipe_bridge.dll") -TargetRelativePath "native\winfaceunlock_mediapipe_bridge.dll" -FileId "mediapipe_bridge" -ManifestFiles $ManifestFiles
 
 $RuntimeDllDir = Join-Path $RepoRoot "vcpkg_installed\x64-windows\bin"
 if (-not (Test-Path $RuntimeDllDir -PathType Container)) {
     throw "Required runtime DLL directory is missing: $RuntimeDllDir"
 }
+$OrtRuntimeDllPath = Resolve-OrtRuntimeDllPath -BinaryDir $BinaryDir -ControlAppPublishDir $ControlAppPublishDir
+Copy-RequiredFile -SourcePath $OrtRuntimeDllPath -TargetRelativePath "onnxruntime.dll" -FileId "onnxruntime" -ManifestFiles $ManifestFiles
 Get-ChildItem -LiteralPath $RuntimeDllDir -Filter "*.dll" | Sort-Object Name | ForEach-Object {
     $runtimeFileName = $_.Name
     $runtimeFileId = "runtime_" + [System.IO.Path]::GetFileNameWithoutExtension($runtimeFileName).Replace("-", "_").Replace(".", "_")
@@ -216,7 +249,7 @@ Write-RecoveryScript -TargetRelativePath "recovery\uninstall.cmd" -ManifestFiles
 Write-RecoveryScript -TargetRelativePath "recovery\repair.cmd" -ManifestFiles $ManifestFiles -Lines @(
     "@echo off",
     "set ROOT=%~dp0..",
-    'call "%ROOT%\installer_cli.exe" repair --service-binary "%ROOT%\win_service.exe" --provider-binary "%ROOT%\windows_provider.dll" --start-service'
+    "call ""%ROOT%\installer_cli.exe"" repair --service-binary ""%ROOT%\win_service.exe"" --provider-binary ""%ROOT%\$ProviderDllTargetRelativePath"" --start-service"
 )
 
 [void]$ManifestFiles.Add([ordered]@{

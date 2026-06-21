@@ -194,7 +194,8 @@ public sealed class SetupFlowCoordinator
                 CameraId = cameraId,
                 ConfigureLocalCameraAuth = configureLocalCameraAuth,
                 MatchThreshold = matchThreshold,
-                RequiredConsecutiveMatchCount = requiredConsecutiveMatchCount
+                RequiredConsecutiveMatchCount = requiredConsecutiveMatchCount,
+                ProviderBinaryRelativePath = ProviderBinaryRelativePath()
             },
             cancellationToken);
     }
@@ -213,7 +214,8 @@ public sealed class SetupFlowCoordinator
                 InstallDir = installDir,
                 CameraId = cameraId,
                 MatchThreshold = matchThreshold,
-                RequiredConsecutiveMatchCount = requiredConsecutiveMatchCount
+                RequiredConsecutiveMatchCount = requiredConsecutiveMatchCount,
+                ProviderBinaryRelativePath = ProviderBinaryRelativePath()
             },
             cancellationToken);
     }
@@ -325,6 +327,14 @@ public sealed class SetupFlowCoordinator
 
         var files = filesElement.Deserialize<IReadOnlyList<StagePayloadFile>>();
         return files ?? Array.Empty<StagePayloadFile>();
+    }
+
+    private string ProviderBinaryRelativePath()
+    {
+        return LastInspectedStageFiles
+                   .FirstOrDefault(file => file.FileId == "windows_provider")
+                   ?.TargetRelativePath
+               ?? @"provider\windows_provider.dll";
     }
 
     private static async Task ObservePipeWriterAsync(Task pipeWriter)

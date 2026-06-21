@@ -120,6 +120,23 @@ where
         )
     }
 
+    pub fn authenticate_detected_face_without_failure_cooldown(
+        &mut self,
+        frame: &VideoFrame,
+        detected_face: &DetectedFace,
+        templates: &RecognitionTemplates,
+        current_time_unix_ms: i64,
+    ) -> Result<AuthenticationOutcome, AuthFailureReason> {
+        self.validate_authentication_preconditions(templates, current_time_unix_ms)?;
+        self.authenticate_detected_face_after_preconditions_with_policy(
+            frame,
+            detected_face,
+            templates,
+            current_time_unix_ms,
+            false,
+        )
+    }
+
     pub fn reset_consecutive_matches(&mut self) {
         self.attempt_policy.reset_consecutive_matches();
     }
@@ -149,6 +166,23 @@ where
         templates: &RecognitionTemplates,
         current_time_unix_ms: i64,
     ) -> Result<AuthenticationOutcome, AuthFailureReason> {
+        self.authenticate_detected_face_after_preconditions_with_policy(
+            frame,
+            detected_face,
+            templates,
+            current_time_unix_ms,
+            true,
+        )
+    }
+
+    fn authenticate_detected_face_after_preconditions_with_policy(
+        &mut self,
+        frame: &VideoFrame,
+        detected_face: &DetectedFace,
+        templates: &RecognitionTemplates,
+        current_time_unix_ms: i64,
+        record_failure_for_cooldown: bool,
+    ) -> Result<AuthenticationOutcome, AuthFailureReason> {
         let recognition_model = self.model_provider.recognition_model().clone();
         let candidate = self
             .model_provider
@@ -159,8 +193,10 @@ where
             &recognition_model,
             &candidate,
         ) else {
-            self.attempt_policy
-                .record_failed_attempt(current_time_unix_ms);
+            if record_failure_for_cooldown {
+                self.attempt_policy
+                    .record_failed_attempt(current_time_unix_ms);
+            }
             return Err(AuthFailureReason::MatchBelowThreshold);
         };
 
@@ -168,9 +204,12 @@ where
             FaceMatchDecision::MatchAccepted => self
                 .attempt_policy
                 .record_match_result(true, current_time_unix_ms),
-            FaceMatchDecision::MatchRejectedBelowThreshold => self
+            FaceMatchDecision::MatchRejectedBelowThreshold if record_failure_for_cooldown => self
                 .attempt_policy
                 .record_match_result(false, current_time_unix_ms),
+            FaceMatchDecision::MatchRejectedBelowThreshold => {
+                AttemptPolicyDecision::MatchRejectedBelowThreshold
+            }
         };
 
         match policy_decision {
@@ -209,7 +248,7 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use face_engine::{
-        DetectedFace, FaceEmbedding, FaceMatch, FaceMatchDecision, FaceModelDescriptor,
+        DetectedFace, FaceBox, FaceEmbedding, FaceMatch, FaceMatchDecision, FaceModelDescriptor,
         FaceTemplateRef,
     };
     use video_provider::{PixelFormat, VideoFrame};
@@ -239,7 +278,16 @@ mod tests {
         }
 
         fn detect(&mut self, _frame: &VideoFrame) -> Result<Vec<DetectedFace>, FaceEngineError> {
-            Err(FaceEngineError::InferenceFailed)
+            Ok(vec![DetectedFace {
+                bounds: FaceBox {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1.0,
+                    height: 1.0,
+                },
+                landmarks: Vec::new(),
+                confidence: 0.9,
+            }])
         }
 
         fn extract(
@@ -247,7 +295,9 @@ mod tests {
             _frame: &VideoFrame,
             _face: &DetectedFace,
         ) -> Result<FaceEmbedding, FaceEngineError> {
-            Err(FaceEngineError::InferenceFailed)
+            Ok(FaceEmbedding {
+                values: vec![0.0, 1.0],
+            })
         }
 
         fn compare(&self, _enrolled: &FaceEmbedding, _candidate: &FaceEmbedding) -> FaceMatch {
@@ -287,6 +337,59 @@ mod tests {
         let result = authenticator.authenticate_frame(&frame, &templates, 1_000);
 
         assert_eq!(result, Err(AuthFailureReason::TemplateModelMismatch));
+    }
+
+    #[test]
+    fn scan_frame_rejections_do_not_activate_cooldown() {
+        let (provider, _, _) = stub_model_provider(FaceModelDescriptor {
+            model_family: "sface".to_owned(),
+            model_version: "2021dec".to_owned(),
+        });
+        let templates = RecognitionTemplates::new(vec![FaceTemplate {
+            template_ref: FaceTemplateRef("face-1".to_owned()),
+            user_id: "user-1".to_owned(),
+            model_family: "sface".to_owned(),
+            model_version: "2021dec".to_owned(),
+            pose_group: face_engine::FacePoseGroup::FrontalPrimary,
+            selected_for_unlock: true,
+            quality_score: None,
+            embedding: FaceEmbedding {
+                values: vec![1.0, 0.0],
+            },
+        }]);
+        let matcher = FaceTemplateMatcher::new(0.55);
+        let policy = AttemptPolicy::new(AttemptPolicyConfig::default());
+        let mut authenticator = FaceAuthenticator::new(provider, matcher, policy);
+        let frame = VideoFrame {
+            width: 1,
+            height: 1,
+            format: PixelFormat::Gray8,
+            data: vec![0],
+        };
+        let face_result = authenticator.detect_single_face(&frame);
+        assert!(
+            face_result.is_ok(),
+            "stub model provider should return one detected face for the test frame"
+        );
+        let Ok(face) = face_result else {
+            return;
+        };
+
+        for timestamp in 1_000..1_005 {
+            assert_eq!(
+                authenticator.authenticate_detected_face_without_failure_cooldown(
+                    &frame, &face, &templates, timestamp
+                ),
+                Err(AuthFailureReason::MatchBelowThreshold)
+            );
+        }
+
+        assert_eq!(
+            authenticator.authenticate_detected_face_without_failure_cooldown(
+                &frame, &face, &templates, 1_006
+            ),
+            Err(AuthFailureReason::MatchBelowThreshold)
+        );
     }
 
     #[test]

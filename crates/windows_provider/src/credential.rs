@@ -15,6 +15,8 @@ use windows::Win32::{
 };
 use windows_core::{BOOL, PCWSTR, PWSTR, Ref, Result, implement};
 
+use common_protocol::AuthTriggerSource;
+
 use crate::{
     auth_package::retrieve_negotiate_auth_package_id,
     fields::{FIELD_ID_STATUS, FIELD_ID_TITLE, allocate_wide_string, field_spec},
@@ -61,6 +63,7 @@ impl ICredentialProviderCredential_Impl for WinFaceUnlockCredential_Impl {
             self.state.clone(),
             "Credential.SelectedWake",
             WakeStartPolicy::Immediate,
+            AuthTriggerSource::InputTriggered,
         );
         Ok(false.into())
     }

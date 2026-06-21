@@ -48,7 +48,7 @@ fn decode_json_frame<T: DeserializeOwned>(frame: &[u8]) -> Result<T, ProtocolErr
 
 #[cfg(test)]
 mod tests {
-    use common_protocol::{AuthSource, ServiceRequest, SessionId};
+    use common_protocol::{AuthSource, AuthTriggerSource, ServiceRequest, SessionId};
 
     use super::*;
 
@@ -57,6 +57,7 @@ mod tests {
         let request = ServiceRequest::WakeAuth {
             session_id: SessionId("session-1".to_owned()),
             source: AuthSource::LocalCamera,
+            trigger_source: AuthTriggerSource::InputTriggered,
         };
 
         let frame = encode_request(&request)?;

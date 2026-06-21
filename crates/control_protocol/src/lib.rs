@@ -200,6 +200,8 @@ impl ControlSettingsPatch {
 #[serde(rename_all = "snake_case")]
 pub enum LogonWakeMode {
     InputTriggered,
+    BackgroundPolicy,
+    Hybrid,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
@@ -223,6 +225,7 @@ pub struct WindowsCredentialAccountProfile {
     pub user_sid: String,
     pub account_type: WindowsCredentialAccountType,
     pub credential_ref: String,
+    pub credential_secret_state: WindowsCredentialSecretState,
 }
 
 impl WindowsCredentialEnrollmentPayload {
@@ -255,6 +258,14 @@ pub enum WindowsCredentialAccountType {
     Domain,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsCredentialSecretState {
+    Configured,
+    #[default]
+    NotConfigured,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct WindowsCredentialEnrollmentOutcome {
     pub windows_account_username: String,
@@ -262,6 +273,7 @@ pub struct WindowsCredentialEnrollmentOutcome {
     pub user_sid: String,
     pub account_type: WindowsCredentialAccountType,
     pub credential_ref: String,
+    pub credential_secret_state: WindowsCredentialSecretState,
 }
 
 fn default_control_user_id() -> String {
@@ -846,11 +858,13 @@ mod tests {
             user_sid: "S-1-5-21-real".to_owned(),
             account_type: WindowsCredentialAccountType::Local,
             credential_ref: "windows-credential-dev-user".to_owned(),
+            credential_secret_state: WindowsCredentialSecretState::Configured,
         };
 
         let json_text = serde_json::to_string(&profile)?;
         assert!(json_text.contains("\"windows_account_username\":\"Leo16\""));
         assert!(json_text.contains("\"credential_ref\":\"windows-credential-dev-user\""));
+        assert!(json_text.contains("\"credential_secret_state\":\"configured\""));
         assert!(!json_text.contains("password"));
 
         let decoded: WindowsCredentialAccountProfile = serde_json::from_str(&json_text)?;

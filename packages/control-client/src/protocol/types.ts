@@ -44,7 +44,7 @@ export interface ControlResponseEnvelope<TDetails = unknown> {
   next_recommended_action?: string;
 }
 
-export type LogonWakeMode = 'input_triggered';
+export type LogonWakeMode = 'input_triggered' | 'background_policy' | 'hybrid';
 
 export interface ControlSettingsSnapshot {
   presence_lock_enabled: boolean;
@@ -57,6 +57,7 @@ export interface ControlSettingsPatch {
 }
 
 export type WindowsCredentialAccountType = 'local' | 'microsoft_account' | 'domain';
+export type WindowsCredentialSecretState = 'configured' | 'not_configured';
 
 export interface WindowsCredentialEnrollmentPayload {
   windows_account_username?: string;
@@ -72,6 +73,7 @@ export interface WindowsCredentialAccountProfile {
   user_sid: string;
   account_type: WindowsCredentialAccountType;
   credential_ref: string;
+  credential_secret_state: WindowsCredentialSecretState;
 }
 
 export interface WindowsCredentialEnrollmentOutcome {
@@ -80,6 +82,7 @@ export interface WindowsCredentialEnrollmentOutcome {
   user_sid: string;
   account_type: WindowsCredentialAccountType;
   credential_ref: string;
+  credential_secret_state: WindowsCredentialSecretState;
 }
 
 export type FaceTemplateKind = 'selected_template_set' | 'repository_template';

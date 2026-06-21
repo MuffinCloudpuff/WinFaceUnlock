@@ -225,6 +225,10 @@ $installedControlApp = Join-Path $StageDir "WinFaceUnlock.exe"
 if (-not (Test-Path $installedControlApp -PathType Leaf)) {
     throw "Staged install is missing the control panel entrypoint: $installedControlApp"
 }
+$installedTauriLibrary = Join-Path $StageDir "winfaceunlock_control_tauri_lib.dll"
+if (-not (Test-Path $installedTauriLibrary -PathType Leaf)) {
+    throw "Staged install is missing the Tauri control library: $installedTauriLibrary"
+}
 
 Write-Host "WinFaceUnlock setup package validation passed:"
 Write-Host "  setup_exe: $SetupExe"

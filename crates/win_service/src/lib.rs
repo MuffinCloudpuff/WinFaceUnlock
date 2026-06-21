@@ -1,4 +1,6 @@
 pub mod auth_issuer;
+pub mod auth_orchestrator;
+pub mod camera_backend_profiles;
 pub mod console_host;
 pub mod credential_resolver;
 pub mod credential_store_config;
@@ -15,5 +17,6 @@ pub mod presence_service;
 pub mod screen_snapshot;
 pub mod service_config;
 pub mod service_host;
+pub mod service_log;
 pub mod session_lock;
 pub mod simulated_auth;

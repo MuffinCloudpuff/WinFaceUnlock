@@ -172,6 +172,23 @@ impl ServiceManagerFacade {
         }
     }
 
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn stop_service_if_exists(&self) -> Result<(), InstallerError> {
+        let service = match self.manager.open_service(
+            SERVICE_NAME,
+            ServiceAccess::QUERY_STATUS | ServiceAccess::STOP,
+        ) {
+            Ok(service) => service,
+            Err(error) if is_service_missing_error(&error) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if service.query_status()?.current_state == ServiceState::Stopped {
+            return Ok(());
+        }
+        service.stop()?;
+        wait_for_service_state(&service, ServiceState::Stopped)
+    }
+
     pub fn restart_service(&self) -> Result<(), InstallerError> {
         let service = self.manager.open_service(
             SERVICE_NAME,

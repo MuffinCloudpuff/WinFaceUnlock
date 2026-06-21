@@ -18,7 +18,7 @@ use video_provider::{
 use crate::{
     presence_monitor::{PresenceMonitorError, PresenceObservationSource},
     presence_person_detector::{
-        OpenCvDnnPersonDetector, OpenCvDnnPersonDetectorConfig, PersonDetection, PresenceDetector,
+        PersonDetection, PersonDetector, PersonDetectorConfig, PresenceDetector,
     },
     presence_policy::PresenceObservation,
 };
@@ -26,13 +26,13 @@ use crate::{
 pub struct PersonCameraPresenceObservationConfig {
     pub camera_id: CameraId,
     pub camera_config: OpenCvCameraProviderConfig,
-    pub detector_config: OpenCvDnnPersonDetectorConfig,
+    pub detector_config: PersonDetectorConfig,
     pub debug_output_dir: Option<PathBuf>,
 }
 
 pub struct PersonCameraPresenceObservationSource {
     camera_provider: OpenCvCameraProvider,
-    detector: OpenCvDnnPersonDetector,
+    detector: PersonDetector,
     debug_recorder: Option<PersonPresenceDebugRecorder>,
 }
 
@@ -45,7 +45,7 @@ impl PersonCameraPresenceObservationSource {
             .open(&config.camera_id)
             .map_err(|_| PresenceMonitorError::ObservationFailed)?;
 
-        let mut detector = OpenCvDnnPersonDetector::new(config.detector_config);
+        let mut detector = PersonDetector::new(config.detector_config);
         detector
             .load_model()
             .map_err(|_| PresenceMonitorError::ObservationFailed)?;

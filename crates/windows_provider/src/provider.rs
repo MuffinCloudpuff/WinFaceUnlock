@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common_protocol::ProtocolError;
+use common_protocol::{AuthTriggerSource, ProtocolError};
 use windows::Win32::{
     Foundation::E_INVALIDARG,
     UI::Shell::{
@@ -21,6 +21,7 @@ use windows_core::{BOOL, Ref, Result, implement};
 use crate::{
     broker_client::{ProviderBrokerClient, ProviderWakeOutcome},
     credential::create_credential,
+    dll_lifetime::DllWorkerGuard,
     fields::{FIELD_COUNT, allocate_field_descriptor},
     provider_config::{ProviderLogonWakeMode, ProviderRuntimeConfig},
     provider_log::{write_provider_event, write_provider_event_detail},
@@ -29,7 +30,6 @@ use crate::{
 
 const AUTOMATIC_WAKE_ATTEMPT_LIMIT: u32 = 3;
 const AUTOMATIC_WAKE_RETRY_DELAY_MS: u64 = 600;
-const ADVISE_RECENT_INPUT_WAKE_WINDOW_MS: u64 = 1_500;
 const ADVISE_INPUT_WAIT_TIMEOUT_MS: u64 = 10 * 60 * 1_000;
 const ADVISE_INPUT_POLL_INTERVAL_MS: u64 = 250;
 const TRANSPORT_WAKE_ATTEMPT_LIMIT: u32 = 20;
@@ -87,15 +87,38 @@ impl ICredentialProvider_Impl for WinFaceUnlockProvider_Impl {
     fn Advise(&self, pcpe: Ref<ICredentialProviderEvents>, upadvisecontext: usize) -> Result<()> {
         write_provider_event("Provider.Advise");
         self.state.set_events(pcpe.cloned(), upadvisecontext);
-        if matches!(
-            ProviderRuntimeConfig::from_registry_or_default().logon_wake_mode,
-            Some(ProviderLogonWakeMode::InputTriggered)
-        ) {
-            request_wake_in_background(
-                self.state.clone(),
-                "Provider.AutoWake",
-                WakeStartPolicy::WaitForUserInputAfterAdvise,
-            );
+        match ProviderRuntimeConfig::from_registry_or_default().logon_wake_mode {
+            Some(ProviderLogonWakeMode::InputTriggered) => {
+                request_wake_in_background(
+                    self.state.clone(),
+                    "Provider.InputTriggeredWake",
+                    WakeStartPolicy::WaitForUserInputAfterAdvise,
+                    AuthTriggerSource::InputTriggered,
+                );
+            }
+            Some(ProviderLogonWakeMode::BackgroundPolicy) => {
+                request_wake_in_background(
+                    self.state.clone(),
+                    "Provider.BackgroundPolicyWake",
+                    WakeStartPolicy::Immediate,
+                    AuthTriggerSource::BackgroundPolicy,
+                );
+            }
+            Some(ProviderLogonWakeMode::Hybrid) => {
+                request_wake_in_background(
+                    self.state.clone(),
+                    "Provider.BackgroundPolicyWake",
+                    WakeStartPolicy::Immediate,
+                    AuthTriggerSource::BackgroundPolicy,
+                );
+                request_wake_in_background(
+                    self.state.clone(),
+                    "Provider.InputTriggeredWake",
+                    WakeStartPolicy::WaitForUserInputAfterAdvise,
+                    AuthTriggerSource::InputTriggered,
+                );
+            }
+            None => {}
         }
         Ok(())
     }
@@ -161,6 +184,7 @@ pub(crate) fn request_wake_in_background(
     state: Arc<ProviderState>,
     trigger_name: &'static str,
     start_policy: WakeStartPolicy,
+    trigger_source: AuthTriggerSource,
 ) {
     let session_id = match state.begin_wake_request(AUTOMATIC_WAKE_ATTEMPT_LIMIT) {
         WakeRequestStart::Started { session_id } => session_id,
@@ -172,9 +196,11 @@ pub(crate) fn request_wake_in_background(
 
     write_provider_event(trigger_name);
     let worker_state = state.clone();
+    let worker_guard = DllWorkerGuard::new();
     let spawn_result = std::thread::Builder::new()
         .name("winfaceunlock-provider-wake".to_owned())
         .spawn(move || {
+            let _worker_guard = worker_guard;
             if !wait_for_wake_start_policy(&worker_state, start_policy) {
                 write_provider_event_detail(
                     "Provider.WakeStopped",
@@ -192,30 +218,23 @@ pub(crate) fn request_wake_in_background(
             let broker_client =
                 ProviderBrokerClient::service_default(runtime_config.wake_auth_source);
             for attempt_number in 1..=AUTOMATIC_WAKE_ATTEMPT_LIMIT {
-                if !worker_state.has_events_sink() {
-                    write_provider_event_detail(
-                        "Provider.WakeStopped",
-                        format!("attempt={attempt_number} reason=provider-unadvised"),
-                    );
-                    return;
-                }
-
                 if attempt_number > 1 {
                     thread::sleep(Duration::from_millis(AUTOMATIC_WAKE_RETRY_DELAY_MS));
-                    if !worker_state.has_events_sink() {
-                        write_provider_event_detail(
-                            "Provider.WakeStopped",
-                            format!("attempt={attempt_number} reason=provider-unadvised"),
-                        );
-                        return;
-                    }
                     worker_state
                         .mark_automatic_retry_started(attempt_number, AUTOMATIC_WAKE_ATTEMPT_LIMIT);
                 }
 
+                write_provider_event_detail(
+                    "Provider.WakeRequestStarted",
+                    format!(
+                        "attempt={attempt_number}/{AUTOMATIC_WAKE_ATTEMPT_LIMIT} session_id={}",
+                        session_id.0
+                    ),
+                );
                 match wake_and_fetch_with_transport_retry(
                     &broker_client,
                     session_id.clone(),
+                    trigger_source,
                     TRANSPORT_WAKE_ATTEMPT_LIMIT,
                 ) {
                     Ok(outcome) => {
@@ -277,20 +296,12 @@ fn wait_for_wake_start_policy(state: &ProviderState, start_policy: WakeStartPoli
 
 fn wait_for_user_input_after_advise(state: &ProviderState) -> bool {
     let Some(baseline) = LastInputSnapshot::capture() else {
-        write_provider_event("Provider.AutoWakeInputProbeUnavailable");
+        write_provider_event("Provider.LockScreenInputProbeUnavailable");
         return true;
     };
 
-    if baseline.input_age_ms <= ADVISE_RECENT_INPUT_WAKE_WINDOW_MS {
-        write_provider_event_detail(
-            "Provider.AutoWakeInputAlreadyRecent",
-            format!("age_ms={}", baseline.input_age_ms),
-        );
-        return true;
-    }
-
     write_provider_event_detail(
-        "Provider.AutoWakeWaitingForInput",
+        "Provider.LockScreenInputWaiting",
         format!("baseline_tick={}", baseline.last_input_tick_ms),
     );
     let deadline = Instant::now() + Duration::from_millis(ADVISE_INPUT_WAIT_TIMEOUT_MS);
@@ -302,11 +313,9 @@ fn wait_for_user_input_after_advise(state: &ProviderState) -> bool {
         let Some(current) = LastInputSnapshot::capture() else {
             return true;
         };
-        if current.last_input_tick_ms != baseline.last_input_tick_ms
-            || current.input_age_ms <= ADVISE_RECENT_INPUT_WAKE_WINDOW_MS
-        {
+        if current.last_input_tick_ms != baseline.last_input_tick_ms {
             write_provider_event_detail(
-                "Provider.AutoWakeInputObserved",
+                "Provider.LockScreenInputObserved",
                 format!(
                     "baseline_tick={} current_tick={} age_ms={}",
                     baseline.last_input_tick_ms, current.last_input_tick_ms, current.input_age_ms
@@ -403,10 +412,11 @@ fn write_wake_outcome_detail(
 fn wake_and_fetch_with_transport_retry(
     broker_client: &ProviderBrokerClient,
     session_id: common_protocol::SessionId,
+    trigger_source: AuthTriggerSource,
     transport_attempt_limit: u32,
 ) -> std::result::Result<ProviderWakeOutcome, ProtocolError> {
     for transport_attempt_number in 1..=transport_attempt_limit {
-        match broker_client.wake_and_fetch_credential_material(session_id.clone()) {
+        match broker_client.wake_and_fetch_credential_material(session_id.clone(), trigger_source) {
             Ok(outcome) => return Ok(outcome),
             Err(error) if transport_attempt_number < transport_attempt_limit => {
                 write_provider_event_detail(

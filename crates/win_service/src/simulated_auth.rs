@@ -1,8 +1,8 @@
 use common_protocol::{
-    AuthFailureReason, AuthGrant, AuthScore, AuthSource, DEFAULT_GRANT_TTL, GrantId, Nonce,
+    AuthGrant, AuthScore, AuthSource, AuthTriggerSource, DEFAULT_GRANT_TTL, GrantId, Nonce,
     SessionId, UserId,
 };
-use ipc::AuthGrantIssuer;
+use ipc::{AuthGrantIssueResult, AuthGrantIssuer};
 
 pub struct SimulatedAuthGrantIssuer {
     user_id: UserId,
@@ -23,12 +23,13 @@ impl AuthGrantIssuer for SimulatedAuthGrantIssuer {
         &mut self,
         session_id: &SessionId,
         source: AuthSource,
+        _trigger_source: AuthTriggerSource,
         issued_at_unix_ms: i64,
-    ) -> Result<AuthGrant, AuthFailureReason> {
+    ) -> AuthGrantIssueResult {
         let grant_sequence = self.next_grant_sequence;
         self.next_grant_sequence = self.next_grant_sequence.saturating_add(1);
 
-        Ok(AuthGrant {
+        AuthGrantIssueResult::Issued(AuthGrant {
             grant_id: GrantId(format!("dev-grant-{grant_sequence}")),
             nonce: Nonce(format!("dev-nonce-{grant_sequence}")),
             session_id: session_id.clone(),
@@ -51,13 +52,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn simulated_issuer_generates_explicit_short_lived_grant() -> Result<(), AuthFailureReason> {
+    fn simulated_issuer_generates_explicit_short_lived_grant() {
         let mut issuer = SimulatedAuthGrantIssuer::for_user(UserId("user-1".to_owned()));
-        let grant = issuer.issue_auth_grant(
+        let issued_result = issuer.issue_auth_grant(
             &SessionId("session-1".to_owned()),
             AuthSource::ManualTest,
+            AuthTriggerSource::InputTriggered,
             1_000,
-        )?;
+        );
+        assert!(matches!(issued_result, AuthGrantIssueResult::Issued(_)));
+        let AuthGrantIssueResult::Issued(grant) = issued_result else {
+            return;
+        };
 
         assert_eq!(grant.grant_id, GrantId("dev-grant-1".to_owned()));
         assert_eq!(grant.issued_at_unix_ms, 1_000);
@@ -65,6 +71,5 @@ mod tests {
             grant.expires_at_unix_ms,
             1_000 + DEFAULT_GRANT_TTL.as_millis() as i64
         );
-        Ok(())
     }
 }

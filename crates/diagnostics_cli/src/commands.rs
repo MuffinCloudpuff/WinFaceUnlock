@@ -9,8 +9,9 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use common_protocol::{
-    AccountType, AuthFailureReason, AuthGrant, AuthSource, CredentialRef, GrantId, Nonce,
-    PIPE_NAME, ProtocolError, SERVICE_NAME, ServiceEvent, ServiceRequest, SessionId, UserId,
+    AccountType, AuthFailureReason, AuthGrant, AuthSource, AuthTriggerSource, CredentialRef,
+    GrantId, Nonce, PIPE_NAME, ProtocolError, SERVICE_NAME, ServiceEvent, ServiceRequest,
+    SessionId, UserId,
 };
 use face_auth::{
     AttemptPolicy, AttemptPolicyConfig, FaceAuthenticator, FaceEnrollmentService,
@@ -77,6 +78,8 @@ const DEFAULT_PROJECT_FACE_MATCH_THRESHOLD: f32 = 0.75;
 const DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD: f32 = 0.50;
 const ENROLLMENT_STATUS_FILE_NAME: &str = "enrollment_status.json";
 const PREVIEW_EVENT_PREFIX: &str = "WINFACEUNLOCK_PREVIEW_FRAME ";
+const AUTH_RESULT_POLL_ATTEMPTS: usize = 80;
+const AUTH_RESULT_POLL_DELAY: Duration = Duration::from_millis(500);
 #[cfg(feature = "mediapipe-pose")]
 const DEFAULT_MEDIAPIPE_BRIDGE_DLL_PATH: &str = "native/winfaceunlock_mediapipe_bridge.dll";
 #[cfg(feature = "mediapipe-pose")]
@@ -218,6 +221,21 @@ pub fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<(), Diagn
     if args.iter().any(|arg| arg == "health-check") {
         let event = send_health_check(pipe_name)?;
         println!("{SERVICE_NAME} health-check: {event:?}");
+    } else if args.iter().any(|arg| arg == "pipe-check") {
+        let mut client = NamedPipeClient::new(pipe_name);
+        match client.connect() {
+            Ok(()) => {
+                client.disconnect();
+                println!("{SERVICE_NAME} pipe-check: connected");
+            }
+            Err(error) => {
+                println!(
+                    "{SERVICE_NAME} pipe-check: {error:?} win32_error={:?}",
+                    client.last_connect_error()
+                );
+                return Err(error.into());
+            }
+        }
     } else if args.iter().any(|arg| arg == "wake-auth") {
         let session_id = SessionId(
             argument_value(&args, "--session-id")
@@ -269,6 +287,8 @@ pub fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<(), Diagn
         run_service_camera_auth(pipe_name, &args)?;
     } else if args.iter().any(|arg| arg == "list-cameras") {
         run_list_cameras(&args)?;
+    } else if args.iter().any(|arg| arg == "camera-open-benchmark") {
+        run_camera_open_benchmark(&args)?;
     } else if args.iter().any(|arg| arg == "test-camera") {
         run_test_camera(&args)?;
     } else if args.iter().any(|arg| arg == "test-face") {
@@ -403,7 +423,21 @@ pub fn send_wake_auth(
     session_id: SessionId,
     source: AuthSource,
 ) -> Result<ServiceEvent, ProtocolError> {
-    send_request(pipe_name, ServiceRequest::WakeAuth { session_id, source })
+    send_request(
+        pipe_name,
+        ServiceRequest::WakeAuth {
+            session_id,
+            source,
+            trigger_source: AuthTriggerSource::InputTriggered,
+        },
+    )
+}
+
+pub fn send_fetch_auth_result(
+    pipe_name: &str,
+    session_id: SessionId,
+) -> Result<ServiceEvent, ProtocolError> {
+    send_request(pipe_name, ServiceRequest::FetchAuthResult { session_id })
 }
 
 pub fn send_fetch_credential(
@@ -446,7 +480,7 @@ fn run_service_camera_auth(pipe_name: &str, args: &[String]) -> Result<(), Diagn
     );
     let wake_event = send_wake_auth(pipe_name, session_id.clone(), AuthSource::LocalCamera)?;
     print_wake_auth_event(&wake_event);
-    let grant = auth_grant_from_event(wake_event)?;
+    let grant = wait_for_auth_grant(pipe_name, wake_event)?;
 
     let credential_event = send_fetch_credential(
         pipe_name,
@@ -469,6 +503,32 @@ fn auth_grant_from_event(event: ServiceEvent) -> Result<AuthGrant, DiagnosticErr
         ServiceEvent::RequestRejected { reason } => Err(DiagnosticError::Protocol(reason)),
         _ => Err(DiagnosticError::Protocol(ProtocolError::InvalidMessage)),
     }
+}
+
+fn wait_for_auth_grant(
+    pipe_name: &str,
+    wake_event: ServiceEvent,
+) -> Result<AuthGrant, DiagnosticError> {
+    if !matches!(wake_event, ServiceEvent::AuthStarted { .. }) {
+        return auth_grant_from_event(wake_event);
+    }
+
+    let ServiceEvent::AuthStarted { session_id } = wake_event else {
+        unreachable!();
+    };
+    for _ in 0..AUTH_RESULT_POLL_ATTEMPTS {
+        thread::sleep(AUTH_RESULT_POLL_DELAY);
+        let event = send_fetch_auth_result(pipe_name, session_id.clone())?;
+        print_wake_auth_event(&event);
+        match event {
+            ServiceEvent::AuthStarted { .. } => continue,
+            other => return auth_grant_from_event(other),
+        }
+    }
+
+    Err(DiagnosticError::Protocol(
+        ProtocolError::TransportUnavailable,
+    ))
 }
 
 fn run_test_camera(args: &[String]) -> Result<(), DiagnosticError> {
@@ -495,6 +555,65 @@ fn run_list_cameras(args: &[String]) -> Result<(), DiagnosticError> {
     let provider = build_camera_provider(args)?;
     let sources = provider.list_sources()?;
     print_camera_sources(&sources);
+    Ok(())
+}
+
+fn run_camera_open_benchmark(args: &[String]) -> Result<(), DiagnosticError> {
+    use opencv::{
+        prelude::{MatTraitConst, VideoCaptureTrait, VideoCaptureTraitConst},
+        videoio::{self, VideoCapture},
+    };
+    use std::time::Instant;
+
+    let camera_id = selected_camera_id(args, &[])?;
+    let camera_index = camera_id.camera_index()?;
+    let backend_filter = argument_value(args, "--backend");
+    let backends = [
+        ("msmf", videoio::CAP_MSMF),
+        ("dshow", videoio::CAP_DSHOW),
+        ("any", videoio::CAP_ANY),
+    ];
+
+    for (backend_name, backend) in backends {
+        if backend_filter.is_some_and(|filter| filter != backend_name) {
+            continue;
+        }
+
+        let open_started = Instant::now();
+        let capture_result = VideoCapture::new(camera_index, backend);
+        let open_ms = open_started.elapsed().as_millis();
+        let Ok(mut capture) = capture_result else {
+            println!("backend={backend_name} open_ms={open_ms} opened=false error=new_failed");
+            continue;
+        };
+
+        if let Some(width) = optional_u32(args, "--frame-width")? {
+            let _ = capture.set(videoio::CAP_PROP_FRAME_WIDTH, f64::from(width));
+        }
+        if let Some(height) = optional_u32(args, "--frame-height")? {
+            let _ = capture.set(videoio::CAP_PROP_FRAME_HEIGHT, f64::from(height));
+        }
+
+        let opened = capture.is_opened().unwrap_or(false);
+        if !opened {
+            println!("backend={backend_name} open_ms={open_ms} opened=false");
+            let _ = capture.release();
+            continue;
+        }
+
+        let read_started = Instant::now();
+        let mut frame = opencv::core::Mat::default();
+        let read_ok = capture.read(&mut frame).unwrap_or(false);
+        let read_ms = read_started.elapsed().as_millis();
+        println!(
+            "backend={backend_name} open_ms={open_ms} opened=true read_ms={read_ms} read_ok={read_ok} width={} height={} empty={}",
+            frame.cols(),
+            frame.rows(),
+            frame.empty()
+        );
+        let _ = capture.release();
+    }
+
     Ok(())
 }
 
@@ -1649,6 +1768,7 @@ fn run_presence_monitor_camera_debug(args: &[String]) -> Result<(), DiagnosticEr
             max_camera_index: 8,
             requested_frame_width: optional_u32(args, "--frame-width")?,
             requested_frame_height: optional_u32(args, "--frame-height")?,
+            preferred_backend: None,
         },
         model_config,
         templates,
@@ -2416,6 +2536,7 @@ fn build_camera_provider(args: &[String]) -> Result<OpenCvCameraProvider, Diagno
         max_camera_index: 8,
         requested_frame_width: optional_u32(args, "--frame-width")?,
         requested_frame_height: optional_u32(args, "--frame-height")?,
+        preferred_backend: None,
     }))
 }
 
@@ -2574,6 +2695,9 @@ fn print_usage() {
     println!("Usage: diagnostics_cli list-cameras");
     println!(
         "Usage: diagnostics_cli test-camera [--camera-id opencv-index:0] [--frame-width 640 --frame-height 480]"
+    );
+    println!(
+        "Usage: diagnostics_cli camera-open-benchmark [--camera-id opencv-index:0] [--backend msmf|dshow|any] [--frame-width 640 --frame-height 480]"
     );
     println!(
         "Usage: diagnostics_cli test-face --image <path> [--yunet-model <onnx>] [--sface-model <onnx>]"

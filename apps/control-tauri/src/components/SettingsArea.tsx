@@ -136,18 +136,21 @@ export function SettingsArea() {
              
              <div className="flex p-1 bg-slate-100/50 rounded-xl border border-slate-200/50 relative">
                {[
-                 { id: 'keyboard', label: '敲击键盘', icon: Keyboard },
-                 { id: 'silent', label: '后台静默', icon: Camera },
-                 { id: 'hybrid', label: '智能混合', icon: ScanFace },
-               ].map((mode) => (
+                 { id: 'keyboard', label: '敲击键盘', Icon: Keyboard, disabled: false },
+                 { id: 'silent', label: '后台静默', Icon: Camera, disabled: false },
+                 { id: 'hybrid', label: '智能混合', Icon: ScanFace, disabled: false },
+               ].map(({ id, label, Icon, disabled }) => (
                  <button
-                   key={mode.id}
-                   onClick={() => handleTriggerModeChange(mode.id as TriggerMode)}
+                   key={id}
+                   onClick={() => !disabled && handleTriggerModeChange(id as TriggerMode)}
+                   disabled={disabled}
+                   aria-disabled={disabled}
+                   title={disabled ? '暂未开放' : undefined}
                    className={`relative flex-1 py-2 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-1.5 outline-none ${
-                     triggerMode === mode.id ? 'text-white' : 'text-slate-500 hover:text-slate-700'
+                     triggerMode === id ? 'text-white' : disabled ? 'text-slate-400 cursor-not-allowed opacity-60' : 'text-slate-500 hover:text-slate-700'
                    }`}
                  >
-                   {triggerMode === mode.id && (
+                   {triggerMode === id && (
                      <motion.div
                        layoutId="activeTriggerMode"
                        className="absolute inset-0 bg-[#007acc] rounded-lg shadow-sm"
@@ -155,8 +158,8 @@ export function SettingsArea() {
                      />
                    )}
                    <span className="relative z-10 flex items-center gap-1.5">
-                     <mode.icon className="w-4 h-4" />
-                     {mode.label}
+                     <Icon className="w-4 h-4" />
+                     {label}
                    </span>
                  </button>
                ))}

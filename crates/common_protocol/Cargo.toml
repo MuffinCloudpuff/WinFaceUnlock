@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+control_protocol = { path = "../control_protocol" }
 serde = { version = "1.0.228", features = ["derive"] }
 
 [lints]

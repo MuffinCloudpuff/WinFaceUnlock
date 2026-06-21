@@ -38,7 +38,7 @@ export function useSettingsArea(): SettingsAreaViewModel {
   const [autoLock, setAutoLock] = useState(true);
   const autoLockRequestId = useRef(0);
   const [intruderSnap, setIntruderSnap] = useState(true);
-  const [triggerMode, setTriggerMode] = useState<TriggerMode>('hybrid');
+  const [triggerMode, setTriggerMode] = useState<TriggerMode>('keyboard');
   const triggerModeRequestId = useRef(0);
   const faceDeleteRequestId = useRef(0);
   const [enrolledFaces, setEnrolledFaces] = useState<EnrolledFaceViewModel[]>([]);
@@ -137,15 +137,6 @@ export function useSettingsArea(): SettingsAreaViewModel {
 
   const changeTriggerMode = useCallback(
     (nextMode: TriggerMode) => {
-      if (nextMode !== 'keyboard') {
-        if (!isControlRuntimeAvailable()) {
-          setTriggerMode(nextMode);
-        } else {
-          console.warn('Logon wake mode is not implemented yet.', nextMode);
-        }
-        return;
-      }
-
       const previousMode = triggerMode;
       setTriggerMode(nextMode);
 
@@ -156,7 +147,7 @@ export function useSettingsArea(): SettingsAreaViewModel {
       const requestId = triggerModeRequestId.current + 1;
       triggerModeRequestId.current = requestId;
 
-      updateControlSettings(controlTransport, { logon_wake_mode: 'input_triggered' })
+      updateControlSettings(controlTransport, { logon_wake_mode: triggerModeToLogonWakeMode(nextMode) })
         .then((response) => {
           if (requestId !== triggerModeRequestId.current) {
             return;
@@ -247,5 +238,21 @@ function logonWakeModeToTriggerMode(mode?: LogonWakeMode): TriggerMode | undefin
   if (mode === 'input_triggered') {
     return 'keyboard';
   }
+  if (mode === 'background_policy') {
+    return 'silent';
+  }
+  if (mode === 'hybrid') {
+    return 'hybrid';
+  }
   return undefined;
+}
+
+function triggerModeToLogonWakeMode(mode: TriggerMode): LogonWakeMode {
+  if (mode === 'silent') {
+    return 'background_policy';
+  }
+  if (mode === 'hybrid') {
+    return 'hybrid';
+  }
+  return 'input_triggered';
 }

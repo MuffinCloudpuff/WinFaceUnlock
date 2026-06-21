@@ -43,6 +43,24 @@ struct WinFaceUnlockMediaPipePoseResult {
   float right_eye_blink_score;
 };
 
+struct WinFaceUnlockMediaPipePresencePoseOptions {
+  std::uint32_t running_mode;
+  float min_landmark_visibility;
+  float min_landmark_presence;
+};
+
+struct WinFaceUnlockMediaPipePresencePoseResult {
+  std::uint8_t detected;
+  std::uint8_t reserved[3];
+  float confidence;
+  float bbox_center_x_ratio;
+  float bbox_area_ratio;
+  float normalized_x_min;
+  float normalized_y_min;
+  float normalized_x_max;
+  float normalized_y_max;
+};
+
 WINFACEUNLOCK_MEDIAPIPE_BRIDGE_API void*
 winfaceunlock_mediapipe_pose_create(
     const char* model_path,
@@ -56,5 +74,19 @@ winfaceunlock_mediapipe_pose_estimate(
     void* provider,
     const WinFaceUnlockMediaPipeFrameRequest* request,
     WinFaceUnlockMediaPipePoseResult* result);
+
+WINFACEUNLOCK_MEDIAPIPE_BRIDGE_API void*
+winfaceunlock_mediapipe_presence_pose_create(
+    const char* model_path,
+    WinFaceUnlockMediaPipePresencePoseOptions options);
+
+WINFACEUNLOCK_MEDIAPIPE_BRIDGE_API void
+winfaceunlock_mediapipe_presence_pose_destroy(void* provider);
+
+WINFACEUNLOCK_MEDIAPIPE_BRIDGE_API int
+winfaceunlock_mediapipe_presence_pose_estimate(
+    void* provider,
+    const WinFaceUnlockMediaPipeFrameRequest* request,
+    WinFaceUnlockMediaPipePresencePoseResult* result);
 
 }  // extern "C"

@@ -16,9 +16,9 @@ pub use grant_registry::GrantRegistry;
 #[cfg(windows)]
 pub use named_pipe::{NamedPipeClient, NamedPipeServer, PipeSecurityDescriptor};
 pub use service_handler::{
-    AuthGrantIssuer, FaceTemplateConfigApplier, ProtectedCredentialMaterialResolver,
-    ProtectedCredentialResolver, ServiceRequestHandler, SystemUnixTimeMillisClock,
-    UnixTimeMillisClock,
+    AuthGrantIssueResult, AuthGrantIssuer, ProtectedCredentialMaterialResolver,
+    ProtectedCredentialResolver, ServiceConfigApplier, ServiceRequestHandler,
+    SystemUnixTimeMillisClock, UnixTimeMillisClock,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,6 +26,7 @@ pub struct PipeSecurity {
     pub allow_local_system: bool,
     pub allow_administrators: bool,
     pub allow_interactive_users: bool,
+    pub allow_authenticated_users: bool,
     pub allow_service_sid: bool,
 }
 
@@ -35,6 +36,7 @@ impl PipeSecurity {
             allow_local_system: true,
             allow_administrators: true,
             allow_interactive_users: true,
+            allow_authenticated_users: true,
             allow_service_sid: true,
         }
     }
@@ -64,6 +66,7 @@ mod tests {
         assert!(security.allow_local_system);
         assert!(security.allow_administrators);
         assert!(security.allow_interactive_users);
+        assert!(security.allow_authenticated_users);
         assert!(security.allow_service_sid);
     }
 }

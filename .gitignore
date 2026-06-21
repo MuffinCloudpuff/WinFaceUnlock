@@ -5,6 +5,8 @@
 /models/*.caffemodel
 /models/*.prototxt
 /node_modules/
+/tools/
+/winfaceunlock/
 /apps/**/bin/
 /apps/**/obj/
 /.external/

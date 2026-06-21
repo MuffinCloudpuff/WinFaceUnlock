@@ -34,6 +34,10 @@ const REG_PRESENCE_MOVEMENT_DELTA_RATIO: &str = "PresenceMovementDeltaRatio";
 const REG_PRESENCE_PERSON_MODEL_PATH: &str = "PresencePersonModelPath";
 const REG_PRESENCE_PERSON_MODEL_CONFIG_PATH: &str = "PresencePersonModelConfigPath";
 const REG_PRESENCE_PERSON_DEBUG_OUTPUT_DIR: &str = "PresencePersonDebugOutputDir";
+const REG_PRESENCE_POSE_BRIDGE_DLL_PATH: &str = "PresencePoseBridgeDllPath";
+const REG_PRESENCE_POSE_MODEL_PATH: &str = "PresencePoseModelPath";
+const REG_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY: &str = "PresencePoseMinLandmarkVisibility";
+const REG_PRESENCE_POSE_MIN_LANDMARK_PRESENCE: &str = "PresencePoseMinLandmarkPresence";
 
 const AUTH_MODE_LOCAL_CAMERA: &str = "local-camera";
 const DEFAULT_SERVICE_FACE_MATCH_THRESHOLD: f32 = 0.75;
@@ -44,9 +48,14 @@ const DEFAULT_PRESENCE_PERSON_CONFIDENCE_THRESHOLD: f32 = 0.50;
 const DEFAULT_PRESENCE_ABSENT_REQUIRED_FRAMES: u32 = 6;
 const DEFAULT_PRESENCE_BOUNDARY_MARGIN_RATIO: f32 = 0.12;
 const DEFAULT_PRESENCE_MOVEMENT_DELTA_RATIO: f32 = 0.04;
-const DEFAULT_PRESENCE_PERSON_DETECTOR_MODEL: &str = "mobilenet-ssd";
-const DEFAULT_PRESENCE_PERSON_MODEL_PATH: &str = r"models\MobileNetSSD_deploy.caffemodel";
-const DEFAULT_PRESENCE_PERSON_MODEL_CONFIG_PATH: &str = r"models\MobileNetSSD_deploy.prototxt";
+const DEFAULT_PRESENCE_DETECTOR_KIND: &str = "opencv-dnn-person";
+const DEFAULT_PRESENCE_TRACKING_MODE: &str = "continuous-low-fps";
+const DEFAULT_PRESENCE_PERSON_DETECTOR_MODEL: &str = "ort-yolov8-onnx";
+const DEFAULT_PRESENCE_PERSON_MODEL_PATH: &str = r"models\yolov8n.onnx";
+const DEFAULT_PRESENCE_POSE_BRIDGE_DLL_PATH: &str = r"native\winfaceunlock_mediapipe_bridge.dll";
+const DEFAULT_PRESENCE_POSE_MODEL_PATH: &str = r"models\pose_landmarker_lite.task";
+const DEFAULT_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY: f32 = 0.45;
+const DEFAULT_PRESENCE_POSE_MIN_LANDMARK_PRESENCE: f32 = 0.45;
 const DEFAULT_MINIFASNET_MODEL_PATH: &str = r"models\minifasnet_v2.onnx";
 const DEFAULT_MINIFASNET_CROP_SCALE: f32 = 2.7;
 const DEFAULT_MINIFASNET_MIN_LIVE_SCORE: f32 = 0.80;
@@ -84,6 +93,10 @@ pub struct ServiceAuthRegistryConfig {
     pub presence_movement_delta_ratio: f32,
     pub presence_person_model_path: PathBuf,
     pub presence_person_model_config_path: Option<PathBuf>,
+    pub presence_pose_bridge_dll_path: PathBuf,
+    pub presence_pose_model_path: PathBuf,
+    pub presence_pose_min_landmark_visibility: f32,
+    pub presence_pose_min_landmark_presence: f32,
 }
 
 impl ServiceAuthRegistryConfig {
@@ -110,8 +123,8 @@ impl ServiceAuthRegistryConfig {
             match_threshold: DEFAULT_SERVICE_FACE_MATCH_THRESHOLD,
             presence_lock_enabled: false,
             presence_owner_match_threshold: DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD,
-            presence_detector_kind: "face-owner-match".to_owned(),
-            presence_tracking_mode: "face-policy".to_owned(),
+            presence_detector_kind: DEFAULT_PRESENCE_DETECTOR_KIND.to_owned(),
+            presence_tracking_mode: DEFAULT_PRESENCE_TRACKING_MODE.to_owned(),
             presence_detector_fps: DEFAULT_PRESENCE_DETECTOR_FPS,
             presence_unload_model_when_idle: false,
             presence_person_confidence_threshold: DEFAULT_PRESENCE_PERSON_CONFIDENCE_THRESHOLD,
@@ -121,9 +134,11 @@ impl ServiceAuthRegistryConfig {
             presence_boundary_margin_ratio: DEFAULT_PRESENCE_BOUNDARY_MARGIN_RATIO,
             presence_movement_delta_ratio: DEFAULT_PRESENCE_MOVEMENT_DELTA_RATIO,
             presence_person_model_path: PathBuf::from(DEFAULT_PRESENCE_PERSON_MODEL_PATH),
-            presence_person_model_config_path: Some(PathBuf::from(
-                DEFAULT_PRESENCE_PERSON_MODEL_CONFIG_PATH,
-            )),
+            presence_person_model_config_path: None,
+            presence_pose_bridge_dll_path: PathBuf::from(DEFAULT_PRESENCE_POSE_BRIDGE_DLL_PATH),
+            presence_pose_model_path: PathBuf::from(DEFAULT_PRESENCE_POSE_MODEL_PATH),
+            presence_pose_min_landmark_visibility: DEFAULT_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY,
+            presence_pose_min_landmark_presence: DEFAULT_PRESENCE_POSE_MIN_LANDMARK_PRESENCE,
         }
     }
 }
@@ -152,6 +167,10 @@ pub struct ServiceAuthRegistryStatus {
     pub presence_person_model_path: Option<String>,
     pub presence_person_model_config_path: Option<String>,
     pub presence_person_debug_output_dir: Option<String>,
+    pub presence_pose_bridge_dll_path: Option<String>,
+    pub presence_pose_model_path: Option<String>,
+    pub presence_pose_min_landmark_visibility: Option<String>,
+    pub presence_pose_min_landmark_presence: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -171,6 +190,10 @@ pub struct ServicePresenceRegistryPatch {
     pub presence_person_model_path: Option<PathBuf>,
     pub presence_person_model_config_path: Option<Option<PathBuf>>,
     pub presence_person_debug_output_dir: Option<Option<PathBuf>>,
+    pub presence_pose_bridge_dll_path: Option<PathBuf>,
+    pub presence_pose_model_path: Option<PathBuf>,
+    pub presence_pose_min_landmark_visibility: Option<f32>,
+    pub presence_pose_min_landmark_presence: Option<f32>,
 }
 
 pub struct ServiceAuthRegistry;
@@ -320,6 +343,26 @@ impl ServiceAuthRegistry {
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
         )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_POSE_BRIDGE_DLL_PATH,
+            &config.presence_pose_bridge_dll_path.display().to_string(),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_POSE_MODEL_PATH,
+            &config.presence_pose_model_path.display().to_string(),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY,
+            &config.presence_pose_min_landmark_visibility.to_string(),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_PRESENCE_POSE_MIN_LANDMARK_PRESENCE,
+            &config.presence_pose_min_landmark_presence.to_string(),
+        )?;
         Ok(())
     }
 
@@ -388,6 +431,22 @@ impl ServiceAuthRegistry {
         set_optional_nullable_path(
             REG_PRESENCE_PERSON_DEBUG_OUTPUT_DIR,
             &patch.presence_person_debug_output_dir,
+        )?;
+        set_optional_path(
+            REG_PRESENCE_POSE_BRIDGE_DLL_PATH,
+            &patch.presence_pose_bridge_dll_path,
+        )?;
+        set_optional_path(
+            REG_PRESENCE_POSE_MODEL_PATH,
+            &patch.presence_pose_model_path,
+        )?;
+        set_optional_f32(
+            REG_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY,
+            patch.presence_pose_min_landmark_visibility,
+        )?;
+        set_optional_f32(
+            REG_PRESENCE_POSE_MIN_LANDMARK_PRESENCE,
+            patch.presence_pose_min_landmark_presence,
         )?;
         Ok(())
     }
@@ -472,6 +531,22 @@ impl ServiceAuthRegistry {
             presence_person_debug_output_dir: registry::read_string_value(
                 SERVICE_CONFIG_REGISTRY_PATH,
                 REG_PRESENCE_PERSON_DEBUG_OUTPUT_DIR,
+            ),
+            presence_pose_bridge_dll_path: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_POSE_BRIDGE_DLL_PATH,
+            ),
+            presence_pose_model_path: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_POSE_MODEL_PATH,
+            ),
+            presence_pose_min_landmark_visibility: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY,
+            ),
+            presence_pose_min_landmark_presence: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_PRESENCE_POSE_MIN_LANDMARK_PRESENCE,
             ),
         }
     }
@@ -774,13 +849,40 @@ mod tests {
             config.presence_owner_match_threshold,
             DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD
         );
-        assert_eq!(config.presence_detector_kind, "face-owner-match");
-        assert_eq!(config.presence_tracking_mode, "face-policy");
+        assert_eq!(
+            config.presence_detector_kind,
+            DEFAULT_PRESENCE_DETECTOR_KIND
+        );
+        assert_eq!(
+            config.presence_tracking_mode,
+            DEFAULT_PRESENCE_TRACKING_MODE
+        );
         assert_eq!(config.presence_detector_fps, DEFAULT_PRESENCE_DETECTOR_FPS);
         assert!(!config.presence_unload_model_when_idle);
         assert_eq!(
             config.presence_person_detector_model,
             DEFAULT_PRESENCE_PERSON_DETECTOR_MODEL
+        );
+        assert_eq!(
+            config.presence_person_model_path,
+            PathBuf::from(DEFAULT_PRESENCE_PERSON_MODEL_PATH)
+        );
+        assert_eq!(config.presence_person_model_config_path, None);
+        assert_eq!(
+            config.presence_pose_bridge_dll_path,
+            PathBuf::from(DEFAULT_PRESENCE_POSE_BRIDGE_DLL_PATH)
+        );
+        assert_eq!(
+            config.presence_pose_model_path,
+            PathBuf::from(DEFAULT_PRESENCE_POSE_MODEL_PATH)
+        );
+        assert_eq!(
+            config.presence_pose_min_landmark_visibility,
+            DEFAULT_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY
+        );
+        assert_eq!(
+            config.presence_pose_min_landmark_presence,
+            DEFAULT_PRESENCE_POSE_MIN_LANDMARK_PRESENCE
         );
         assert_eq!(
             config.presence_person_suspect_fps,

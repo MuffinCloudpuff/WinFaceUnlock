@@ -122,6 +122,7 @@ pub fn run_face_calibration(config: FaceCalibrationConfig) -> Result<(), FaceCal
         max_camera_index: config.max_camera_index,
         requested_frame_width: config.requested_frame_width,
         requested_frame_height: config.requested_frame_height,
+        preferred_backend: None,
     });
     let sources = camera_provider.list_sources()?;
     let camera_id = selected_camera_id(config.camera_id, &sources)?;

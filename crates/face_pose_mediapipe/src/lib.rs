@@ -16,6 +16,12 @@ use face_pose::{FacePoseCapabilities, FacePoseError, FacePoseEstimate, FacePoseP
 use video_provider::PixelFormat;
 use video_provider::VideoFrame;
 
+pub mod presence;
+pub use presence::{
+    MediaPipePresencePoseEstimate, MediaPipePresencePoseProvider,
+    MediaPipePresencePoseProviderConfig, MediaPipePresencePoseProviderError,
+};
+
 #[cfg(feature = "native-bridge")]
 use windows_sys::Win32::{
     Foundation::{FreeLibrary, HMODULE},
@@ -163,15 +169,10 @@ impl FacePoseProvider for MediaPipeFacePoseProvider {
         frame
             .validate()
             .map_err(|_| FacePoseError::InferenceFailed)?;
-        let pixel_format = match frame.format {
-            PixelFormat::Bgr8 => 0,
-            PixelFormat::Rgb8 => 1,
-            PixelFormat::Gray8 => 2,
-        };
         let request = MediaPipeBridgeFrameRequest {
             width: frame.width,
             height: frame.height,
-            pixel_format,
+            pixel_format: pixel_format_code(frame),
             _reserved: 0,
             data: frame.data.as_ptr(),
             data_len: frame.data.len(),
@@ -228,7 +229,7 @@ struct MediaPipeBridgeOptions {
 
 #[cfg(feature = "native-bridge")]
 #[repr(C)]
-struct MediaPipeBridgeFrameRequest {
+pub(crate) struct MediaPipeBridgeFrameRequest {
     width: u32,
     height: u32,
     pixel_format: u32,
@@ -253,13 +254,13 @@ struct MediaPipeBridgePoseResult {
 }
 
 #[cfg(feature = "native-bridge")]
-fn path_to_c_string(path: &Path) -> Result<CString, MediaPipeFacePoseProviderError> {
+pub(crate) fn path_to_c_string(path: &Path) -> Result<CString, MediaPipeFacePoseProviderError> {
     CString::new(path.to_string_lossy().as_bytes())
         .map_err(|_| MediaPipeFacePoseProviderError::InvalidPath)
 }
 
 #[cfg(feature = "native-bridge")]
-fn load_bridge_library(path: &Path) -> Result<HMODULE, MediaPipeFacePoseProviderError> {
+pub(crate) fn load_bridge_library(path: &Path) -> Result<HMODULE, MediaPipeFacePoseProviderError> {
     let path_wide = path
         .as_os_str()
         .encode_wide()
@@ -273,13 +274,25 @@ fn load_bridge_library(path: &Path) -> Result<HMODULE, MediaPipeFacePoseProvider
 }
 
 #[cfg(feature = "native-bridge")]
-fn load_symbol<T>(library: HMODULE, symbol_name: &[u8]) -> Result<T, MediaPipeFacePoseProviderError>
+pub(crate) fn load_symbol<T>(
+    library: HMODULE,
+    symbol_name: &[u8],
+) -> Result<T, MediaPipeFacePoseProviderError>
 where
     T: Copy,
 {
     let symbol = unsafe { GetProcAddress(library, symbol_name.as_ptr()) }
         .ok_or(MediaPipeFacePoseProviderError::SymbolLoadFailed)?;
     Ok(unsafe { std::mem::transmute_copy(&symbol) })
+}
+
+#[cfg(feature = "native-bridge")]
+pub(crate) fn pixel_format_code(frame: &VideoFrame) -> u32 {
+    match frame.format {
+        PixelFormat::Bgr8 => 0,
+        PixelFormat::Rgb8 => 1,
+        PixelFormat::Gray8 => 2,
+    }
 }
 
 #[cfg(test)]

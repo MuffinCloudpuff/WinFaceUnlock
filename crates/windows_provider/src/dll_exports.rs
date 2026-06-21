@@ -10,8 +10,9 @@ use windows_core::{BOOL, GUID, HRESULT, Interface};
 
 use crate::{
     class_factory::{create_class_factory, dll_server_lock_count},
+    dll_lifetime::active_worker_count,
     identifiers::PROVIDER_CLSID,
-    provider_log::write_provider_event,
+    provider_log::{write_provider_event, write_provider_event_detail},
 };
 
 #[unsafe(no_mangle)]
@@ -47,12 +48,17 @@ pub unsafe extern "system" fn DllGetClassObject(
 /// Called by COM during DLL lifetime checks. This function does not dereference
 /// caller-provided pointers.
 pub unsafe extern "system" fn DllCanUnloadNow() -> HRESULT {
-    write_provider_event("DllCanUnloadNow");
-    if dll_server_lock_count() == 0 {
-        S_OK
-    } else {
-        S_FALSE
-    }
+    let server_locks = dll_server_lock_count();
+    let active_workers = active_worker_count();
+    let can_unload = server_locks == 0 && active_workers == 0;
+    write_provider_event_detail(
+        "DllCanUnloadNow",
+        format!(
+            "server_locks={server_locks} active_workers={active_workers} result={}",
+            if can_unload { "S_OK" } else { "S_FALSE" }
+        ),
+    );
+    if can_unload { S_OK } else { S_FALSE }
 }
 
 #[unsafe(no_mangle)]

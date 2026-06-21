@@ -4,8 +4,8 @@ use std::{
 };
 
 use common_protocol::{
-    AuthFailureReason, AuthGrant, AuthScore, AuthSource, DEFAULT_GRANT_TTL, GrantId, Nonce,
-    ProtocolError, SessionId, UserId,
+    AuthFailureReason, AuthGrant, AuthScore, AuthSource, AuthTriggerSource, DEFAULT_GRANT_TTL,
+    GrantId, Nonce, ProtocolError, SessionId, UserId,
 };
 use face_auth::{AttemptPolicy, AttemptPolicyConfig, FaceAuthenticator, RecognitionTemplates};
 use face_engine::{
@@ -15,19 +15,22 @@ use face_engine::{
 use face_liveness::{
     LivenessDecision, LivenessProviderError, LivenessResult, MiniFasNetLivenessProvider,
 };
-use ipc::AuthGrantIssuer;
+use ipc::{AuthGrantIssueResult, AuthGrantIssuer};
 use video_provider::{
     CameraId, OpenCvCameraProvider, OpenCvCameraProviderConfig, VideoError, VideoFrameProvider,
 };
 
 use crate::{
+    auth_orchestrator::CameraAuthOrchestrator,
+    camera_backend_profiles::apply_profile_to_config,
     service_config::{LocalCameraAuthConfig, ServiceAuthConfig, ServiceAuthMode},
+    service_log::{write_service_event, write_service_event_detail},
     simulated_auth::SimulatedAuthGrantIssuer,
 };
 
 pub struct DevelopmentAuthGrantIssuer {
     manual_test_issuer: SimulatedAuthGrantIssuer,
-    local_camera_issuer: Option<LocalCameraAuthGrantIssuer>,
+    local_camera_issuer: Option<CameraAuthOrchestrator<LocalCameraAuthGrantIssuer>>,
 }
 
 impl DevelopmentAuthGrantIssuer {
@@ -41,9 +44,9 @@ impl DevelopmentAuthGrantIssuer {
     ) -> Result<Self, ProtocolError> {
         let local_camera_issuer = match config.auth_mode {
             ServiceAuthMode::ManualTestOnly => None,
-            ServiceAuthMode::LocalCamera(local_camera_config) => Some(
+            ServiceAuthMode::LocalCamera(local_camera_config) => Some(CameraAuthOrchestrator::new(
                 LocalCameraAuthGrantIssuer::from_config(*local_camera_config)?,
-            ),
+            )),
         };
 
         Ok(Self {
@@ -58,20 +61,54 @@ impl AuthGrantIssuer for DevelopmentAuthGrantIssuer {
         &mut self,
         session_id: &SessionId,
         source: AuthSource,
+        trigger_source: AuthTriggerSource,
         issued_at_unix_ms: i64,
-    ) -> Result<AuthGrant, AuthFailureReason> {
+    ) -> AuthGrantIssueResult {
+        write_service_event_detail(
+            "AuthTrigger.Received",
+            format!(
+                "session_id={} auth_source={source:?} auth_trigger_source={}",
+                session_id.0,
+                auth_trigger_source_name(trigger_source)
+            ),
+        );
         match source {
-            AuthSource::ManualTest => {
-                self.manual_test_issuer
-                    .issue_auth_grant(session_id, source, issued_at_unix_ms)
-            }
+            AuthSource::ManualTest => self.manual_test_issuer.issue_auth_grant(
+                session_id,
+                source,
+                trigger_source,
+                issued_at_unix_ms,
+            ),
             AuthSource::LocalCamera => {
                 let Some(local_camera_issuer) = self.local_camera_issuer.as_mut() else {
-                    return Err(AuthFailureReason::InternalError);
+                    return AuthGrantIssueResult::Failed(AuthFailureReason::InternalError);
                 };
-                local_camera_issuer.issue_auth_grant(session_id, source, issued_at_unix_ms)
+                local_camera_issuer.issue_auth_grant(
+                    session_id,
+                    source,
+                    trigger_source,
+                    issued_at_unix_ms,
+                )
             }
-            AuthSource::VehicleCamera => Err(AuthFailureReason::InternalError),
+            AuthSource::VehicleCamera => {
+                AuthGrantIssueResult::Failed(AuthFailureReason::InternalError)
+            }
+        }
+    }
+
+    fn fetch_auth_result(
+        &mut self,
+        session_id: &SessionId,
+        issued_at_unix_ms: i64,
+    ) -> Option<Result<AuthGrant, AuthFailureReason>> {
+        self.local_camera_issuer
+            .as_mut()
+            .and_then(|issuer| issuer.fetch_auth_result(session_id, issued_at_unix_ms))
+    }
+
+    fn cancel_auth(&mut self, session_id: &SessionId) {
+        if let Some(issuer) = self.local_camera_issuer.as_mut() {
+            issuer.cancel_auth(session_id);
         }
     }
 }
@@ -95,6 +132,8 @@ struct LocalCameraAuthenticationOutcome {
 impl LocalCameraAuthGrantIssuer {
     fn from_config(config: LocalCameraAuthConfig) -> Result<Self, ProtocolError> {
         let templates = RecognitionTemplates::new(read_face_templates(&config.face_template_path)?);
+        let mut camera_config = config.camera_config;
+        apply_profile_to_config(&config.camera_id, &mut camera_config);
 
         let mut model_config =
             OpenCvFaceModelConfig::new(config.yunet_model_path, config.sface_model_path);
@@ -111,7 +150,7 @@ impl LocalCameraAuthGrantIssuer {
 
         Ok(Self {
             camera_id: config.camera_id,
-            camera_config: config.camera_config,
+            camera_config,
             max_auth_frames: config.max_auth_frames,
             templates,
             authenticator,
@@ -121,16 +160,27 @@ impl LocalCameraAuthGrantIssuer {
         })
     }
 
-    fn issue_auth_grant(
+    fn issue_auth_grant_blocking(
         &mut self,
         session_id: &SessionId,
         source: AuthSource,
         _request_started_at_unix_ms: i64,
     ) -> Result<AuthGrant, AuthFailureReason> {
+        write_service_event_detail(
+            "LocalCameraAuth.Started",
+            format!("session_id={} camera_id={}", session_id.0, self.camera_id.0),
+        );
         let outcome = self.authenticate_from_camera()?;
         let grant_sequence = self.next_grant_sequence;
         self.next_grant_sequence = self.next_grant_sequence.saturating_add(1);
         let issued_at_unix_ms = current_time_unix_ms();
+        write_service_event_detail(
+            "LocalCameraAuth.Succeeded",
+            format!(
+                "session_id={} match_score={} liveness_score={}",
+                session_id.0, outcome.face_authentication.match_score, outcome.liveness_score
+            ),
+        );
 
         Ok(AuthGrant {
             grant_id: GrantId(format!("camera-grant-{grant_sequence}")),
@@ -150,11 +200,13 @@ impl LocalCameraAuthGrantIssuer {
     fn authenticate_from_camera(
         &mut self,
     ) -> Result<LocalCameraAuthenticationOutcome, AuthFailureReason> {
+        write_service_event("LocalCameraAuth.LoadModelsStarted");
         self.authenticator
             .load_models()
             .map_err(|_| AuthFailureReason::InternalError)?;
         if self.liveness_provider.load_model().is_err() {
             self.authenticator.unload_models();
+            write_service_event("LocalCameraAuth.LoadLivenessModelFailed");
             return Err(AuthFailureReason::InternalError);
         }
 
@@ -162,6 +214,9 @@ impl LocalCameraAuthGrantIssuer {
 
         self.liveness_provider.unload_model();
         self.authenticator.unload_models();
+        if let Err(reason) = &auth_result {
+            write_service_event_detail("LocalCameraAuth.Failed", format!("reason={reason:?}"));
+        }
 
         auth_result
     }
@@ -171,13 +226,18 @@ impl LocalCameraAuthGrantIssuer {
     ) -> Result<LocalCameraAuthenticationOutcome, AuthFailureReason> {
         let mut camera_provider = OpenCvCameraProvider::new(self.camera_config.clone());
         let auth_result = (|| {
+            write_service_event_detail(
+                "LocalCameraAuth.OpenCameraStarted",
+                format!("camera_id={}", self.camera_id.0),
+            );
             camera_provider
                 .open(&self.camera_id)
                 .map_err(video_error_to_auth_failure)?;
+            write_service_event("LocalCameraAuth.OpenCameraSucceeded");
             let mut last_rejection = AuthFailureReason::Timeout;
             let mut liveness_window = MiniFasNetWindowEvidence::new(self.max_spoof_frame_ratio);
 
-            for _ in 0..self.max_auth_frames {
+            for frame_index in 0..self.max_auth_frames {
                 let frame = camera_provider
                     .read_frame()
                     .map_err(video_error_to_auth_failure)?;
@@ -186,6 +246,10 @@ impl LocalCameraAuthGrantIssuer {
                     Err(reason) => {
                         self.authenticator.reset_consecutive_matches();
                         last_rejection = reason;
+                        write_service_event_detail(
+                            "LocalCameraAuth.FrameRejected",
+                            format!("frame_index={frame_index} reason={reason:?}"),
+                        );
                         continue;
                     }
                 };
@@ -195,26 +259,45 @@ impl LocalCameraAuthGrantIssuer {
                     .map_err(liveness_error_to_auth_failure)?;
                 match liveness_window.record(&liveness_result)? {
                     Some(liveness_score) => {
-                        match self.authenticator.authenticate_detected_face(
-                            &frame,
-                            &detected_face,
-                            &self.templates,
-                            current_time_unix_ms(),
-                        ) {
+                        match self
+                            .authenticator
+                            .authenticate_detected_face_without_failure_cooldown(
+                                &frame,
+                                &detected_face,
+                                &self.templates,
+                                current_time_unix_ms(),
+                            ) {
                             Ok(face_authentication) => {
                                 liveness_window
                                     .reject_unlock_candidate_if_spoof_ratio_exceeded()?;
+                                write_service_event_detail(
+                                    "LocalCameraAuth.FrameAccepted",
+                                    format!(
+                                        "frame_index={frame_index} match_score={} liveness_score={liveness_score}",
+                                        face_authentication.match_score
+                                    ),
+                                );
                                 return Ok(LocalCameraAuthenticationOutcome {
                                     face_authentication,
                                     liveness_score,
                                 });
                             }
-                            Err(reason) => last_rejection = reason,
+                            Err(reason) => {
+                                last_rejection = reason;
+                                write_service_event_detail(
+                                    "LocalCameraAuth.FrameRejected",
+                                    format!("frame_index={frame_index} reason={reason:?}"),
+                                );
+                            }
                         }
                     }
                     None => {
                         self.authenticator.reset_consecutive_matches();
                         last_rejection = AuthFailureReason::LivenessFailed;
+                        write_service_event_detail(
+                            "LocalCameraAuth.FrameRejected",
+                            format!("frame_index={frame_index} reason=LivenessFailed"),
+                        );
                     }
                 }
             }
@@ -223,6 +306,21 @@ impl LocalCameraAuthGrantIssuer {
         })();
         camera_provider.close();
         auth_result
+    }
+}
+
+impl AuthGrantIssuer for LocalCameraAuthGrantIssuer {
+    fn issue_auth_grant(
+        &mut self,
+        session_id: &SessionId,
+        source: AuthSource,
+        _trigger_source: AuthTriggerSource,
+        issued_at_unix_ms: i64,
+    ) -> AuthGrantIssueResult {
+        match self.issue_auth_grant_blocking(session_id, source, issued_at_unix_ms) {
+            Ok(grant) => AuthGrantIssueResult::Issued(grant),
+            Err(reason) => AuthGrantIssueResult::Failed(reason),
+        }
     }
 }
 
@@ -314,6 +412,13 @@ fn current_time_unix_ms() -> i64 {
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
     millis.min(i64::MAX as u128) as i64
+}
+
+fn auth_trigger_source_name(trigger_source: AuthTriggerSource) -> &'static str {
+    match trigger_source {
+        AuthTriggerSource::InputTriggered => "input-triggered",
+        AuthTriggerSource::BackgroundPolicy => "background-policy",
+    }
 }
 
 #[cfg(test)]

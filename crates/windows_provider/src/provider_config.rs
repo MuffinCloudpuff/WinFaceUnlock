@@ -1,7 +1,10 @@
+use std::path::PathBuf;
+
 use common_protocol::AuthSource;
 
 use crate::{identifiers::PROVIDER_ROOT_REGISTRY_PATH, provider_state::ProviderTileVisibility};
 
+pub const REG_VALUE_PROVIDER_DLL: &str = "ProviderDll";
 pub const REG_VALUE_TILE_VISIBILITY: &str = "TileVisibility";
 pub const REG_VALUE_AUTO_WAKE_ON_ADVISE: &str = "AutoWakeOnAdvise";
 pub const REG_VALUE_WAKE_AUTH_SOURCE: &str = "WakeAuthSource";
@@ -11,6 +14,8 @@ pub const TILE_VISIBILITY_HIDDEN_UNTIL_READY: &str = "hidden-until-ready";
 pub const WAKE_AUTH_SOURCE_LOCAL_CAMERA: &str = "local-camera";
 pub const WAKE_AUTH_SOURCE_MANUAL_TEST: &str = "manual-test";
 pub const LOGON_WAKE_MODE_INPUT_TRIGGERED: &str = "input-triggered";
+pub const LOGON_WAKE_MODE_BACKGROUND_POLICY: &str = "background-policy";
+pub const LOGON_WAKE_MODE_HYBRID: &str = "hybrid";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderRuntimeConfig {
@@ -23,6 +28,8 @@ pub struct ProviderRuntimeConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderLogonWakeMode {
     InputTriggered,
+    BackgroundPolicy,
+    Hybrid,
 }
 
 impl ProviderRuntimeConfig {
@@ -70,6 +77,11 @@ impl Default for ProviderRuntimeConfig {
     }
 }
 
+pub fn provider_dll_path_from_registry() -> Option<PathBuf> {
+    registry::read_string_value(PROVIDER_ROOT_REGISTRY_PATH, REG_VALUE_PROVIDER_DLL)
+        .map(PathBuf::from)
+}
+
 fn tile_visibility_from_config_value(value: &str) -> ProviderTileVisibility {
     match value {
         TILE_VISIBILITY_HIDDEN_UNTIL_READY => ProviderTileVisibility::HiddenUntilCredentialReady,
@@ -95,6 +107,10 @@ fn logon_wake_mode_from_config_value(value: &str) -> Option<ProviderLogonWakeMod
         LOGON_WAKE_MODE_INPUT_TRIGGERED | "input_triggered" => {
             Some(ProviderLogonWakeMode::InputTriggered)
         }
+        LOGON_WAKE_MODE_BACKGROUND_POLICY | "background_policy" => {
+            Some(ProviderLogonWakeMode::BackgroundPolicy)
+        }
+        LOGON_WAKE_MODE_HYBRID => Some(ProviderLogonWakeMode::Hybrid),
         _ => None,
     }
 }
@@ -256,6 +272,14 @@ mod tests {
         assert_eq!(
             logon_wake_mode_from_config_value("input_triggered"),
             Some(ProviderLogonWakeMode::InputTriggered)
+        );
+        assert_eq!(
+            logon_wake_mode_from_config_value(LOGON_WAKE_MODE_BACKGROUND_POLICY),
+            Some(ProviderLogonWakeMode::BackgroundPolicy)
+        );
+        assert_eq!(
+            logon_wake_mode_from_config_value(LOGON_WAKE_MODE_HYBRID),
+            Some(ProviderLogonWakeMode::Hybrid)
         );
         assert_eq!(logon_wake_mode_from_config_value("keyboard"), None);
     }

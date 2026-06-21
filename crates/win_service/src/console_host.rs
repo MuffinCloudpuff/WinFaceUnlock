@@ -1,11 +1,11 @@
 use common_protocol::{
-    AuthGrant, AuthSource, PIPE_NAME, ProtectedCredential, ProtocolError, SERVICE_NAME,
-    ServiceEvent, ServiceRequest, SessionId,
+    AuthGrant, AuthSource, AuthTriggerSource, PIPE_NAME, ProtectedCredential, ProtocolError,
+    SERVICE_NAME, ServiceEvent, ServiceRequest, SessionId,
 };
 
 use crate::named_pipe_host::{
-    DevelopmentServiceRequestHandler, build_development_handler, run_named_pipe_once,
-    run_named_pipe_requests,
+    DevelopmentServiceRequestHandler, build_development_handler_without_presence_reload,
+    run_named_pipe_once, run_named_pipe_requests,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -55,7 +55,7 @@ pub fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<(), Proto
 }
 
 pub fn run_console_smoke() -> Result<ConsoleSmokeReport, ProtocolError> {
-    run_console_smoke_with_handler(build_development_handler()?)
+    run_console_smoke_with_handler(build_development_handler_without_presence_reload()?)
 }
 
 fn run_console_smoke_with_handler(
@@ -65,6 +65,7 @@ fn run_console_smoke_with_handler(
     let issued_grant = match handler.handle_request(ServiceRequest::WakeAuth {
         session_id: SessionId("dev-session".to_owned()),
         source: AuthSource::ManualTest,
+        trigger_source: AuthTriggerSource::InputTriggered,
     })? {
         ServiceEvent::AuthSucceeded { grant } => grant,
         _ => return Err(ProtocolError::InvalidMessage),
@@ -128,7 +129,8 @@ mod tests {
                 .unwrap_or(0)
         ));
         let paths = ServiceCredentialStorePaths::from_store_dir(root.clone());
-        let report = run_console_smoke_with_handler(build_development_handler_with_paths(&paths)?)?;
+        let report =
+            run_console_smoke_with_handler(build_development_handler_with_paths(&paths, None)?)?;
 
         assert_eq!(report.health_event, ServiceEvent::HealthOk);
         assert_eq!(

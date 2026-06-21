@@ -11,6 +11,7 @@
 #include "mediapipe/tasks/c/core/mp_status.h"
 #include "mediapipe/tasks/c/vision/core/image.h"
 #include "mediapipe/tasks/c/vision/face_landmarker/face_landmarker.h"
+#include "mediapipe/tasks/c/vision/pose_landmarker/pose_landmarker.h"
 
 namespace {
 
@@ -26,6 +27,13 @@ constexpr float kRadiansToDegrees = 57.29577951308232F;
 struct ProviderState {
   MpFaceLandmarkerPtr landmarker = nullptr;
   std::int64_t next_video_timestamp_ms = 0;
+};
+
+struct PresencePoseProviderState {
+  MpPoseLandmarkerPtr landmarker = nullptr;
+  std::int64_t next_video_timestamp_ms = 0;
+  float min_landmark_visibility = 0.45F;
+  float min_landmark_presence = 0.45F;
 };
 
 void FreeError(char* error_message) {
@@ -174,6 +182,80 @@ void ExtractPoseFromMatrix(
   result.roll_deg = std::atan2(r10, r00) * kRadiansToDegrees;
 }
 
+bool LandmarkPassesGate(
+    const MpNormalizedLandmark& landmark,
+    const PresencePoseProviderState& state) {
+  const bool visibility_passed =
+      !landmark.has_visibility || landmark.visibility >= state.min_landmark_visibility;
+  const bool presence_passed =
+      !landmark.has_presence || landmark.presence >= state.min_landmark_presence;
+  return visibility_passed && presence_passed && std::isfinite(landmark.x) &&
+         std::isfinite(landmark.y) && landmark.x >= -0.2F && landmark.x <= 1.2F &&
+         landmark.y >= -0.2F && landmark.y <= 1.2F;
+}
+
+float LandmarkConfidence(const MpNormalizedLandmark& landmark) {
+  float confidence = 1.0F;
+  if (landmark.has_visibility) {
+    confidence = std::min(confidence, std::clamp(landmark.visibility, 0.0F, 1.0F));
+  }
+  if (landmark.has_presence) {
+    confidence = std::min(confidence, std::clamp(landmark.presence, 0.0F, 1.0F));
+  }
+  return confidence;
+}
+
+void ExtractPresencePoseResult(
+    const MpPoseLandmarkerResult& landmark_result,
+    const PresencePoseProviderState& state,
+    WinFaceUnlockMediaPipePresencePoseResult& result) {
+  result = WinFaceUnlockMediaPipePresencePoseResult{};
+  if (landmark_result.pose_landmarks == nullptr ||
+      landmark_result.pose_landmarks_count == 0) {
+    return;
+  }
+
+  const MpNormalizedLandmarks& first_pose = landmark_result.pose_landmarks[0];
+  if (first_pose.landmarks == nullptr || first_pose.landmarks_count == 0) {
+    return;
+  }
+
+  float x_min = 1.0F;
+  float y_min = 1.0F;
+  float x_max = 0.0F;
+  float y_max = 0.0F;
+  float confidence_sum = 0.0F;
+  std::uint32_t accepted_count = 0;
+
+  for (std::uint32_t index = 0; index < first_pose.landmarks_count; ++index) {
+    const MpNormalizedLandmark& landmark = first_pose.landmarks[index];
+    if (!LandmarkPassesGate(landmark, state)) {
+      continue;
+    }
+    const float x = std::clamp(landmark.x, 0.0F, 1.0F);
+    const float y = std::clamp(landmark.y, 0.0F, 1.0F);
+    x_min = std::min(x_min, x);
+    y_min = std::min(y_min, y);
+    x_max = std::max(x_max, x);
+    y_max = std::max(y_max, y);
+    confidence_sum += LandmarkConfidence(landmark);
+    ++accepted_count;
+  }
+
+  if (accepted_count < 3 || x_max <= x_min || y_max <= y_min) {
+    return;
+  }
+
+  result.detected = 1;
+  result.confidence = confidence_sum / static_cast<float>(accepted_count);
+  result.normalized_x_min = x_min;
+  result.normalized_y_min = y_min;
+  result.normalized_x_max = x_max;
+  result.normalized_y_max = y_max;
+  result.bbox_center_x_ratio = (x_min + x_max) * 0.5F;
+  result.bbox_area_ratio = (x_max - x_min) * (y_max - y_min);
+}
+
 }  // namespace
 
 extern "C" WINFACEUNLOCK_MEDIAPIPE_BRIDGE_API void*
@@ -274,6 +356,111 @@ winfaceunlock_mediapipe_pose_estimate(
   ExtractBlinkScores(landmark_result, *result);
 
   MpFaceLandmarkerCloseResult(&landmark_result);
+  MpImageFree(image);
+  return 0;
+}
+
+extern "C" WINFACEUNLOCK_MEDIAPIPE_BRIDGE_API void*
+winfaceunlock_mediapipe_presence_pose_create(
+    const char* model_path,
+    WinFaceUnlockMediaPipePresencePoseOptions options) {
+  if (model_path == nullptr || model_path[0] == '\0') {
+    return nullptr;
+  }
+
+  auto state = std::make_unique<PresencePoseProviderState>();
+  state->min_landmark_visibility = options.min_landmark_visibility;
+  state->min_landmark_presence = options.min_landmark_presence;
+
+  MpPoseLandmarkerOptions landmarker_options = {};
+  landmarker_options.base_options.model_asset_path = model_path;
+  landmarker_options.base_options.delegate = MP_DELEGATE_CPU;
+  landmarker_options.base_options.host_environment = MP_HOST_ENVIRONMENT_UNKNOWN;
+  landmarker_options.base_options.host_system = MP_HOST_SYSTEM_WINDOWS;
+  landmarker_options.running_mode = ToMediaPipeRunningMode(options.running_mode);
+  landmarker_options.num_poses = 1;
+  landmarker_options.min_pose_detection_confidence = 0.5F;
+  landmarker_options.min_pose_presence_confidence = 0.5F;
+  landmarker_options.min_tracking_confidence = 0.5F;
+  landmarker_options.output_segmentation_masks = false;
+
+  char* error_message = nullptr;
+  const MpStatus status =
+      MpPoseLandmarkerCreate(&landmarker_options, &state->landmarker, &error_message);
+  FreeError(error_message);
+  if (status != kMpOk || state->landmarker == nullptr) {
+    return nullptr;
+  }
+
+  return state.release();
+}
+
+extern "C" WINFACEUNLOCK_MEDIAPIPE_BRIDGE_API void
+winfaceunlock_mediapipe_presence_pose_destroy(void* provider) {
+  if (provider == nullptr) {
+    return;
+  }
+
+  auto* state = static_cast<PresencePoseProviderState*>(provider);
+  if (state->landmarker != nullptr) {
+    char* error_message = nullptr;
+    MpPoseLandmarkerClose(state->landmarker, &error_message);
+    FreeError(error_message);
+    state->landmarker = nullptr;
+  }
+  delete state;
+}
+
+extern "C" WINFACEUNLOCK_MEDIAPIPE_BRIDGE_API int
+winfaceunlock_mediapipe_presence_pose_estimate(
+    void* provider,
+    const WinFaceUnlockMediaPipeFrameRequest* request,
+    WinFaceUnlockMediaPipePresencePoseResult* result) {
+  if (provider == nullptr || request == nullptr || result == nullptr) {
+    return 1;
+  }
+
+  auto* state = static_cast<PresencePoseProviderState*>(provider);
+  if (state->landmarker == nullptr) {
+    return 2;
+  }
+
+  *result = WinFaceUnlockMediaPipePresencePoseResult{};
+  MpImagePtr image = CreateImage(*request);
+  if (image == nullptr) {
+    return 3;
+  }
+
+  MpPoseLandmarkerResult landmark_result = {};
+  char* error_message = nullptr;
+  MpStatus status = MpPoseLandmarkerDetectImage(
+      state->landmarker,
+      image,
+      nullptr,
+      &landmark_result,
+      &error_message);
+
+  if (status == kMpFailedPrecondition) {
+    FreeError(error_message);
+    error_message = nullptr;
+    status = MpPoseLandmarkerDetectForVideo(
+        state->landmarker,
+        image,
+        nullptr,
+        state->next_video_timestamp_ms++,
+        &landmark_result,
+        &error_message);
+  }
+
+  FreeError(error_message);
+  if (status != kMpOk) {
+    MpImageFree(image);
+    return 4;
+  }
+
+  ExtractPresencePoseResult(landmark_result, *state, *result);
+
+  MpPoseLandmarkerCloseResult(&landmark_result);
   MpImageFree(image);
   return 0;
 }

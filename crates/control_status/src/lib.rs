@@ -16,8 +16,9 @@ use control_protocol::{
 };
 use serde::Deserialize;
 use windows_provider::{
-    COM_INPROC_SERVER_REGISTRY_PATH, LOGON_WAKE_MODE_INPUT_TRIGGERED, PROVIDER_CLSID_REGISTRY_PATH,
-    PROVIDER_ROOT_REGISTRY_PATH, REG_VALUE_AUTO_WAKE_ON_ADVISE, REG_VALUE_LOGON_WAKE_MODE,
+    COM_INPROC_SERVER_REGISTRY_PATH, LOGON_WAKE_MODE_BACKGROUND_POLICY, LOGON_WAKE_MODE_HYBRID,
+    LOGON_WAKE_MODE_INPUT_TRIGGERED, PROVIDER_CLSID_REGISTRY_PATH, PROVIDER_ROOT_REGISTRY_PATH,
+    REG_VALUE_AUTO_WAKE_ON_ADVISE, REG_VALUE_LOGON_WAKE_MODE,
 };
 use windows_service::{
     service::{ServiceAccess, ServiceState, ServiceStatus},
@@ -30,9 +31,14 @@ const PRESENCE_RUNTIME_STATUS_FILE_NAME: &str = "presence-runtime-status.json";
 const SERVICE_CONFIG_REGISTRY_PATH: &str = r"SOFTWARE\WinFaceUnlock\Service";
 const REG_AUTH_MODE: &str = "AuthMode";
 const REG_FACE_TEMPLATE_PATH: &str = "FaceTemplatePath";
+const REG_CAMERA_ID: &str = "CameraId";
+const REG_YUNET_MODEL_PATH: &str = "YuNetModelPath";
+const REG_SFACE_MODEL_PATH: &str = "SFaceModelPath";
+const REG_MINIFASNET_MODEL_PATH: &str = "MiniFasNetModelPath";
 const REG_PRESENCE_LOCK_ENABLED: &str = "PresenceLockEnabled";
 const REG_PRESENCE_DETECTOR_KIND: &str = "PresenceDetectorKind";
 const REG_PRESENCE_TRACKING_MODE: &str = "PresenceTrackingMode";
+const AUTH_MODE_LOCAL_CAMERA: &str = "local-camera";
 const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
 pub const ACTIVE_SERVICE_FACE_TEMPLATE_REF: &str = "active-service-template";
@@ -117,6 +123,20 @@ impl WindowsFaceTemplateStatusStore {
     ) -> Result<(), FaceTemplateStatusError> {
         apply_active_face_template_path(&WindowsFaceTemplateConfigWriter, template_path)
     }
+
+    pub fn apply_local_camera_auth_config(
+        &self,
+        template_path: &Path,
+        camera_id: &str,
+        install_dir: &Path,
+    ) -> Result<(), FaceTemplateStatusError> {
+        apply_local_camera_auth_config(
+            &WindowsFaceTemplateConfigWriter,
+            template_path,
+            camera_id,
+            install_dir,
+        )
+    }
 }
 
 impl Default for WindowsFaceTemplateStatusStore {
@@ -186,6 +206,13 @@ trait FaceTemplateConfigWriter {
         &self,
         template_path: &Path,
     ) -> Result<(), FaceTemplateStatusError>;
+
+    fn write_local_camera_auth_config(
+        &self,
+        template_path: &Path,
+        camera_id: &str,
+        install_dir: &Path,
+    ) -> Result<(), FaceTemplateStatusError>;
 }
 
 struct WindowsFaceTemplateConfigWriter;
@@ -201,6 +228,42 @@ impl FaceTemplateConfigWriter for WindowsFaceTemplateConfigWriter {
             &template_path.display().to_string(),
         )
         .map_err(face_template_registry_write_error)
+    }
+
+    fn write_local_camera_auth_config(
+        &self,
+        template_path: &Path,
+        camera_id: &str,
+        install_dir: &Path,
+    ) -> Result<(), FaceTemplateStatusError> {
+        let models_dir = install_dir.join("models");
+        for (name, value) in [
+            (REG_AUTH_MODE, AUTH_MODE_LOCAL_CAMERA.to_owned()),
+            (REG_FACE_TEMPLATE_PATH, template_path.display().to_string()),
+            (REG_CAMERA_ID, camera_id.to_owned()),
+            (
+                REG_YUNET_MODEL_PATH,
+                models_dir
+                    .join("face_detection_yunet_2023mar.onnx")
+                    .display()
+                    .to_string(),
+            ),
+            (
+                REG_SFACE_MODEL_PATH,
+                models_dir
+                    .join("face_recognition_sface_2021dec.onnx")
+                    .display()
+                    .to_string(),
+            ),
+            (
+                REG_MINIFASNET_MODEL_PATH,
+                models_dir.join("minifasnet_v2.onnx").display().to_string(),
+            ),
+        ] {
+            registry::write_string_value(SERVICE_CONFIG_REGISTRY_PATH, name, &value)
+                .map_err(face_template_registry_write_error)?;
+        }
+        Ok(())
     }
 }
 
@@ -340,6 +403,30 @@ fn apply_active_face_template_path(
         ));
     }
     writer.write_active_face_template_path(template_path)
+}
+
+fn apply_local_camera_auth_config(
+    writer: &impl FaceTemplateConfigWriter,
+    template_path: &Path,
+    camera_id: &str,
+    install_dir: &Path,
+) -> Result<(), FaceTemplateStatusError> {
+    if template_path.as_os_str().is_empty() {
+        return Err(FaceTemplateStatusError::TemplateConfigMissing(
+            "face template path is empty".to_owned(),
+        ));
+    }
+    if camera_id.trim().is_empty() {
+        return Err(FaceTemplateStatusError::TemplateConfigMissing(
+            "camera id is empty".to_owned(),
+        ));
+    }
+    if install_dir.as_os_str().is_empty() {
+        return Err(FaceTemplateStatusError::TemplateConfigMissing(
+            "install dir is empty".to_owned(),
+        ));
+    }
+    writer.write_local_camera_auth_config(template_path, camera_id.trim(), install_dir)
 }
 
 fn read_active_service_face_template_summary(
@@ -516,12 +603,18 @@ fn bool_registry_value(value: bool) -> &'static str {
 fn logon_wake_mode_registry_value(mode: LogonWakeMode) -> &'static str {
     match mode {
         LogonWakeMode::InputTriggered => LOGON_WAKE_MODE_INPUT_TRIGGERED,
+        LogonWakeMode::BackgroundPolicy => LOGON_WAKE_MODE_BACKGROUND_POLICY,
+        LogonWakeMode::Hybrid => LOGON_WAKE_MODE_HYBRID,
     }
 }
 
 fn parse_logon_wake_mode(value: &str) -> Option<LogonWakeMode> {
     match value.trim() {
         LOGON_WAKE_MODE_INPUT_TRIGGERED | "input_triggered" => Some(LogonWakeMode::InputTriggered),
+        LOGON_WAKE_MODE_BACKGROUND_POLICY | "background_policy" => {
+            Some(LogonWakeMode::BackgroundPolicy)
+        }
+        LOGON_WAKE_MODE_HYBRID => Some(LogonWakeMode::Hybrid),
         _ => None,
     }
 }
@@ -604,7 +697,7 @@ impl SettingsSource for WindowsSettingsSource {
         registry::write_string_value(
             PROVIDER_ROOT_REGISTRY_PATH,
             REG_VALUE_AUTO_WAKE_ON_ADVISE,
-            bool_registry_value(matches!(mode, LogonWakeMode::InputTriggered)),
+            bool_registry_value(!matches!(mode, LogonWakeMode::BackgroundPolicy)),
         )
         .map_err(settings_write_error)
     }
@@ -1265,7 +1358,35 @@ mod tests {
             self.logon_wake_mode
                 .replace(Some(logon_wake_mode_registry_value(mode).to_owned()));
             self.auto_wake_on_advise.replace(Some(
-                bool_registry_value(matches!(mode, LogonWakeMode::InputTriggered)).to_owned(),
+                bool_registry_value(!matches!(mode, LogonWakeMode::BackgroundPolicy)).to_owned(),
+            ));
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeFaceTemplateConfigWriter {
+        local_camera_auth_config: RefCell<Option<(PathBuf, String, PathBuf)>>,
+    }
+
+    impl FaceTemplateConfigWriter for FakeFaceTemplateConfigWriter {
+        fn write_active_face_template_path(
+            &self,
+            _template_path: &Path,
+        ) -> Result<(), FaceTemplateStatusError> {
+            Ok(())
+        }
+
+        fn write_local_camera_auth_config(
+            &self,
+            template_path: &Path,
+            camera_id: &str,
+            install_dir: &Path,
+        ) -> Result<(), FaceTemplateStatusError> {
+            *self.local_camera_auth_config.borrow_mut() = Some((
+                template_path.to_path_buf(),
+                camera_id.to_owned(),
+                install_dir.to_path_buf(),
             ));
             Ok(())
         }
@@ -1445,6 +1566,22 @@ mod tests {
     }
 
     #[test]
+    fn apply_local_camera_auth_config_passes_template_camera_and_install_dir()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let writer = FakeFaceTemplateConfigWriter::default();
+        let template_path = PathBuf::from(r"D:\tools\WinFaceUnlock\face-enrollment\selected.json");
+        let install_dir = PathBuf::from(r"D:\tools\WinFaceUnlock");
+
+        apply_local_camera_auth_config(&writer, &template_path, " opencv-index:1 ", &install_dir)?;
+
+        assert_eq!(
+            *writer.local_camera_auth_config.borrow(),
+            Some((template_path, "opencv-index:1".to_owned(), install_dir))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn face_template_list_distinguishes_missing_template_config() -> Result<(), &'static str> {
         let source = FakeStatusSource {
             service_config: Ok(ObservedServiceConfigStatus {
@@ -1552,6 +1689,19 @@ mod tests {
             settings.logon_wake_mode,
             Some(LogonWakeMode::InputTriggered)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn settings_reads_hybrid_logon_wake_mode() -> Result<(), ControlStatusError> {
+        let source = FakeSettingsSource {
+            logon_wake_mode: RefCell::new(Some(LOGON_WAKE_MODE_HYBRID.to_owned())),
+            ..FakeSettingsSource::default()
+        };
+
+        let settings = load_control_settings(&source)?;
+
+        assert_eq!(settings.logon_wake_mode, Some(LogonWakeMode::Hybrid));
         Ok(())
     }
 

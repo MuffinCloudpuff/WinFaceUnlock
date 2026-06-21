@@ -5,6 +5,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::provider_config::provider_dll_path_from_registry;
+
 const LOG_DIR: &str = r"C:\ProgramData\WinFaceUnlock";
 const LOG_FILE: &str = "provider.log";
 
@@ -17,17 +19,34 @@ pub fn write_provider_event_detail(event_name: &str, detail: impl AsRef<str>) {
 }
 
 fn write_provider_event_inner(event_name: &str) -> std::io::Result<()> {
-    create_dir_all(LOG_DIR)?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path())?;
+    let path = log_path();
+    if let Some(parent) = path.parent() {
+        create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "{} {}", timestamp_unix_ms(), event_name)?;
     Ok(())
 }
 
 fn log_path() -> PathBuf {
-    PathBuf::from(LOG_DIR).join(LOG_FILE)
+    provider_dll_path_from_registry()
+        .and_then(|path| install_log_dir_from_provider_dll_path(&path))
+        .unwrap_or_else(|| PathBuf::from(LOG_DIR))
+        .join(LOG_FILE)
+}
+
+fn install_log_dir_from_provider_dll_path(provider_dll_path: &std::path::Path) -> Option<PathBuf> {
+    let parent = provider_dll_path.parent()?;
+    let install_dir = if parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("provider"))
+    {
+        parent.parent()?
+    } else {
+        parent
+    };
+    Some(install_dir.join("logs"))
 }
 
 fn timestamp_unix_ms() -> u128 {
@@ -42,10 +61,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provider_log_path_uses_project_program_data_directory() {
+    fn provider_log_path_follows_provider_install_directory() {
         assert_eq!(
-            log_path(),
-            PathBuf::from(r"C:\ProgramData\WinFaceUnlock\provider.log")
+            install_log_dir_from_provider_dll_path(std::path::Path::new(
+                r"D:\tools\WinFaceUnlock\provider\windows_provider-hash.dll"
+            )),
+            Some(PathBuf::from(r"D:\tools\WinFaceUnlock\logs"))
         );
     }
 }

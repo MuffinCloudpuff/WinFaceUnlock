@@ -1,6 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)]
-    [string] $MediaPipeIncludeDir,
+    [string] $MediaPipeIncludeDir = "",
 
     [Parameter(Mandatory = $true)]
     [string] $MediaPipeTasksCLib,
@@ -17,6 +16,10 @@ $sourceDir = Join-Path $repoRoot "native\mediapipe_bridge"
 $absoluteBuildDir = Join-Path $repoRoot $BuildDir
 $outputDir = Join-Path $repoRoot "native"
 $outputDll = Join-Path $outputDir "winfaceunlock_mediapipe_bridge.dll"
+
+if ([string]::IsNullOrWhiteSpace($MediaPipeIncludeDir)) {
+    $MediaPipeIncludeDir = Join-Path $repoRoot ".external\mediapipe"
+}
 
 if (-not (Test-Path $MediaPipeIncludeDir)) {
     throw "MediaPipe include directory not found: $MediaPipeIncludeDir"

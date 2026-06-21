@@ -1,6 +1,9 @@
 param(
     [ValidateSet("Debug", "Release")]
-    [string]$Configuration = "Release"
+    [string]$Configuration = "Release",
+    [switch]$SkipBundleBuild,
+    [switch]$SkipWinUiBuild,
+    [switch]$SkipTauriBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,9 +19,19 @@ $PackageManifest = Join-Path $PackageRoot "WinFaceUnlockSetup.package.json"
 
 $env:Path = "C:\Users\Liu\.cargo\bin;" + $env:Path
 
-& powershell -ExecutionPolicy Bypass -File $BundleScript -Configuration $Configuration
-if ($LASTEXITCODE -ne 0) {
-    throw "Setup bundle build failed with exit code $LASTEXITCODE"
+if (-not $SkipBundleBuild) {
+    $bundleArgs = @("-ExecutionPolicy", "Bypass", "-File", $BundleScript, "-Configuration", $Configuration)
+    if ($SkipWinUiBuild) {
+        $bundleArgs += "-SkipWinUiBuild"
+    }
+    if ($SkipTauriBuild) {
+        $bundleArgs += "-SkipTauriBuild"
+    }
+
+    & powershell @bundleArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Setup bundle build failed with exit code $LASTEXITCODE"
+    }
 }
 
 if (-not (Test-Path $BundleRoot -PathType Container)) {

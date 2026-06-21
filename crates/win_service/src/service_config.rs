@@ -36,6 +36,12 @@ const ENV_PRESENCE_PERSON_MODEL_PATH: &str = "WINFACEUNLOCK_PRESENCE_PERSON_MODE
 const ENV_PRESENCE_PERSON_MODEL_CONFIG_PATH: &str =
     "WINFACEUNLOCK_PRESENCE_PERSON_MODEL_CONFIG_PATH";
 const ENV_PRESENCE_PERSON_DEBUG_OUTPUT_DIR: &str = "WINFACEUNLOCK_PRESENCE_PERSON_DEBUG_OUTPUT_DIR";
+const ENV_PRESENCE_POSE_BRIDGE_DLL_PATH: &str = "WINFACEUNLOCK_PRESENCE_POSE_BRIDGE_DLL_PATH";
+const ENV_PRESENCE_POSE_MODEL_PATH: &str = "WINFACEUNLOCK_PRESENCE_POSE_MODEL_PATH";
+const ENV_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY: &str =
+    "WINFACEUNLOCK_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY";
+const ENV_PRESENCE_POSE_MIN_LANDMARK_PRESENCE: &str =
+    "WINFACEUNLOCK_PRESENCE_POSE_MIN_LANDMARK_PRESENCE";
 const SERVICE_CONFIG_REGISTRY_PATH: &str = r"SOFTWARE\WinFaceUnlock\Service";
 const REG_AUTH_MODE: &str = "AuthMode";
 const REG_FACE_TEMPLATE_PATH: &str = "FaceTemplatePath";
@@ -67,6 +73,10 @@ const REG_PRESENCE_MOVEMENT_DELTA_RATIO: &str = "PresenceMovementDeltaRatio";
 const REG_PRESENCE_PERSON_MODEL_PATH: &str = "PresencePersonModelPath";
 const REG_PRESENCE_PERSON_MODEL_CONFIG_PATH: &str = "PresencePersonModelConfigPath";
 const REG_PRESENCE_PERSON_DEBUG_OUTPUT_DIR: &str = "PresencePersonDebugOutputDir";
+const REG_PRESENCE_POSE_BRIDGE_DLL_PATH: &str = "PresencePoseBridgeDllPath";
+const REG_PRESENCE_POSE_MODEL_PATH: &str = "PresencePoseModelPath";
+const REG_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY: &str = "PresencePoseMinLandmarkVisibility";
+const REG_PRESENCE_POSE_MIN_LANDMARK_PRESENCE: &str = "PresencePoseMinLandmarkPresence";
 
 const AUTH_MODE_MANUAL_TEST: &str = "manual-test";
 const AUTH_MODE_LOCAL_CAMERA: &str = "local-camera";
@@ -88,15 +98,19 @@ const DEFAULT_PRESENCE_PERSON_CONFIDENCE_THRESHOLD: f32 = 0.50;
 const DEFAULT_PRESENCE_ABSENT_REQUIRED_FRAMES: u32 = 6;
 const DEFAULT_PRESENCE_BOUNDARY_MARGIN_RATIO: f32 = 0.12;
 const DEFAULT_PRESENCE_MOVEMENT_DELTA_RATIO: f32 = 0.04;
-const DEFAULT_PRESENCE_PERSON_MODEL_PATH: &str = "models/MobileNetSSD_deploy.caffemodel";
-const DEFAULT_PRESENCE_PERSON_MODEL_CONFIG_PATH: &str = "models/MobileNetSSD_deploy.prototxt";
 const DEFAULT_PRESENCE_YOLOV8_PERSON_MODEL_PATH: &str = "models/yolov8n.onnx";
+const DEFAULT_PRESENCE_POSE_BRIDGE_DLL_PATH: &str = "native/winfaceunlock_mediapipe_bridge.dll";
+const DEFAULT_PRESENCE_POSE_MODEL_PATH: &str = "models/pose_landmarker_lite.task";
+const DEFAULT_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY: f32 = 0.45;
+const DEFAULT_PRESENCE_POSE_MIN_LANDMARK_PRESENCE: f32 = 0.45;
 const PRESENCE_DETECTOR_KIND_FACE_OWNER_MATCH: &str = "face-owner-match";
 const PRESENCE_DETECTOR_KIND_OPENCV_DNN_PERSON: &str = "opencv-dnn-person";
+const PRESENCE_DETECTOR_KIND_MEDIAPIPE_POSE_LITE: &str = "mediapipe-pose-lite";
 const PRESENCE_TRACKING_MODE_FACE_POLICY: &str = "face-policy";
 const PRESENCE_TRACKING_MODE_CONTINUOUS_LOW_FPS: &str = "continuous-low-fps";
 const PRESENCE_PERSON_DETECTOR_MODEL_MOBILENET_SSD: &str = "mobilenet-ssd";
 const PRESENCE_PERSON_DETECTOR_MODEL_YOLOV8_ONNX: &str = "yolov8-onnx";
+const PRESENCE_PERSON_DETECTOR_MODEL_ORT_YOLOV8_ONNX: &str = "ort-yolov8-onnx";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServiceAuthConfig {
@@ -140,12 +154,17 @@ pub struct ServicePresenceConfig {
     pub presence_person_model_path: PathBuf,
     pub presence_person_model_config_path: Option<PathBuf>,
     pub presence_person_debug_output_dir: Option<PathBuf>,
+    pub presence_pose_bridge_dll_path: PathBuf,
+    pub presence_pose_model_path: PathBuf,
+    pub presence_pose_min_landmark_visibility: f32,
+    pub presence_pose_min_landmark_presence: f32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PresenceDetectorKind {
     FaceOwnerMatch,
     OpenCvDnnPerson,
+    MediaPipePoseLite,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,6 +177,7 @@ pub enum PresenceTrackingMode {
 pub enum PresencePersonDetectorModel {
     MobileNetSsd,
     YoloV8Onnx,
+    OrtYoloV8Onnx,
 }
 
 impl ServicePresenceConfig {
@@ -176,16 +196,20 @@ impl ServicePresenceConfig {
             &mut lookup,
             ENV_PRESENCE_PERSON_DETECTOR_MODEL,
         )?
-        .unwrap_or(PresencePersonDetectorModel::MobileNetSsd);
+        .unwrap_or(PresencePersonDetectorModel::OrtYoloV8Onnx);
         let default_person_model_path = match presence_person_detector_model {
-            PresencePersonDetectorModel::MobileNetSsd => DEFAULT_PRESENCE_PERSON_MODEL_PATH,
-            PresencePersonDetectorModel::YoloV8Onnx => DEFAULT_PRESENCE_YOLOV8_PERSON_MODEL_PATH,
+            PresencePersonDetectorModel::MobileNetSsd => "models/MobileNetSSD_deploy.caffemodel",
+            PresencePersonDetectorModel::YoloV8Onnx
+            | PresencePersonDetectorModel::OrtYoloV8Onnx => {
+                DEFAULT_PRESENCE_YOLOV8_PERSON_MODEL_PATH
+            }
         };
         let default_person_model_config_path = match presence_person_detector_model {
             PresencePersonDetectorModel::MobileNetSsd => {
-                Some(PathBuf::from(DEFAULT_PRESENCE_PERSON_MODEL_CONFIG_PATH))
+                Some(PathBuf::from("models/MobileNetSSD_deploy.prototxt"))
             }
-            PresencePersonDetectorModel::YoloV8Onnx => None,
+            PresencePersonDetectorModel::YoloV8Onnx
+            | PresencePersonDetectorModel::OrtYoloV8Onnx => None,
         };
 
         Ok(Self {
@@ -200,12 +224,12 @@ impl ServicePresenceConfig {
                 &mut lookup,
                 ENV_PRESENCE_DETECTOR_KIND,
             )?
-            .unwrap_or(PresenceDetectorKind::FaceOwnerMatch),
+            .unwrap_or(PresenceDetectorKind::OpenCvDnnPerson),
             presence_tracking_mode: optional_presence_tracking_mode(
                 &mut lookup,
                 ENV_PRESENCE_TRACKING_MODE,
             )?
-            .unwrap_or(PresenceTrackingMode::FacePolicy),
+            .unwrap_or(PresenceTrackingMode::ContinuousLowFps),
             presence_detector_fps: optional_f32(&mut lookup, ENV_PRESENCE_DETECTOR_FPS)?
                 .unwrap_or(DEFAULT_PRESENCE_DETECTOR_FPS),
             presence_unload_model_when_idle: optional_bool(
@@ -253,6 +277,26 @@ impl ServicePresenceConfig {
                 &mut lookup,
                 ENV_PRESENCE_PERSON_DEBUG_OUTPUT_DIR,
             ),
+            presence_pose_bridge_dll_path: optional_path_or_default(
+                &mut lookup,
+                ENV_PRESENCE_POSE_BRIDGE_DLL_PATH,
+                DEFAULT_PRESENCE_POSE_BRIDGE_DLL_PATH,
+            ),
+            presence_pose_model_path: optional_path_or_default(
+                &mut lookup,
+                ENV_PRESENCE_POSE_MODEL_PATH,
+                DEFAULT_PRESENCE_POSE_MODEL_PATH,
+            ),
+            presence_pose_min_landmark_visibility: optional_f32(
+                &mut lookup,
+                ENV_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY,
+            )?
+            .unwrap_or(DEFAULT_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY),
+            presence_pose_min_landmark_presence: optional_f32(
+                &mut lookup,
+                ENV_PRESENCE_POSE_MIN_LANDMARK_PRESENCE,
+            )?
+            .unwrap_or(DEFAULT_PRESENCE_POSE_MIN_LANDMARK_PRESENCE),
         })
     }
 }
@@ -284,6 +328,7 @@ impl ServiceAuthConfig {
                         max_camera_index: DEFAULT_MAX_CAMERA_INDEX,
                         requested_frame_width: optional_u32(&mut lookup, ENV_FRAME_WIDTH)?,
                         requested_frame_height: optional_u32(&mut lookup, ENV_FRAME_HEIGHT)?,
+                        preferred_backend: None,
                     },
                     yunet_model_path: optional_path_or_default(
                         &mut lookup,
@@ -371,6 +416,12 @@ fn registry_value_name(env_name: &'static str) -> Option<&'static str> {
         ENV_PRESENCE_PERSON_MODEL_PATH => Some(REG_PRESENCE_PERSON_MODEL_PATH),
         ENV_PRESENCE_PERSON_MODEL_CONFIG_PATH => Some(REG_PRESENCE_PERSON_MODEL_CONFIG_PATH),
         ENV_PRESENCE_PERSON_DEBUG_OUTPUT_DIR => Some(REG_PRESENCE_PERSON_DEBUG_OUTPUT_DIR),
+        ENV_PRESENCE_POSE_BRIDGE_DLL_PATH => Some(REG_PRESENCE_POSE_BRIDGE_DLL_PATH),
+        ENV_PRESENCE_POSE_MODEL_PATH => Some(REG_PRESENCE_POSE_MODEL_PATH),
+        ENV_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY => {
+            Some(REG_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY)
+        }
+        ENV_PRESENCE_POSE_MIN_LANDMARK_PRESENCE => Some(REG_PRESENCE_POSE_MIN_LANDMARK_PRESENCE),
         _ => None,
     }
 }
@@ -387,6 +438,9 @@ fn optional_presence_person_detector_model(
             PRESENCE_PERSON_DETECTOR_MODEL_YOLOV8_ONNX => {
                 Ok(PresencePersonDetectorModel::YoloV8Onnx)
             }
+            PRESENCE_PERSON_DETECTOR_MODEL_ORT_YOLOV8_ONNX => {
+                Ok(PresencePersonDetectorModel::OrtYoloV8Onnx)
+            }
             _ => Err(ProtocolError::InvalidMessage),
         })
         .transpose()
@@ -402,6 +456,9 @@ fn optional_presence_detector_kind(
                 Ok(PresenceDetectorKind::FaceOwnerMatch)
             }
             PRESENCE_DETECTOR_KIND_OPENCV_DNN_PERSON => Ok(PresenceDetectorKind::OpenCvDnnPerson),
+            PRESENCE_DETECTOR_KIND_MEDIAPIPE_POSE_LITE => {
+                Ok(PresenceDetectorKind::MediaPipePoseLite)
+            }
             _ => Err(ProtocolError::InvalidMessage),
         })
         .transpose()
@@ -630,17 +687,38 @@ mod tests {
         );
         assert_eq!(
             config.presence_detector_kind,
-            PresenceDetectorKind::FaceOwnerMatch
+            PresenceDetectorKind::OpenCvDnnPerson
         );
         assert_eq!(
             config.presence_tracking_mode,
-            PresenceTrackingMode::FacePolicy
+            PresenceTrackingMode::ContinuousLowFps
         );
         assert_eq!(config.presence_detector_fps, DEFAULT_PRESENCE_DETECTOR_FPS);
         assert!(!config.presence_unload_model_when_idle);
         assert_eq!(
             config.presence_person_detector_model,
-            PresencePersonDetectorModel::MobileNetSsd
+            PresencePersonDetectorModel::OrtYoloV8Onnx
+        );
+        assert_eq!(
+            config.presence_person_model_path,
+            PathBuf::from(DEFAULT_PRESENCE_YOLOV8_PERSON_MODEL_PATH)
+        );
+        assert_eq!(config.presence_person_model_config_path, None);
+        assert_eq!(
+            config.presence_pose_bridge_dll_path,
+            PathBuf::from(DEFAULT_PRESENCE_POSE_BRIDGE_DLL_PATH)
+        );
+        assert_eq!(
+            config.presence_pose_model_path,
+            PathBuf::from(DEFAULT_PRESENCE_POSE_MODEL_PATH)
+        );
+        assert_eq!(
+            config.presence_pose_min_landmark_visibility,
+            DEFAULT_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY
+        );
+        assert_eq!(
+            config.presence_pose_min_landmark_presence,
+            DEFAULT_PRESENCE_POSE_MIN_LANDMARK_PRESENCE
         );
         assert_eq!(
             config.presence_person_suspect_fps,
@@ -669,6 +747,10 @@ mod tests {
             (ENV_PRESENCE_BOUNDARY_MARGIN_RATIO, "0.18"),
             (ENV_PRESENCE_MOVEMENT_DELTA_RATIO, "0.07"),
             (ENV_PRESENCE_PERSON_MODEL_PATH, r"D:\models\person.onnx"),
+            (ENV_PRESENCE_POSE_BRIDGE_DLL_PATH, r"D:\native\bridge.dll"),
+            (ENV_PRESENCE_POSE_MODEL_PATH, r"D:\models\pose.task"),
+            (ENV_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY, "0.41"),
+            (ENV_PRESENCE_POSE_MIN_LANDMARK_PRESENCE, "0.42"),
             (
                 ENV_PRESENCE_PERSON_DEBUG_OUTPUT_DIR,
                 r"D:\debug\presence-person",
@@ -708,6 +790,34 @@ mod tests {
         assert_eq!(
             config.presence_person_debug_output_dir,
             Some(PathBuf::from(r"D:\debug\presence-person"))
+        );
+        assert_eq!(
+            config.presence_pose_bridge_dll_path,
+            PathBuf::from(r"D:\native\bridge.dll")
+        );
+        assert_eq!(
+            config.presence_pose_model_path,
+            PathBuf::from(r"D:\models\pose.task")
+        );
+        assert_eq!(config.presence_pose_min_landmark_visibility, 0.41);
+        assert_eq!(config.presence_pose_min_landmark_presence, 0.42);
+        Ok(())
+    }
+
+    #[test]
+    fn presence_config_parses_mediapipe_pose_lite_detector_kind() -> Result<(), ProtocolError> {
+        let values = HashMap::from([(
+            ENV_PRESENCE_DETECTOR_KIND,
+            PRESENCE_DETECTOR_KIND_MEDIAPIPE_POSE_LITE,
+        )]);
+
+        let config = ServicePresenceConfig::from_lookup(|env_name| {
+            values.get(env_name).map(|value| value.to_string())
+        })?;
+
+        assert_eq!(
+            config.presence_detector_kind,
+            PresenceDetectorKind::MediaPipePoseLite
         );
         Ok(())
     }

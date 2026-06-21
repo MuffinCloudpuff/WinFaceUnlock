@@ -42,9 +42,25 @@ pub fn build_install_plan(
             &payload.install_dir,
             &payload.presence_person_model_relative_path,
         )?;
-        let presence_person_model_config_path = install_path(
+        let presence_person_model_config_path = if payload
+            .presence_person_model_config_relative_path
+            .as_os_str()
+            .is_empty()
+        {
+            None
+        } else {
+            Some(install_path(
+                &payload.install_dir,
+                &payload.presence_person_model_config_relative_path,
+            )?)
+        };
+        let presence_pose_bridge_dll_path = install_path(
             &payload.install_dir,
-            &payload.presence_person_model_config_relative_path,
+            &payload.presence_pose_bridge_relative_path,
+        )?;
+        let presence_pose_model_path = install_path(
+            &payload.install_dir,
+            &payload.presence_pose_model_relative_path,
         )?;
 
         validate_required_file("face_template", &face_template_path)?;
@@ -59,7 +75,9 @@ pub fn build_install_plan(
         );
         auth_config.minifasnet_model_path = minifasnet_model_path;
         auth_config.presence_person_model_path = presence_person_model_path;
-        auth_config.presence_person_model_config_path = Some(presence_person_model_config_path);
+        auth_config.presence_person_model_config_path = presence_person_model_config_path;
+        auth_config.presence_pose_bridge_dll_path = presence_pose_bridge_dll_path;
+        auth_config.presence_pose_model_path = presence_pose_model_path;
         auth_config.camera_id = payload.camera_id.clone();
         if let Some(match_threshold) = payload.match_threshold {
             auth_config.match_threshold = match_threshold;
@@ -223,11 +241,12 @@ mod tests {
         let root = unique_temp_dir("plan");
         let install_dir = root.join("install");
         create_file(&install_dir.join("win_service.exe"));
-        create_file(&install_dir.join("windows_provider.dll"));
+        create_file(&install_dir.join(r"provider\windows_provider.dll"));
         create_file(&install_dir.join("selected_templates.json"));
         create_file(&install_dir.join(r"models\face_detection_yunet_2023mar.onnx"));
         create_file(&install_dir.join(r"models\face_recognition_sface_2021dec.onnx"));
         create_file(&install_dir.join(r"models\minifasnet_v2.onnx"));
+        create_file(&install_dir.join(r"models\yolov8n.onnx"));
 
         let plan = build_install_plan(&InstallSystemComponentsPayload {
             install_dir: install_dir.clone(),
@@ -236,7 +255,7 @@ mod tests {
                 configure_local_camera_auth: true,
                 start_service: true,
                 service_binary_relative_path: PathBuf::from("win_service.exe"),
-                provider_binary_relative_path: PathBuf::from("windows_provider.dll"),
+                provider_binary_relative_path: PathBuf::from(r"provider\windows_provider.dll"),
                 face_template_relative_path: PathBuf::from("selected_templates.json"),
                 yunet_model_relative_path: PathBuf::from(
                     r"models\face_detection_yunet_2023mar.onnx",
@@ -245,11 +264,13 @@ mod tests {
                     r"models\face_recognition_sface_2021dec.onnx",
                 ),
                 minifasnet_model_relative_path: PathBuf::from(r"models\minifasnet_v2.onnx"),
-                presence_person_model_relative_path: PathBuf::from(
-                    r"models\MobileNetSSD_deploy.caffemodel",
+                presence_person_model_relative_path: PathBuf::from(r"models\yolov8n.onnx"),
+                presence_person_model_config_relative_path: PathBuf::new(),
+                presence_pose_bridge_relative_path: PathBuf::from(
+                    r"native\winfaceunlock_mediapipe_bridge.dll",
                 ),
-                presence_person_model_config_relative_path: PathBuf::from(
-                    r"models\MobileNetSSD_deploy.prototxt",
+                presence_pose_model_relative_path: PathBuf::from(
+                    r"models\pose_landmarker_lite.task",
                 ),
                 camera_id: "opencv-index:0".to_owned(),
                 match_threshold: None,
@@ -267,6 +288,18 @@ mod tests {
                 .as_ref()
                 .map(|config| &config.yunet_model_path),
             Some(&install_dir.join(r"models\face_detection_yunet_2023mar.onnx"))
+        );
+        assert_eq!(
+            plan.auth_config
+                .as_ref()
+                .map(|config| &config.presence_person_model_path),
+            Some(&install_dir.join(r"models\yolov8n.onnx"))
+        );
+        assert_eq!(
+            plan.auth_config
+                .as_ref()
+                .and_then(|config| config.presence_person_model_config_path.as_ref()),
+            None
         );
         remove_temp_dir(&root);
         Ok(())
@@ -298,7 +331,7 @@ mod tests {
         let root = unique_temp_dir("components-only");
         let install_dir = root.join("install");
         create_file(&install_dir.join("win_service.exe"));
-        create_file(&install_dir.join("windows_provider.dll"));
+        create_file(&install_dir.join(r"provider\windows_provider.dll"));
 
         let plan = build_install_plan(&InstallSystemComponentsPayload {
             install_dir: install_dir.clone(),
@@ -306,6 +339,10 @@ mod tests {
         })?;
 
         assert_eq!(plan.auth_config, None);
+        assert_eq!(
+            plan.provider_plan.provider_binary_path,
+            install_dir.join(r"provider\windows_provider.dll")
+        );
         remove_temp_dir(&root);
         Ok(())
     }

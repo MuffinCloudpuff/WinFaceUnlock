@@ -3,12 +3,12 @@ use control_backend::{
     CommandFaceEnrollmentRuntime, ControlBackendError, ControlHandler,
     DiagnosticsCliEnrollmentProcessFactory, FaceEnrollmentPreviewEventSink,
     NamedPipeFaceAuthServiceClient, ServiceFaceAuthSelfTestRunner,
-    ServiceIpcFaceEnrollmentTemplateApplier, WindowsCredentialEnrollmentStore,
-    WindowsCredentialSecret,
+    ServiceIpcControlSettingsStore, ServiceIpcFaceEnrollmentTemplateApplier,
+    WindowsCredentialEnrollmentStore, WindowsCredentialSecret,
 };
 use control_protocol::{
     ControlRequestEnvelope, ControlResponseEnvelope, WindowsCredentialAccountProfile,
-    WindowsCredentialAccountType, WindowsCredentialEnrollmentOutcome,
+    WindowsCredentialAccountType, WindowsCredentialEnrollmentOutcome, WindowsCredentialSecretState,
     WindowsCredentialEnrollmentPayload,
 };
 use control_status::{
@@ -16,7 +16,8 @@ use control_status::{
 };
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize};
 use win_service::credential_store_config::{
-    enroll_windows_credential, ServiceCredentialStorePaths, WindowsCredentialEnrollment,
+    enroll_windows_credential, is_credential_secret_configured, ServiceCredentialStorePaths,
+    WindowsCredentialEnrollment,
 };
 
 #[derive(Clone, Copy)]
@@ -57,6 +58,7 @@ impl WindowsCredentialEnrollmentStore for WindowsCredentialEnrollmentAdapter {
             user_sid: payload.user_sid.clone(),
             account_type: payload.account_type,
             credential_ref,
+            credential_secret_state: WindowsCredentialSecretState::Configured,
         })
     }
 }
@@ -115,6 +117,7 @@ const ARG_CONTROL_FACE_ENROLLMENT_OUTPUT_DIR: &str =
     "--winfaceunlock-control-face-enrollment-output-dir";
 const ARG_CONTROL_YUNET_MODEL_PATH: &str = "--winfaceunlock-control-yunet-model-path";
 const ARG_CONTROL_SFACE_MODEL_PATH: &str = "--winfaceunlock-control-sface-model-path";
+const ENV_CONTROL_INSTALL_DIR: &str = "WINFACEUNLOCK_INSTALL_DIR";
 const ENV_CONTROL_DIAGNOSTICS_CLI: &str = "WINFACEUNLOCK_DIAGNOSTICS_CLI";
 const ENV_CONTROL_FACE_ENROLLMENT_OUTPUT_DIR: &str = "WINFACEUNLOCK_FACE_ENROLLMENT_OUTPUT_DIR";
 const ENV_YUNET_MODEL_PATH: &str = "WINFACEUNLOCK_YUNET_MODEL_PATH";
@@ -127,7 +130,7 @@ fn handle_control_request(
 ) -> ControlResponseEnvelope {
     let handler = ControlHandler::with_face_dependencies(
         WindowsDashboardStatusProvider::from_environment_or_default(),
-        WindowsControlSettingsStore::new(),
+        ServiceIpcControlSettingsStore::default_named_pipe(),
         WindowsCredentialEnrollmentAdapter,
         WindowsFaceTemplateStatusStore::from_environment_or_default(),
         runtime_state.face_enrollment_runtime.clone(),
@@ -187,12 +190,27 @@ fn current_windows_credential_account(
     })?;
     let user_id = DEFAULT_CONTROL_USER_ID.to_owned();
 
+    let credential_ref = format!("windows-credential-{user_id}");
+    let store_paths = ServiceCredentialStorePaths::from_environment_or_default();
+    let credential_secret_state = if is_credential_secret_configured(
+        &store_paths,
+        &UserId(user_id.clone()),
+        &CredentialRef(credential_ref.clone()),
+    )
+    .map_err(credential_protocol_error_to_control_error)?
+    {
+        WindowsCredentialSecretState::Configured
+    } else {
+        WindowsCredentialSecretState::NotConfigured
+    };
+
     Ok(WindowsCredentialAccountProfile {
         windows_account_username: username,
         user_id: user_id.clone(),
         user_sid,
         account_type: WindowsCredentialAccountType::Local,
-        credential_ref: format!("windows-credential-{user_id}"),
+        credential_ref,
+        credential_secret_state,
     })
 }
 
@@ -350,6 +368,23 @@ fn apply_control_runtime_launch_args() {
     }
 }
 
+fn default_control_install_dir_from_exe() {
+    if std::env::var_os(ENV_CONTROL_INSTALL_DIR).is_some() {
+        return;
+    }
+
+    let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+    else {
+        return;
+    };
+
+    if exe_dir.join("diagnostics_cli.exe").exists() {
+        std::env::set_var(ENV_CONTROL_INSTALL_DIR, exe_dir);
+    }
+}
+
 fn control_runtime_env_name_for_arg(arg: &str) -> Option<&'static str> {
     match arg {
         ARG_CONTROL_DIAGNOSTICS_CLI => Some(ENV_CONTROL_DIAGNOSTICS_CLI),
@@ -411,6 +446,7 @@ fn fit_main_window_to_monitor(app: &tauri::App) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     apply_control_runtime_launch_args();
+    default_control_install_dir_from_exe();
     configure_webview2_low_memory_mode();
 
     tauri::Builder::default()

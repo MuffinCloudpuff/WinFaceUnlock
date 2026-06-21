@@ -14,13 +14,16 @@ use face_auth::RecognitionTemplates;
 use face_engine::{FaceTemplate, FaceTemplateCodecError, FaceTemplateSet, OpenCvFaceModelConfig};
 
 use crate::{
+    camera_backend_profiles::apply_profile_to_config,
     desktop_session::active_user_session_id,
     presence_camera::{CameraPresenceObservationConfig, CameraPresenceObservationSource},
     presence_monitor::{NoopUnknownFaceAuditSink, PresenceMonitor, PresenceMonitorConfig},
     presence_person_camera::{
         PersonCameraPresenceObservationConfig, PersonCameraPresenceObservationSource,
     },
-    presence_person_detector::OpenCvDnnPersonDetectorConfig,
+    presence_person_detector::{
+        OpenCvDnnPersonDetectorConfig, OrtYoloV8PersonDetectorConfig, PersonDetectorConfig,
+    },
     presence_policy::PresencePolicyConfig,
     service_config::{
         PresenceDetectorKind, PresencePersonDetectorModel, PresenceTrackingMode, ServiceAuthConfig,
@@ -44,6 +47,7 @@ struct PresenceRuntimeStatus<'a> {
 pub enum PresenceServiceCommand {
     StartForUserSession { session_id: u32 },
     StopForUserSession { session_id: u32 },
+    ReloadCurrentSession,
     Shutdown,
 }
 
@@ -84,6 +88,20 @@ fn run_presence_service_controller(receiver: mpsc::Receiver<PresenceServiceComma
                 if let Some(previous_monitor) = running_monitor.take() {
                     eprintln!("WinFaceUnlock stopping presence monitor for session {session_id}");
                     previous_monitor.stop_and_join();
+                }
+            }
+            PresenceServiceCommand::ReloadCurrentSession => {
+                if let Some(previous_monitor) = running_monitor.take() {
+                    previous_monitor.stop_and_join();
+                }
+                if let Some(session_id) = active_user_session_id() {
+                    running_monitor = start_presence_monitor_thread(session_id);
+                } else {
+                    write_presence_runtime_status(
+                        "waiting-for-session",
+                        None,
+                        "no active user session after settings reload",
+                    );
                 }
             }
             PresenceServiceCommand::Shutdown => {
@@ -191,8 +209,10 @@ fn run_presence_monitor_for_local_camera(
     presence_config: ServicePresenceConfig,
     stop_requested: Arc<AtomicBool>,
 ) -> Result<crate::presence_monitor::PresenceMonitorSummary, ProtocolError> {
-    if presence_config.presence_detector_kind == PresenceDetectorKind::OpenCvDnnPerson
-        && presence_config.presence_tracking_mode == PresenceTrackingMode::ContinuousLowFps
+    if matches!(
+        presence_config.presence_detector_kind,
+        PresenceDetectorKind::OpenCvDnnPerson | PresenceDetectorKind::MediaPipePoseLite
+    ) && presence_config.presence_tracking_mode == PresenceTrackingMode::ContinuousLowFps
     {
         return run_person_presence_monitor_for_local_camera(
             session_id,
@@ -216,6 +236,8 @@ fn run_face_presence_monitor_for_local_camera(
     presence_config: ServicePresenceConfig,
     stop_requested: Arc<AtomicBool>,
 ) -> Result<crate::presence_monitor::PresenceMonitorSummary, ProtocolError> {
+    let mut camera_config = local_camera_config.camera_config;
+    apply_profile_to_config(&local_camera_config.camera_id, &mut camera_config);
     let templates = RecognitionTemplates::new(read_face_templates(
         &local_camera_config.face_template_path,
     )?);
@@ -225,7 +247,7 @@ fn run_face_presence_monitor_for_local_camera(
     );
     let source = CameraPresenceObservationSource::new(CameraPresenceObservationConfig {
         camera_id: local_camera_config.camera_id,
-        camera_config: local_camera_config.camera_config,
+        camera_config,
         model_config,
         templates,
         presence_owner_match_threshold: presence_config.presence_owner_match_threshold,
@@ -256,15 +278,13 @@ fn run_person_presence_monitor_for_local_camera(
     presence_config: ServicePresenceConfig,
     stop_requested: Arc<AtomicBool>,
 ) -> Result<crate::presence_monitor::PresenceMonitorSummary, ProtocolError> {
+    let mut camera_config = local_camera_config.camera_config;
+    apply_profile_to_config(&local_camera_config.camera_id, &mut camera_config);
     let detector_config = person_detector_config_from_presence_config(&presence_config)?;
-    let detector_config = OpenCvDnnPersonDetectorConfig {
-        confidence_threshold: presence_config.presence_person_confidence_threshold,
-        ..detector_config
-    };
     let source =
         PersonCameraPresenceObservationSource::new(PersonCameraPresenceObservationConfig {
             camera_id: local_camera_config.camera_id,
-            camera_config: local_camera_config.camera_config,
+            camera_config,
             detector_config,
             debug_output_dir: presence_config.presence_person_debug_output_dir.clone(),
         })
@@ -289,20 +309,33 @@ fn run_person_presence_monitor_for_local_camera(
 
 fn person_detector_config_from_presence_config(
     presence_config: &ServicePresenceConfig,
-) -> Result<OpenCvDnnPersonDetectorConfig, ProtocolError> {
+) -> Result<PersonDetectorConfig, ProtocolError> {
     match presence_config.presence_person_detector_model {
         PresencePersonDetectorModel::MobileNetSsd => {
-            Ok(OpenCvDnnPersonDetectorConfig::mobilenet_ssd(
+            let mut config = OpenCvDnnPersonDetectorConfig::mobilenet_ssd(
                 presence_config.presence_person_model_path.clone(),
                 presence_config
                     .presence_person_model_config_path
                     .clone()
                     .ok_or(ProtocolError::InvalidMessage)?,
-            ))
+            );
+            config.confidence_threshold = presence_config.presence_person_confidence_threshold;
+            Ok(PersonDetectorConfig::OpenCvDnn(config))
         }
-        PresencePersonDetectorModel::YoloV8Onnx => Ok(OpenCvDnnPersonDetectorConfig::yolov8_onnx(
-            presence_config.presence_person_model_path.clone(),
-        )),
+        PresencePersonDetectorModel::YoloV8Onnx => {
+            let mut config = OpenCvDnnPersonDetectorConfig::yolov8_onnx(
+                presence_config.presence_person_model_path.clone(),
+            );
+            config.confidence_threshold = presence_config.presence_person_confidence_threshold;
+            Ok(PersonDetectorConfig::OpenCvDnn(config))
+        }
+        PresencePersonDetectorModel::OrtYoloV8Onnx => {
+            let mut config = OrtYoloV8PersonDetectorConfig::new(
+                presence_config.presence_person_model_path.clone(),
+            );
+            config.confidence_threshold = presence_config.presence_person_confidence_threshold;
+            Ok(PersonDetectorConfig::OrtYoloV8(config))
+        }
     }
 }
 

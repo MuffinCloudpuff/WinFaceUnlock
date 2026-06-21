@@ -20,6 +20,7 @@ use windows_service::{
 };
 
 use crate::{
+    camera_backend_profiles::spawn_camera_backend_profile_refresh,
     named_pipe_host::{run_named_pipe_until_shutdown, wake_named_pipe_host},
     presence_service::{PresenceServiceCommand, spawn_presence_service_controller},
 };
@@ -42,6 +43,7 @@ fn run_service_main() -> windows_service::Result<()> {
     let pipe_name = PIPE_NAME.to_owned();
     let presence_command_sender = spawn_presence_service_controller();
     let handler_presence_sender = presence_command_sender.clone();
+    spawn_camera_backend_profile_refresh();
 
     let status_handle =
         service_control_handler::register(
@@ -95,7 +97,11 @@ fn run_service_main() -> windows_service::Result<()> {
         Duration::default(),
     ))?;
 
-    let service_result = run_named_pipe_until_shutdown(PIPE_NAME, &shutdown_requested);
+    let service_result = run_named_pipe_until_shutdown(
+        PIPE_NAME,
+        &shutdown_requested,
+        presence_command_sender.clone(),
+    );
     let _ = presence_command_sender.send(PresenceServiceCommand::Shutdown);
 
     status_handle.set_service_status(service_status(
