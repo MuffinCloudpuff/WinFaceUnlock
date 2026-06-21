@@ -1,55 +1,52 @@
 # WinFaceUnlock
 
-WinFaceUnlock 是计划独立于 `PC_Client` 和小车端的 Windows 人脸解锁外挂项目。
+WinFaceUnlock 是一个面向 Windows 的本地人脸解锁产品，专注于人脸录入、锁屏解锁、离座自动锁屏、非活体防护和本地凭据保护。
 
-项目必须先具备与普通本机人脸解锁工具相同的独立运行能力：
+它的目标很直接：让 Windows 登录更方便，同时尽量把安全边界收紧在本机，不依赖云端，不把密码当普通数据到处传。
 
-1. Windows 锁屏后，鼠标或键盘输入可以唤醒识别。
-2. 默认使用本地摄像头完成识别和解锁。
-3. 不依赖 `PC_Client`、小车在线状态或雷达状态才能运行。
+## 我们实现了什么
 
-小车端属于后续可选增强：
+- 人脸录入与本地模板管理
+- Windows 锁屏/登录场景的人脸解锁
+- 本地摄像头识别
+- 离座自动锁屏
+- 基础非活体防护
+- 本地控制面板与设置管理
+- 安装、诊断、调试工具链
 
-1. 远程视频源：提供可用于人脸识别的视频帧。
-2. 人体存在触发器：通过 24G 毫米波雷达判断是否有人靠近，从而额外触发识别服务。
+## 安全特性
 
-无论是否接入小车，最终认证、凭证有效性判断和 Windows 解锁动作都在 PC 本机完成。
+- 基于 Windows 原生凭据链路完成最终登录交接
+- 密码不明文落盘
+- 密码不走普通明文接口
+- 明文只在受控的本地内存/短时通道中短暂存在
+- 非活体检测是增强能力，不是绝对保证
 
-## 核心边界
+## 适合谁用
 
-- 小车端不保存 Windows 凭据。
-- 小车端不发放“可直接解锁”的认证凭证。
-- 小车端只提供可选的视频帧、雷达存在状态和必要的健康状态。
-- PC 端 FaceUnlockAgent 负责模型加载、人脸检测、人脸识别、活体/挑战校验、失败次数限制和解锁授权。
-- Windows Credential Provider / UnlockBroker 作为独立本机解锁组件，不塞进 `PC_Client` 的 Python 主服务。
-- `PC_Client` 只负责可选的联动配置、视频源选择和状态展示。
+- 想在 Windows 上体验本地人脸登录/解锁的人
+- 想要离座后自动锁屏的人
+- 想让人脸模板和登录凭据尽量留在本机的人
+- 想在虚拟机里验证 Windows 登录链路的人
 
-## 推荐主线
+## 免责声明
 
-```text
-基础独立模式：
-Windows 锁屏后的鼠标或键盘输入
--> FaceUnlockAgent 唤醒
--> 从本地摄像头取帧
--> PC 端做人脸检测/识别/活体校验
--> UnlockBroker 生成短时本机授权
--> Credential Provider 执行 Windows 解锁
+本项目涉及 Windows 登录、锁屏、Credential Provider 和本地系统服务等敏感系统行为。在使用或二次开发前，请务必了解：
 
-小车增强模式：
-小车在线且 24G 雷达检测到有人靠近
--> 可额外唤醒 FaceUnlockAgent
--> 可选择从小车视频源取帧
--> 其余认证和解锁流程不变
-```
+1. 错误的安装、配置、卸载或二次开发操作可能导致系统无法正常登录。
+2. 强烈建议先在 VMware、Hyper-V 等虚拟机环境中调试和验证。
+3. 请保留可用的 Windows PIN、密码、管理员账号或系统恢复手段。
+4. 请勿在生产环境、重要工作电脑或保存关键数据的机器上直接实验未经验证的版本。
+5. 作者不对因使用、修改、分发或二次开发本软件导致的任何数据丢失、系统崩溃、无法登录、安全漏洞或其他损失承担责任。
 
-## 文档
+## 开源协议
 
-- [总体技术路线](docs/TECHNICAL_ROUTE.md)
-- [详细实施方案](docs/DETAILED_IMPLEMENTATION_PLAN.md)
-- [实施方案与阶段计划](docs/IMPLEMENTATION_PLAN.md)
+本仓库根目录当前采用 [Apache License 2.0](LICENSE) 开源。
+
+仓库中保留的参考项目 `FaceWinUnlock-Tauri-main/` 使用其自身的 AGPL-3.0 许可证；如果复制、修改或分发该参考项目代码，需要遵守该目录内的许可证要求。
 
 ## 参考项目
 
-- FaceWinUnlock-Tauri: https://github.com/zs1083339604/FaceWinUnlock-Tauri
+- [FaceWinUnlock-Tauri](https://github.com/zs1083339604/FaceWinUnlock-Tauri)
 
-该项目对 Windows Credential Provider、命名管道、OpenCV YuNet/SFace 人脸识别链路有参考价值。但其公开源码不完整，且协议/凭据安全边界需要重新设计，本项目不直接照搬其实现。
+该项目对 Windows Credential Provider、命名管道、OpenCV 人脸识别链路有参考价值。本项目围绕更明确的本地凭据边界、认证授权语义、离座锁屏和虚拟机验证流程进行了重新设计与实现。
