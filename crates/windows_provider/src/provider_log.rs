@@ -7,7 +7,6 @@ use std::{
 
 use crate::provider_config::provider_dll_path_from_registry;
 
-const LOG_DIR: &str = r"C:\ProgramData\WinFaceUnlock";
 const LOG_FILE: &str = "provider.log";
 
 pub fn write_provider_event(event_name: &str) {
@@ -31,7 +30,7 @@ fn write_provider_event_inner(event_name: &str) -> std::io::Result<()> {
 fn log_path() -> PathBuf {
     provider_dll_path_from_registry()
         .and_then(|path| install_log_dir_from_provider_dll_path(&path))
-        .unwrap_or_else(|| PathBuf::from(LOG_DIR))
+        .unwrap_or_else(|| std::env::temp_dir().join("WinFaceUnlock").join("logs"))
         .join(LOG_FILE)
 }
 

@@ -788,24 +788,48 @@ where
             )),
         })?;
         if let Some(stdout) = child.stdout.take() {
-            spawn_preview_event_forwarder(stdout, self.preview_event_sink.clone());
+            spawn_preview_event_forwarder(
+                stdout,
+                self.preview_event_sink.clone(),
+                output_dir.to_path_buf(),
+            );
         }
         Ok(ChildFaceEnrollmentProcess { child })
     }
 }
 
-fn spawn_preview_event_forwarder<S>(stdout: impl std::io::Read + Send + 'static, sink: S)
-where
+fn spawn_preview_event_forwarder<S>(
+    stdout: impl std::io::Read + Send + 'static,
+    sink: S,
+    output_dir: PathBuf,
+) where
     S: FaceEnrollmentPreviewEventSink,
 {
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
             if let Some(event_json) = line.strip_prefix(PREVIEW_EVENT_PREFIX) {
+                persist_enrollment_preview_frame(&output_dir, event_json);
                 sink.emit_preview_frame(event_json);
             }
         }
     });
+}
+
+fn persist_enrollment_preview_frame(output_dir: &Path, event_json: &str) {
+    let Ok(event) = serde_json::from_str::<PreviewFrameEvent>(event_json) else {
+        return;
+    };
+    if event.mime_type != "image/jpeg" || event.image_base64.is_empty() {
+        return;
+    }
+    let Ok(image_bytes) = BASE64_STANDARD.decode(event.image_base64) else {
+        return;
+    };
+    let _ = fs::write(
+        output_dir.join(ENROLLMENT_PREVIEW_FRAME_FILE_NAME),
+        image_bytes,
+    );
 }
 
 #[derive(Debug)]
@@ -863,6 +887,12 @@ struct CommandFaceEnrollmentSession {
     last_frame_result: Option<FaceEnrollmentFrameResult>,
     template_summary: Option<FaceTemplateEnrollmentSummary>,
     failure_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+struct PreviewFrameEvent {
+    mime_type: String,
+    image_base64: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -2016,11 +2046,11 @@ where
 
     fn handle_update_settings(&self, request: &ControlRequestEnvelope) -> ControlResponseEnvelope {
         let patch = match serde_json::from_value::<ControlSettingsPatch>(request.payload.clone()) {
-            Ok(patch) if patch.has_updates() => patch,
+            Ok(patch) if patch.has_updates() && patch.has_valid_values() => patch,
             Ok(_) => {
                 return ControlResponseEnvelope::invalid_request(
                     request,
-                    "update_settings requires at least one settings field.",
+                    "update_settings requires at least one valid settings field.",
                     json!({
                         "control_error_code": ControlErrorCode::InvalidSettingsRequest,
                     }),
@@ -2525,6 +2555,9 @@ mod tests {
             if let Some(logon_wake_mode) = patch.logon_wake_mode {
                 settings.logon_wake_mode = Some(logon_wake_mode);
             }
+            if let Some(logon_face_match_threshold) = patch.logon_face_match_threshold {
+                settings.logon_face_match_threshold = logon_face_match_threshold;
+            }
             Ok(settings.clone())
         }
     }
@@ -2534,6 +2567,7 @@ mod tests {
             current: Rc::new(RefCell::new(Ok(ControlSettingsSnapshot {
                 presence_lock_enabled: true,
                 logon_wake_mode: Some(LogonWakeMode::InputTriggered),
+                logon_face_match_threshold: 0.75,
             }))),
             last_patch: Rc::new(RefCell::new(None)),
         }
@@ -2570,6 +2604,7 @@ mod tests {
         RecordingCredentialEnrollmentStore {
             account_profile: Ok(WindowsCredentialAccountProfile {
                 windows_account_username: "Leo16".to_owned(),
+                display_name: Some("用户1".to_owned()),
                 user_id: "dev-user".to_owned(),
                 user_sid: "S-1-5-21-real".to_owned(),
                 account_type: WindowsCredentialAccountType::Local,
@@ -2578,6 +2613,7 @@ mod tests {
             }),
             result: Ok(WindowsCredentialEnrollmentOutcome {
                 windows_account_username: "Leo16".to_owned(),
+                display_name: Some("用户1".to_owned()),
                 user_id: "dev-user".to_owned(),
                 user_sid: "S-1-5-21-winfaceunlock-pending".to_owned(),
                 account_type: WindowsCredentialAccountType::Local,
@@ -2616,7 +2652,8 @@ mod tests {
                 templates: vec![FaceTemplateSummary {
                     face_template_ref: "active-service-template".to_owned(),
                     user_id: "dev-user".to_owned(),
-                    display_name: Some("Leo16".to_owned()),
+                    display_name: Some("用户1".to_owned()),
+                    avatar_preview: None,
                     template_kind: FaceTemplateKind::SelectedTemplateSet,
                     recognition_model: FaceRecognitionModelSummary {
                         model_family: "opencv_sface".to_owned(),
@@ -3313,6 +3350,7 @@ mod tests {
             decoded_settings.logon_wake_mode,
             Some(LogonWakeMode::InputTriggered)
         );
+        assert_eq!(decoded_settings.logon_face_match_threshold, 0.75);
         Ok(())
     }
 
@@ -3658,6 +3696,23 @@ mod tests {
         assert_eq!(preview.image_base64.as_deref(), Some("AQID"));
         assert!(preview.frame_updated_at_unix_ms.is_some());
         let _ = fs::remove_dir_all(root_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn preview_event_persistence_writes_avatar_source_frame()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let output_dir = unique_test_dir("winfaceunlock-control-preview-event");
+        fs::create_dir_all(&output_dir)?;
+
+        persist_enrollment_preview_frame(
+            &output_dir,
+            r#"{"mime_type":"image/jpeg","image_base64":"AQID"}"#,
+        );
+
+        let preview_frame = fs::read(output_dir.join(ENROLLMENT_PREVIEW_FRAME_FILE_NAME))?;
+        assert_eq!(preview_frame, [1_u8, 2, 3]);
+        let _ = fs::remove_dir_all(output_dir);
         Ok(())
     }
 
@@ -4090,6 +4145,7 @@ mod tests {
             Some(&ControlSettingsPatch {
                 presence_lock_enabled: Some(false),
                 logon_wake_mode: None,
+                logon_face_match_threshold: None,
             })
         );
         Ok(())
@@ -4123,6 +4179,38 @@ mod tests {
             Some(&ControlSettingsPatch {
                 presence_lock_enabled: None,
                 logon_wake_mode: Some(LogonWakeMode::InputTriggered),
+                logon_face_match_threshold: None,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn update_settings_accepts_logon_face_match_threshold() -> Result<(), serde_json::Error> {
+        let settings_store = settings_store_fixture();
+        let last_patch = settings_store.last_patch.clone();
+        let handler = ControlHandler::new(
+            FixedDashboardStatusProvider {
+                result: Ok(dashboard_status_fixture()),
+            },
+            settings_store,
+            credential_enrollment_store_fixture(),
+        );
+
+        let response = handler.handle_request(update_settings_request(json!({
+            "logon_face_match_threshold": 0.50,
+        })));
+
+        assert_eq!(response.operation_status, ControlOperationStatus::Completed);
+        let decoded_settings: ControlSettingsSnapshot =
+            serde_json::from_value(response.safe_details)?;
+        assert_eq!(decoded_settings.logon_face_match_threshold, 0.50);
+        assert_eq!(
+            last_patch.borrow().as_ref(),
+            Some(&ControlSettingsPatch {
+                presence_lock_enabled: None,
+                logon_wake_mode: None,
+                logon_face_match_threshold: Some(0.50),
             })
         );
         Ok(())

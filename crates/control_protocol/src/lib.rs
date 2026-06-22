@@ -175,24 +175,41 @@ pub enum ControlErrorCode {
     PermissionDenied,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub const DEFAULT_LOGON_FACE_MATCH_THRESHOLD: f32 = 0.75;
+pub const MIN_LOGON_FACE_MATCH_THRESHOLD: f32 = 0.30;
+pub const MAX_LOGON_FACE_MATCH_THRESHOLD: f32 = 0.90;
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct ControlSettingsSnapshot {
     pub presence_lock_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logon_wake_mode: Option<LogonWakeMode>,
+    pub logon_face_match_threshold: f32,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct ControlSettingsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_lock_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logon_wake_mode: Option<LogonWakeMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logon_face_match_threshold: Option<f32>,
 }
 
 impl ControlSettingsPatch {
     pub fn has_updates(&self) -> bool {
-        self.presence_lock_enabled.is_some() || self.logon_wake_mode.is_some()
+        self.presence_lock_enabled.is_some()
+            || self.logon_wake_mode.is_some()
+            || self.logon_face_match_threshold.is_some()
+    }
+
+    pub fn has_valid_values(&self) -> bool {
+        self.logon_face_match_threshold.is_none_or(|threshold| {
+            threshold.is_finite()
+                && (MIN_LOGON_FACE_MATCH_THRESHOLD..=MAX_LOGON_FACE_MATCH_THRESHOLD)
+                    .contains(&threshold)
+        })
     }
 }
 
@@ -221,6 +238,8 @@ pub struct WindowsCredentialEnrollmentPayload {
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct WindowsCredentialAccountProfile {
     pub windows_account_username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub user_id: String,
     pub user_sid: String,
     pub account_type: WindowsCredentialAccountType,
@@ -269,6 +288,8 @@ pub enum WindowsCredentialSecretState {
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct WindowsCredentialEnrollmentOutcome {
     pub windows_account_username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub user_id: String,
     pub user_sid: String,
     pub account_type: WindowsCredentialAccountType,
@@ -295,6 +316,8 @@ pub struct FaceTemplateSummary {
     pub user_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_preview: Option<FaceAvatarPreview>,
     pub template_kind: FaceTemplateKind,
     pub recognition_model: FaceRecognitionModelSummary,
     pub selected_template_count: u32,
@@ -305,6 +328,14 @@ pub struct FaceTemplateSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at_unix_ms: Option<i64>,
     pub source_state: FaceTemplateSourceState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FaceAvatarPreview {
+    pub mime_type: String,
+    pub image_base64: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at_unix_ms: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -774,6 +805,7 @@ mod tests {
             payload: json!(ControlSettingsPatch {
                 presence_lock_enabled: Some(true),
                 logon_wake_mode: Some(LogonWakeMode::InputTriggered),
+                logon_face_match_threshold: Some(0.55),
             }),
         };
 
@@ -781,6 +813,7 @@ mod tests {
         assert!(json_text.contains("\"operation\":\"update_settings\""));
         assert!(json_text.contains("\"presence_lock_enabled\":true"));
         assert!(json_text.contains("\"logon_wake_mode\":\"input_triggered\""));
+        assert!(json_text.contains("\"logon_face_match_threshold\":0.55"));
 
         let decoded: ControlRequestEnvelope = serde_json::from_str(&json_text)?;
         assert_eq!(decoded, request);
@@ -794,6 +827,7 @@ mod tests {
             ControlSettingsPatch {
                 presence_lock_enabled: Some(false),
                 logon_wake_mode: None,
+                logon_face_match_threshold: None,
             }
             .has_updates()
         );
@@ -801,8 +835,42 @@ mod tests {
             ControlSettingsPatch {
                 presence_lock_enabled: None,
                 logon_wake_mode: Some(LogonWakeMode::InputTriggered),
+                logon_face_match_threshold: None,
             }
             .has_updates()
+        );
+        assert!(
+            ControlSettingsPatch {
+                presence_lock_enabled: None,
+                logon_wake_mode: None,
+                logon_face_match_threshold: Some(0.50),
+            }
+            .has_updates()
+        );
+    }
+
+    #[test]
+    fn settings_patch_validates_logon_face_threshold_range() {
+        assert!(
+            ControlSettingsPatch {
+                logon_face_match_threshold: Some(MIN_LOGON_FACE_MATCH_THRESHOLD),
+                ..ControlSettingsPatch::default()
+            }
+            .has_valid_values()
+        );
+        assert!(
+            !ControlSettingsPatch {
+                logon_face_match_threshold: Some(MIN_LOGON_FACE_MATCH_THRESHOLD - 0.01),
+                ..ControlSettingsPatch::default()
+            }
+            .has_valid_values()
+        );
+        assert!(
+            !ControlSettingsPatch {
+                logon_face_match_threshold: Some(f32::NAN),
+                ..ControlSettingsPatch::default()
+            }
+            .has_valid_values()
         );
     }
 
@@ -854,6 +922,7 @@ mod tests {
     fn credential_account_profile_round_trips_without_password() -> Result<(), serde_json::Error> {
         let profile = WindowsCredentialAccountProfile {
             windows_account_username: "Leo16".to_owned(),
+            display_name: Some("用户1".to_owned()),
             user_id: "dev-user".to_owned(),
             user_sid: "S-1-5-21-real".to_owned(),
             account_type: WindowsCredentialAccountType::Local,
@@ -863,6 +932,7 @@ mod tests {
 
         let json_text = serde_json::to_string(&profile)?;
         assert!(json_text.contains("\"windows_account_username\":\"Leo16\""));
+        assert!(json_text.contains("\"display_name\":\"用户1\""));
         assert!(json_text.contains("\"credential_ref\":\"windows-credential-dev-user\""));
         assert!(json_text.contains("\"credential_secret_state\":\"configured\""));
         assert!(!json_text.contains("password"));
@@ -914,7 +984,8 @@ mod tests {
             templates: vec![FaceTemplateSummary {
                 face_template_ref: "active-service-template".to_owned(),
                 user_id: "dev-user".to_owned(),
-                display_name: Some("Leo16".to_owned()),
+                display_name: Some("用户1".to_owned()),
+                avatar_preview: None,
                 template_kind: FaceTemplateKind::SelectedTemplateSet,
                 recognition_model: FaceRecognitionModelSummary {
                     model_family: "opencv_sface".to_owned(),

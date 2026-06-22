@@ -21,6 +21,9 @@ use windows_service::{
 
 use crate::{
     camera_backend_profiles::spawn_camera_backend_profile_refresh,
+    camera_runtime::{
+        InterfaceRuntimeState, InterfaceRuntimeStateSource, update_interface_runtime_state,
+    },
     named_pipe_host::{run_named_pipe_until_shutdown, wake_named_pipe_host},
     presence_service::{PresenceServiceCommand, spawn_presence_service_controller},
 };
@@ -62,7 +65,18 @@ fn run_service_main() -> windows_service::Result<()> {
                 ServiceControl::SessionChange(session_change) => {
                     let session_id = session_change.notification.session_id;
                     let command = match session_change.reason {
-                        SessionChangeReason::SessionLogon | SessionChangeReason::SessionUnlock => {
+                        SessionChangeReason::SessionLogon => {
+                            update_interface_runtime_state(
+                                InterfaceRuntimeState::DesktopUnlocked,
+                                InterfaceRuntimeStateSource::ServiceSessionLogon,
+                            );
+                            Some(PresenceServiceCommand::StartForUserSession { session_id })
+                        }
+                        SessionChangeReason::SessionUnlock => {
+                            update_interface_runtime_state(
+                                InterfaceRuntimeState::DesktopUnlocked,
+                                InterfaceRuntimeStateSource::ServiceSessionUnlock,
+                            );
                             Some(PresenceServiceCommand::StartForUserSession { session_id })
                         }
                         SessionChangeReason::SessionLock
@@ -70,6 +84,16 @@ fn run_service_main() -> windows_service::Result<()> {
                         | SessionChangeReason::ConsoleDisconnect
                         | SessionChangeReason::RemoteDisconnect
                         | SessionChangeReason::SessionTerminate => {
+                            let source = match session_change.reason {
+                                SessionChangeReason::SessionLock => {
+                                    InterfaceRuntimeStateSource::ServiceSessionLock
+                                }
+                                _ => InterfaceRuntimeStateSource::ServiceSessionEnd,
+                            };
+                            update_interface_runtime_state(
+                                InterfaceRuntimeState::LockedOrLogon,
+                                source,
+                            );
                             Some(PresenceServiceCommand::StopForUserSession { session_id })
                         }
                         _ => None,

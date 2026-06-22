@@ -438,6 +438,7 @@ dependencies = [
 name = "control_status"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "common_protocol",
  "control_protocol",
  "serde",
@@ -685,6 +686,14 @@ dependencies = [
  "quote",
  "rustc_version",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "desktop_input"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4626,6 +4635,7 @@ dependencies = [
  "control_protocol",
  "control_status",
  "credential_store",
+ "desktop_input",
  "face_auth",
  "face_engine",
  "face_liveness",

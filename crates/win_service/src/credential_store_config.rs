@@ -10,7 +10,7 @@ use credential_store::{
 use hardware_binding::HardwareFingerprint;
 
 pub const ENV_CREDENTIAL_STORE_DIR: &str = "WINFACEUNLOCK_STORE_DIR";
-const STORE_DIR_NAME: &str = "WinFaceUnlock";
+const STORE_DIR_NAME: &str = "credential-store";
 const MASTER_KEY_FILE_NAME: &str = "protected-master-key.bin";
 const DATABASE_FILE_NAME: &str = "credential-store.db";
 const DEFAULT_POLICY_USER_SID: &str = "S-1-5-21-winfaceunlock-pending";
@@ -44,10 +44,14 @@ impl ServiceCredentialStorePaths {
             return Self::from_store_dir(PathBuf::from(store_dir));
         }
 
-        let root = std::env::var_os("ProgramData")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join(STORE_DIR_NAME);
+        let root = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.join(STORE_DIR_NAME)))
+            .unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join("WinFaceUnlock")
+                    .join(STORE_DIR_NAME)
+            });
         Self::from_store_dir(root)
     }
 

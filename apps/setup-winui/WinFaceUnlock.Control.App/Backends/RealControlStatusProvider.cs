@@ -94,7 +94,7 @@ public sealed class RealControlStatusProvider : IControlStatusProvider
             new ControlStatusItem(
                 "数据目录",
                 "等待后端",
-                "后端连接后会读取 ProgramData 路径和可用性。",
+                "后端连接后会读取安装目录数据路径和可用性。",
                 false));
     }
 

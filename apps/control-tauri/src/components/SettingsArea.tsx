@@ -7,11 +7,13 @@ export function SettingsArea() {
     autoLock,
     intruderSnap,
     triggerMode,
+    logonFaceMatchThreshold,
     enrolledFaces,
     intruders,
     setIntruderSnap,
     changeAutoLock: handleAutoLockChange,
     changeTriggerMode: handleTriggerModeChange,
+    changeLogonFaceMatchThreshold: handleLogonFaceMatchThresholdChange,
     deleteFace: handleFaceDelete,
   } = useSettingsArea();
 
@@ -112,7 +114,15 @@ export function SettingsArea() {
                 {enrolledFaces.map(face => (
                   <div key={face.id} className="relative flex flex-col items-center gap-2 group px-1 pt-1">
                     <div className="relative h-12 w-12 rounded-full border border-slate-200 bg-slate-50 flex items-center justify-center overflow-hidden">
-                      <User className="h-5 w-5 text-slate-400" />
+                      {face.avatarImageSrc ? (
+                        <img
+                          src={face.avatarImageSrc}
+                          alt=""
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <User className="h-5 w-5 text-slate-400" />
+                      )}
                     </div>
                     <button 
                       onClick={() => handleFaceDelete(face.id)}
@@ -163,6 +173,39 @@ export function SettingsArea() {
                    </span>
                  </button>
                ))}
+             </div>
+          </div>
+
+          {/* 匹配阈值 */}
+          <div className="flex flex-col p-4 border-b border-slate-100 last:border-0 hover:bg-white/40 transition-colors gap-4">
+             <div className="flex items-center justify-between gap-4">
+                <div className="flex flex-col">
+                   <span className="text-base font-medium text-slate-800">登录匹配阈值</span>
+                   <span className="text-xs text-slate-500">调低更容易通过，调高更严格</span>
+                </div>
+                <span className="min-w-14 rounded-lg border border-slate-200 bg-white/70 px-2 py-1 text-center text-sm font-semibold text-slate-700">
+                  {logonFaceMatchThreshold.toFixed(2)}
+                </span>
+             </div>
+
+             <div className="flex flex-col gap-2">
+               <input
+                 type="range"
+                 min="0.30"
+                 max="0.90"
+                 step="0.01"
+                 value={logonFaceMatchThreshold}
+                 aria-label="登录匹配阈值"
+                 onChange={(event) =>
+                   handleLogonFaceMatchThresholdChange(Number(event.currentTarget.value))
+                 }
+                 className="h-2 w-full cursor-pointer accent-[#007acc]"
+               />
+               <div className="grid grid-cols-3 text-[11px] font-medium text-slate-400">
+                 <span>宽松 0.30</span>
+                 <span className="text-center">默认 0.75</span>
+                 <span className="text-right">严格 0.90</span>
+               </div>
              </div>
           </div>
           

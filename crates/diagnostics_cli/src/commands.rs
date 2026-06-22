@@ -37,6 +37,10 @@ use opencv::{
 };
 use video_provider::{CameraId, OpenCvCameraProvider, OpenCvCameraProviderConfig, PixelFormat};
 use video_provider::{VideoError, VideoFrame, VideoFrameProvider};
+use win_service::camera_backend_profiles::apply_profile_to_config;
+use win_service::camera_runtime::{
+    InterfaceRuntimeState, InterfaceRuntimeStateSource, update_interface_runtime_state,
+};
 use win_service::credential_store_config::{
     ServiceCredentialStorePaths, WindowsCredentialEnrollment, enroll_windows_credential,
 };
@@ -51,14 +55,17 @@ use win_service::presence_monitor::{
     PresenceMonitor, PresenceMonitorConfig, PresenceMonitorError, PresenceObservationSource,
     UnknownFaceAuditSink,
 };
+use win_service::presence_person_camera::{
+    PersonCameraPresenceObservationConfig, PersonCameraPresenceObservationSource,
+};
 use win_service::presence_person_detector::{
-    OpenCvDnnPersonDetector, OpenCvDnnPersonDetectorConfig, PersonDetection, PresenceDetector,
-    PresencePersonDetectorError,
+    OpenCvDnnPersonDetector, OpenCvDnnPersonDetectorConfig, OrtYoloV8PersonDetectorConfig,
+    PersonDetection, PersonDetectorConfig, PresenceDetector, PresencePersonDetectorError,
 };
 use win_service::presence_policy::{
     PresenceObservation, PresencePolicy, PresencePolicyConfig, PresencePolicyDecision,
 };
-use win_service::session_lock::{SessionLockError, SessionLocker};
+use win_service::session_lock::{SessionLockError, SessionLocker, WindowsSessionLocker};
 
 use crate::face_calibration::{FaceCalibrationConfig, FaceCalibrationError, run_face_calibration};
 use crate::face_debug_snapshot::{
@@ -322,6 +329,8 @@ pub fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<(), Diagn
         run_presence_monitor_camera_debug(&args)?;
     } else if args.iter().any(|arg| arg == "presence-person-benchmark") {
         run_presence_person_benchmark(&args)?;
+    } else if args.iter().any(|arg| arg == "presence-person-lock-debug") {
+        run_presence_person_lock_debug(&args)?;
     } else if args.iter().any(|arg| arg == "screen-snapshot-debug") {
         run_screen_snapshot_debug(&args)?;
     } else if args.iter().any(|arg| arg == "face-auth-debug") {
@@ -675,6 +684,7 @@ fn run_enroll_camera(args: &[String]) -> Result<(), DiagnosticError> {
 
     let mut provider = build_camera_provider(args)?;
     let camera_id = selected_camera_id_without_forced_scan(args, &provider)?;
+    provider = build_camera_provider_for_camera(args, &camera_id)?;
     provider.open(&camera_id)?;
 
     let model_provider = build_loaded_model_provider(args)?;
@@ -760,6 +770,7 @@ fn run_guided_enroll_with_output_dir(
 
     let mut provider = build_camera_provider(args)?;
     let camera_id = selected_camera_id_without_forced_scan(args, &provider)?;
+    provider = build_camera_provider_for_camera(args, &camera_id)?;
     provider.open(&camera_id)?;
 
     let model_provider = build_loaded_model_provider(args)?;
@@ -1938,6 +1949,72 @@ fn run_presence_person_benchmark(args: &[String]) -> Result<(), DiagnosticError>
     Ok(())
 }
 
+fn run_presence_person_lock_debug(args: &[String]) -> Result<(), DiagnosticError> {
+    let detector_label = argument_value(args, "--detector").unwrap_or("yolov8-onnx");
+    let confidence_threshold =
+        optional_f32(args, "--confidence")?.unwrap_or(DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD);
+    let max_iterations = optional_u32(args, "--iterations")?.unwrap_or(8);
+    let detector_config =
+        person_detector_runtime_config_from_args(args, detector_label, confidence_threshold)?;
+    update_interface_runtime_state(
+        InterfaceRuntimeState::DesktopUnlocked,
+        InterfaceRuntimeStateSource::DesktopControlReload,
+    );
+    let camera_id = CameraId(
+        argument_value(args, "--camera-id")
+            .unwrap_or("opencv-index:0")
+            .to_owned(),
+    );
+    let source =
+        PersonCameraPresenceObservationSource::new(PersonCameraPresenceObservationConfig {
+            camera_id,
+            camera_config: OpenCvCameraProviderConfig {
+                max_camera_index: 8,
+                requested_frame_width: optional_u32(args, "--frame-width")?,
+                requested_frame_height: optional_u32(args, "--frame-height")?,
+                preferred_backend: None,
+            },
+            detector_config,
+            debug_output_dir: argument_value(args, "--output-dir").map(PathBuf::from),
+        })
+        .map_err(|_| DiagnosticError::InvalidArgument)?;
+    let real_lock_requested = args.iter().any(|arg| arg == "--real-lock");
+    let mut monitor = PresenceMonitor::new(
+        PresenceMonitorConfig {
+            presence_lock_enabled: true,
+            max_monitor_iteration_count: Some(max_iterations),
+            sleep_between_checks: true,
+            stop_requested: None,
+        },
+        PresencePolicyConfig {
+            presence_person_absent_required_frames: optional_u32(args, "--absent-frames")?
+                .unwrap_or(6),
+            ..PresencePolicyConfig::default()
+        },
+        DiagnosticMaybeRealLocker {
+            real_lock_requested,
+        },
+        DiagnosticRecordingAuditSink,
+        source,
+    );
+    let summary = monitor
+        .run()
+        .map_err(|_| DiagnosticError::InvalidArgument)?;
+
+    println!("presence_person_lock_debug_completed: true");
+    println!("real_lock_requested: {real_lock_requested}");
+    println!(
+        "presence_monitor_iteration_count: {}",
+        summary.iteration_count
+    );
+    println!(
+        "presence_monitor_lock_request_count: {}",
+        summary.lock_request_count
+    );
+    println!("presence_monitor_stop_reason: {:?}", summary.stop_reason);
+    Ok(())
+}
+
 fn save_person_benchmark_debug_frame(
     output_dir: &Path,
     frame_index: u32,
@@ -2071,6 +2148,28 @@ fn person_detector_config_from_args(
     Ok(config)
 }
 
+fn person_detector_runtime_config_from_args(
+    args: &[String],
+    detector_label: &str,
+    confidence_threshold: f32,
+) -> Result<PersonDetectorConfig, DiagnosticError> {
+    if detector_label == "ort-yolov8-onnx" {
+        let mut config =
+            OrtYoloV8PersonDetectorConfig::new(model_path(args, "--model", "models/yolov8n.onnx"));
+        config.confidence_threshold = confidence_threshold;
+        if let Some(input_width) = optional_i32(args, "--input-width")? {
+            config.input_width = input_width.max(1) as usize;
+        }
+        if let Some(input_height) = optional_i32(args, "--input-height")? {
+            config.input_height = input_height.max(1) as usize;
+        }
+        return Ok(PersonDetectorConfig::OrtYoloV8(config));
+    }
+
+    person_detector_config_from_args(args, detector_label, confidence_threshold)
+        .map(PersonDetectorConfig::OpenCvDnn)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LatencySummary {
     count: usize,
@@ -2135,6 +2234,19 @@ struct DiagnosticRecordingLocker;
 
 impl SessionLocker for DiagnosticRecordingLocker {
     fn request_lock_workstation(&self) -> Result<(), SessionLockError> {
+        Ok(())
+    }
+}
+
+struct DiagnosticMaybeRealLocker {
+    real_lock_requested: bool,
+}
+
+impl SessionLocker for DiagnosticMaybeRealLocker {
+    fn request_lock_workstation(&self) -> Result<(), SessionLockError> {
+        if self.real_lock_requested {
+            return WindowsSessionLocker::current_workstation().request_lock_workstation();
+        }
         Ok(())
     }
 }
@@ -2532,12 +2644,38 @@ fn selected_camera_id_without_forced_scan(
 }
 
 fn build_camera_provider(args: &[String]) -> Result<OpenCvCameraProvider, DiagnosticError> {
-    Ok(OpenCvCameraProvider::new(OpenCvCameraProviderConfig {
+    Ok(OpenCvCameraProvider::new(camera_provider_config(args)?))
+}
+
+fn camera_provider_config(args: &[String]) -> Result<OpenCvCameraProviderConfig, DiagnosticError> {
+    let mut config = OpenCvCameraProviderConfig {
         max_camera_index: 8,
         requested_frame_width: optional_u32(args, "--frame-width")?,
         requested_frame_height: optional_u32(args, "--frame-height")?,
         preferred_backend: None,
-    }))
+    };
+    if let Some(camera_id) = argument_value(args, "--camera-id") {
+        apply_profile_to_config(&CameraId(camera_id.to_owned()), &mut config);
+    }
+    Ok(config)
+}
+
+fn camera_provider_config_for_camera(
+    args: &[String],
+    camera_id: &CameraId,
+) -> Result<OpenCvCameraProviderConfig, DiagnosticError> {
+    let mut config = camera_provider_config(args)?;
+    apply_profile_to_config(camera_id, &mut config);
+    Ok(config)
+}
+
+fn build_camera_provider_for_camera(
+    args: &[String],
+    camera_id: &CameraId,
+) -> Result<OpenCvCameraProvider, DiagnosticError> {
+    Ok(OpenCvCameraProvider::new(
+        camera_provider_config_for_camera(args, camera_id)?,
+    ))
 }
 
 fn print_camera_sources(sources: &[video_provider::CameraInfo]) {
@@ -2739,6 +2877,9 @@ fn print_usage() {
     println!(
         "Usage: diagnostics_cli presence-person-benchmark [--detector mobilenet-ssd|ssdlite-onnx|yolov8-onnx] [--model <path>] [--config <path>] [--fps 2] [--duration-seconds 120] [--confidence 0.50] [--camera-id opencv-index:0] [--frame-width 640 --frame-height 480] [--output-dir <dir>]"
     );
+    println!(
+        "Usage: diagnostics_cli presence-person-lock-debug [--detector mobilenet-ssd|ssdlite-onnx|yolov8-onnx|ort-yolov8-onnx] [--model <path>] [--camera-id opencv-index:0] [--frame-width 640 --frame-height 480] [--iterations 8] [--absent-frames 6] [--real-lock] [--output-dir <dir>]"
+    );
     println!("Usage: diagnostics_cli screen-snapshot-debug --output <path.bmp>");
     println!(
         "Usage: diagnostics_cli face-auth-debug --template <path> [--frames 30] [--camera-id opencv-index:0]"
@@ -2924,6 +3065,55 @@ mod tests {
         assert!(guided_enrollment_step_is_optional(
             GuidedEnrollmentStep::PitchUpMild
         ));
+    }
+
+    #[test]
+    fn profiled_camera_provider_config_reads_stored_backend() -> Result<(), String> {
+        let config_path = std::env::current_exe()
+            .map_err(|error| error.to_string())?
+            .parent()
+            .ok_or_else(|| "test executable parent directory is unavailable".to_owned())?
+            .join("runtime")
+            .join("camera_backend_profiles.json");
+        let original_config = fs::read(&config_path).ok();
+        if let Some(parent) = config_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        fs::write(
+            &config_path,
+            r#"{
+  "profiles": [
+    {
+      "camera_id": "opencv-index:77",
+      "display_name": "Profiled camera",
+      "preferred_backend": "dshow",
+      "open_ms": 10,
+      "read_ms": 5,
+      "frame_width": 640,
+      "frame_height": 480,
+      "measured_at_unix_ms": 1
+    }
+  ]
+}"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let args = vec!["diagnostics_cli".to_owned(), "guided-enroll".to_owned()];
+        let config =
+            camera_provider_config_for_camera(&args, &CameraId("opencv-index:77".to_owned()))
+                .map_err(|error| format!("{error:?}"))?;
+
+        if let Some(original_config) = original_config {
+            fs::write(config_path, original_config).map_err(|error| error.to_string())?;
+        } else {
+            let _ = fs::remove_file(config_path);
+        }
+
+        assert_eq!(
+            config.preferred_backend,
+            Some(video_provider::OpenCvCameraBackend::Dshow)
+        );
+        Ok(())
     }
 
     #[test]

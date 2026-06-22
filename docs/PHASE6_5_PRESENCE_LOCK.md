@@ -158,7 +158,10 @@ Presence Lock 不应固定高频运行。建议使用递增间隔：
 动作：调用 LockWorkStation
 ```
 
-第一版不要求结合 Windows 键鼠空闲时间。摄像头判断连续无脸即可触发自动锁屏。
+当前实现要求先通过键鼠输入采样门控：最近 60 秒内有键盘或鼠标输入时，
+Presence Monitor 不打开摄像头；超过阈值后才短暂打开摄像头采样。摄像头采样窗口
+结束后必须立即释放摄像头租约。完整约束见
+`docs/PRESENCE_LOCK_SAMPLING_GATE_ARCHITECTURE.md`。
 
 ### 检测到非本人
 

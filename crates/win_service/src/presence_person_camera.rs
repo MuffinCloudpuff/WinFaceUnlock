@@ -16,11 +16,18 @@ use video_provider::{
 };
 
 use crate::{
+    camera_frame_recovery::{
+        TransientFrameFailureDecision, TransientFrameFailureKind, TransientFrameFailureTolerance,
+        validate_frame_for_camera_stream,
+    },
+    camera_runtime::{CameraLeaseKind, try_acquire_camera_lease},
     presence_monitor::{PresenceMonitorError, PresenceObservationSource},
     presence_person_detector::{
         PersonDetection, PersonDetector, PersonDetectorConfig, PresenceDetector,
+        PresencePersonDetectorError,
     },
     presence_policy::PresenceObservation,
+    service_log::write_service_event_detail,
 };
 
 pub struct PersonCameraPresenceObservationConfig {
@@ -31,6 +38,8 @@ pub struct PersonCameraPresenceObservationConfig {
 }
 
 pub struct PersonCameraPresenceObservationSource {
+    camera_id: CameraId,
+    camera_config: OpenCvCameraProviderConfig,
     camera_provider: OpenCvCameraProvider,
     detector: PersonDetector,
     debug_recorder: Option<PersonPresenceDebugRecorder>,
@@ -40,23 +49,46 @@ impl PersonCameraPresenceObservationSource {
     pub fn new(
         config: PersonCameraPresenceObservationConfig,
     ) -> Result<Self, PresenceMonitorError> {
-        let mut camera_provider = OpenCvCameraProvider::new(config.camera_config);
-        camera_provider
-            .open(&config.camera_id)
-            .map_err(|_| PresenceMonitorError::ObservationFailed)?;
-
+        write_service_event_detail(
+            "PresencePersonSource.CreateStarted",
+            format!(
+                "camera_id={} detector_config={:?} debug_output_dir={}",
+                config.camera_id.0,
+                config.detector_config,
+                config
+                    .debug_output_dir
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<none>".to_owned())
+            ),
+        );
         let mut detector = PersonDetector::new(config.detector_config);
-        detector
-            .load_model()
-            .map_err(|_| PresenceMonitorError::ObservationFailed)?;
+        write_service_event_detail("PresencePersonSource.LoadModelStarted", "");
+        detector.load_model().map_err(|error| {
+            write_service_event_detail(
+                "PresencePersonSource.LoadModelFailed",
+                format!("error={error:?} detail={error}"),
+            );
+            PresenceMonitorError::ObservationFailed
+        })?;
+        write_service_event_detail("PresencePersonSource.LoadModelSucceeded", "");
         let debug_recorder = config
             .debug_output_dir
             .map(PersonPresenceDebugRecorder::new)
             .transpose()
-            .map_err(|_| PresenceMonitorError::ObservationFailed)?;
+            .map_err(|error| {
+                write_service_event_detail(
+                    "PresencePersonSource.DebugRecorderFailed",
+                    format!("error={error}"),
+                );
+                PresenceMonitorError::ObservationFailed
+            })?;
+        write_service_event_detail("PresencePersonSource.CreateSucceeded", "");
 
         Ok(Self {
-            camera_provider,
+            camera_id: config.camera_id,
+            camera_config: config.camera_config.clone(),
+            camera_provider: OpenCvCameraProvider::new(config.camera_config),
             detector,
             debug_recorder,
         })
@@ -65,39 +97,194 @@ impl PersonCameraPresenceObservationSource {
 
 impl PresenceObservationSource for PersonCameraPresenceObservationSource {
     fn next_observation(&mut self) -> Result<Option<PresenceObservation>, PresenceMonitorError> {
-        let frame = match self.camera_provider.read_frame() {
-            Ok(frame) => frame,
-            Err(_) => return Ok(Some(PresenceObservation::CameraUnavailable)),
+        self.sample_once().map(Some)
+    }
+}
+
+impl PersonCameraPresenceObservationSource {
+    fn sample_once(&mut self) -> Result<PresenceObservation, PresenceMonitorError> {
+        write_service_event_detail(
+            "PresencePersonSource.SampleStarted",
+            format!("camera_id={}", self.camera_id.0),
+        );
+        let mut frame_failure_tolerance =
+            TransientFrameFailureTolerance::default_for_camera_stream();
+        let _camera_lease = match try_acquire_camera_lease(CameraLeaseKind::PresenceLock) {
+            Ok(lease) => lease,
+            Err(reason) => {
+                write_service_event_detail(
+                    "PresencePersonSource.LeaseDenied",
+                    format!("reason={reason:?}"),
+                );
+                return Ok(PresenceObservation::CameraUnavailable);
+            }
         };
-        let detections = self
-            .detector
-            .detect_persons(&frame)
-            .map_err(|_| PresenceMonitorError::ObservationFailed)?;
-        if let Some(debug_recorder) = &mut self.debug_recorder {
-            debug_recorder.record(&frame, &detections);
+        write_service_event_detail("PresencePersonSource.LeaseAcquired", "");
+        self.camera_provider = OpenCvCameraProvider::new(self.camera_config.clone());
+        write_service_event_detail(
+            "PresencePersonSource.OpenCameraStarted",
+            format!("camera_id={}", self.camera_id.0),
+        );
+        if let Err(error) = self.camera_provider.open(&self.camera_id) {
+            write_service_event_detail(
+                "PresencePersonSource.OpenCameraFailed",
+                format!("camera_id={} error={error:?}", self.camera_id.0),
+            );
+            self.camera_provider.close();
+            write_service_event_detail("PresencePersonSource.SampleReleased", "");
+            return Ok(PresenceObservation::CameraUnavailable);
         }
-        let Some(primary_person) = largest_person_detection(&detections) else {
-            return Ok(Some(PresenceObservation::PersonAbsent));
-        };
+        write_service_event_detail(
+            "PresencePersonSource.OpenCameraSucceeded",
+            format!("camera_id={}", self.camera_id.0),
+        );
+        let observation = (|| {
+            let (frame, detections) = loop {
+                let frame = match self.camera_provider.read_frame() {
+                    Ok(frame) => match validate_frame_for_camera_stream(&frame) {
+                        Ok(()) => frame,
+                        Err(kind) => {
+                            match Self::record_transient_frame_failure(
+                                &mut frame_failure_tolerance,
+                                "ValidateFrame",
+                                kind,
+                            ) {
+                                TransientFrameFailureOutcome::RetryNextFrame => continue,
+                                TransientFrameFailureOutcome::CameraUnavailable => {
+                                    return Ok(PresenceObservation::CameraUnavailable);
+                                }
+                            }
+                        }
+                    },
+                    Err(error) => {
+                        let Some(kind) = TransientFrameFailureKind::from_video_error(error.clone())
+                        else {
+                            write_service_event_detail(
+                                "PresencePersonSource.ReadFrameFailed",
+                                format!("error={error:?}"),
+                            );
+                            return Ok(PresenceObservation::CameraUnavailable);
+                        };
+                        match Self::record_transient_frame_failure(
+                            &mut frame_failure_tolerance,
+                            "ReadFrame",
+                            kind,
+                        ) {
+                            TransientFrameFailureOutcome::RetryNextFrame => continue,
+                            TransientFrameFailureOutcome::CameraUnavailable => {
+                                return Ok(PresenceObservation::CameraUnavailable);
+                            }
+                        }
+                    }
+                };
+                match self.detector.detect_persons(&frame) {
+                    Ok(detections) => {
+                        frame_failure_tolerance.record_valid_frame();
+                        break (frame, detections);
+                    }
+                    Err(PresencePersonDetectorError::InvalidFrame) => {
+                        write_service_event_detail(
+                            "PresencePersonSource.DetectInvalidFrame",
+                            format!(
+                                "frame_width={} frame_height={} frame_format={:?} frame_data_len={}",
+                                frame.width,
+                                frame.height,
+                                frame.format,
+                                frame.data.len()
+                            ),
+                        );
+                        match Self::record_transient_frame_failure(
+                            &mut frame_failure_tolerance,
+                            "DetectPersons",
+                            TransientFrameFailureKind::InvalidFrame,
+                        ) {
+                            TransientFrameFailureOutcome::RetryNextFrame => continue,
+                            TransientFrameFailureOutcome::CameraUnavailable => {
+                                return Ok(PresenceObservation::CameraUnavailable);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        write_service_event_detail(
+                            "PresencePersonSource.DetectFailed",
+                            format!("error={error:?} detail={error}"),
+                        );
+                        return Err(PresenceMonitorError::ObservationFailed);
+                    }
+                }
+            };
+            if let Some(debug_recorder) = &mut self.debug_recorder {
+                debug_recorder.record(&frame, &detections);
+            }
+            let Some(primary_person) = largest_person_detection(&detections) else {
+                return Ok(PresenceObservation::PersonAbsent);
+            };
 
-        let bbox_center_x_ratio = (primary_person.bbox.x as f32
-            + primary_person.bbox.width as f32 / 2.0)
-            / frame.width as f32;
-        let bbox_area_ratio = (primary_person.bbox.width as f32
-            * primary_person.bbox.height as f32)
-            / (frame.width as f32 * frame.height as f32);
+            let bbox_center_x_ratio = (primary_person.bbox.x as f32
+                + primary_person.bbox.width as f32 / 2.0)
+                / frame.width as f32;
+            let bbox_area_ratio = (primary_person.bbox.width as f32
+                * primary_person.bbox.height as f32)
+                / (frame.width as f32 * frame.height as f32);
 
-        Ok(Some(PresenceObservation::PersonPresent {
-            confidence: primary_person.confidence,
-            bbox_center_x_ratio,
-            bbox_area_ratio,
-        }))
+            Ok(PresenceObservation::PersonPresent {
+                confidence: primary_person.confidence,
+                bbox_center_x_ratio,
+                bbox_area_ratio,
+            })
+        })();
+        write_service_event_detail(
+            "PresencePersonSource.SampleCompleted",
+            format!("observation={observation:?}"),
+        );
+        self.camera_provider.close();
+        write_service_event_detail("PresencePersonSource.SampleReleased", "");
+        observation
+    }
+}
+
+enum TransientFrameFailureOutcome {
+    RetryNextFrame,
+    CameraUnavailable,
+}
+
+impl PersonCameraPresenceObservationSource {
+    fn record_transient_frame_failure(
+        frame_failure_tolerance: &mut TransientFrameFailureTolerance,
+        stage: &'static str,
+        kind: TransientFrameFailureKind,
+    ) -> TransientFrameFailureOutcome {
+        match frame_failure_tolerance.record_transient_failure(kind) {
+            TransientFrameFailureDecision::RetryNextFrame {
+                consecutive_failures,
+                max_consecutive_failures,
+            } => {
+                write_service_event_detail(
+                    "PresencePersonSource.TransientFrameSkipped",
+                    format!(
+                        "stage={stage} reason={kind:?} consecutive_failures={consecutive_failures} max_consecutive_failures={max_consecutive_failures}"
+                    ),
+                );
+                TransientFrameFailureOutcome::RetryNextFrame
+            }
+            TransientFrameFailureDecision::Escalate {
+                consecutive_failures,
+                max_consecutive_failures,
+            } => {
+                write_service_event_detail(
+                    "PresencePersonSource.TransientFrameEscalated",
+                    format!(
+                        "stage={stage} reason={kind:?} consecutive_failures={consecutive_failures} max_consecutive_failures={max_consecutive_failures}"
+                    ),
+                );
+                TransientFrameFailureOutcome::CameraUnavailable
+            }
+        }
     }
 }
 
 impl Drop for PersonCameraPresenceObservationSource {
     fn drop(&mut self) {
-        self.camera_provider.close();
         self.detector.unload_model();
     }
 }

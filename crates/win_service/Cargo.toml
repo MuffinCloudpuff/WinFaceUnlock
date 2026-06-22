@@ -10,6 +10,7 @@ common_protocol = { path = "../common_protocol" }
 control_protocol = { path = "../control_protocol" }
 control_status = { path = "../control_status" }
 credential_store = { path = "../credential_store" }
+desktop_input = { path = "../desktop_input" }
 face_auth = { path = "../face_auth", default-features = false }
 face_engine = { path = "../face_engine" }
 face_liveness = { path = "../face_liveness" }
@@ -30,7 +31,9 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Registry",
     "Win32_System_RemoteDesktop",
     "Win32_System_Shutdown",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

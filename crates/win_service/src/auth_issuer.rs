@@ -23,12 +23,19 @@ use video_provider::{
 use crate::{
     auth_orchestrator::CameraAuthOrchestrator,
     camera_backend_profiles::apply_profile_to_config,
+    camera_frame_recovery::{
+        TransientFrameFailureDecision, TransientFrameFailureKind, TransientFrameFailureTolerance,
+        validate_frame_for_camera_stream,
+    },
+    camera_runtime::{CameraLeaseKind, acquire_camera_lease_until},
     service_config::{LocalCameraAuthConfig, ServiceAuthConfig, ServiceAuthMode},
     service_log::{write_service_event, write_service_event_detail},
     simulated_auth::SimulatedAuthGrantIssuer,
 };
+use std::time::Duration;
 
 pub struct DevelopmentAuthGrantIssuer {
+    manual_test_user_id: UserId,
     manual_test_issuer: SimulatedAuthGrantIssuer,
     local_camera_issuer: Option<CameraAuthOrchestrator<LocalCameraAuthGrantIssuer>>,
 }
@@ -42,17 +49,36 @@ impl DevelopmentAuthGrantIssuer {
         manual_test_user_id: UserId,
         config: ServiceAuthConfig,
     ) -> Result<Self, ProtocolError> {
-        let local_camera_issuer = match config.auth_mode {
-            ServiceAuthMode::ManualTestOnly => None,
-            ServiceAuthMode::LocalCamera(local_camera_config) => Some(CameraAuthOrchestrator::new(
-                LocalCameraAuthGrantIssuer::from_config(*local_camera_config)?,
-            )),
-        };
+        let local_camera_issuer = local_camera_issuer_from_config(config)?;
 
         Ok(Self {
-            manual_test_issuer: SimulatedAuthGrantIssuer::for_user(manual_test_user_id),
+            manual_test_issuer: SimulatedAuthGrantIssuer::for_user(manual_test_user_id.clone()),
+            manual_test_user_id,
             local_camera_issuer,
         })
+    }
+
+    fn reload_from_environment(&mut self) -> Result<(), ProtocolError> {
+        let previous_camera_id = self.current_local_camera_id();
+        self.local_camera_issuer =
+            local_camera_issuer_from_config(ServiceAuthConfig::from_environment()?)?;
+        let current_camera_id = self.current_local_camera_id();
+        write_service_event_detail(
+            "AuthIssuer.Reloaded",
+            format!(
+                "previous_camera_id={} current_camera_id={} manual_test_user_id={}",
+                optional_camera_id_for_log(previous_camera_id.as_deref()),
+                optional_camera_id_for_log(current_camera_id.as_deref()),
+                self.manual_test_user_id.0
+            ),
+        );
+        Ok(())
+    }
+
+    fn current_local_camera_id(&self) -> Option<String> {
+        self.local_camera_issuer
+            .as_ref()
+            .and_then(|issuer| issuer.try_with_issuer(|inner| inner.camera_id().0.clone()))
     }
 }
 
@@ -111,6 +137,25 @@ impl AuthGrantIssuer for DevelopmentAuthGrantIssuer {
             issuer.cancel_auth(session_id);
         }
     }
+
+    fn reload_auth_config(&mut self) -> Result<(), ProtocolError> {
+        self.reload_from_environment()
+    }
+}
+
+fn local_camera_issuer_from_config(
+    config: ServiceAuthConfig,
+) -> Result<Option<CameraAuthOrchestrator<LocalCameraAuthGrantIssuer>>, ProtocolError> {
+    match config.auth_mode {
+        ServiceAuthMode::ManualTestOnly => Ok(None),
+        ServiceAuthMode::LocalCamera(local_camera_config) => Ok(Some(CameraAuthOrchestrator::new(
+            LocalCameraAuthGrantIssuer::from_config(*local_camera_config)?,
+        ))),
+    }
+}
+
+fn optional_camera_id_for_log(camera_id: Option<&str>) -> &str {
+    camera_id.unwrap_or("<none>")
 }
 
 struct LocalCameraAuthGrantIssuer {
@@ -158,6 +203,10 @@ impl LocalCameraAuthGrantIssuer {
             max_spoof_frame_ratio: config.minifasnet_max_spoof_frame_ratio,
             next_grant_sequence: 1,
         })
+    }
+
+    fn camera_id(&self) -> &CameraId {
+        &self.camera_id
     }
 
     fn issue_auth_grant_blocking(
@@ -224,6 +273,17 @@ impl LocalCameraAuthGrantIssuer {
     fn authenticate_from_camera_with_loaded_runtime(
         &mut self,
     ) -> Result<LocalCameraAuthenticationOutcome, AuthFailureReason> {
+        let _camera_lease = acquire_camera_lease_until(
+            CameraLeaseKind::LogonAuthentication,
+            Duration::from_secs(2),
+        )
+        .map_err(|reason| {
+            write_service_event_detail(
+                "LocalCameraAuth.CameraLeaseDenied",
+                format!("reason={reason:?}"),
+            );
+            AuthFailureReason::InternalError
+        })?;
         let mut camera_provider = OpenCvCameraProvider::new(self.camera_config.clone());
         let auth_result = (|| {
             write_service_event_detail(
@@ -235,12 +295,41 @@ impl LocalCameraAuthGrantIssuer {
                 .map_err(video_error_to_auth_failure)?;
             write_service_event("LocalCameraAuth.OpenCameraSucceeded");
             let mut last_rejection = AuthFailureReason::Timeout;
+            let mut frame_failure_tolerance =
+                TransientFrameFailureTolerance::default_for_camera_stream();
             let mut liveness_window = MiniFasNetWindowEvidence::new(self.max_spoof_frame_ratio);
 
             for frame_index in 0..self.max_auth_frames {
-                let frame = camera_provider
-                    .read_frame()
-                    .map_err(video_error_to_auth_failure)?;
+                let frame = match camera_provider.read_frame() {
+                    Ok(frame) => match validate_frame_for_camera_stream(&frame) {
+                        Ok(()) => {
+                            frame_failure_tolerance.record_valid_frame();
+                            frame
+                        }
+                        Err(kind) => {
+                            last_rejection = AuthFailureReason::NoFaceDetected;
+                            handle_auth_transient_frame_failure(
+                                frame_index,
+                                kind,
+                                &mut frame_failure_tolerance,
+                            )?;
+                            continue;
+                        }
+                    },
+                    Err(error) => {
+                        let Some(kind) = TransientFrameFailureKind::from_video_error(error.clone())
+                        else {
+                            return Err(video_error_to_auth_failure(error));
+                        };
+                        last_rejection = AuthFailureReason::NoFaceDetected;
+                        handle_auth_transient_frame_failure(
+                            frame_index,
+                            kind,
+                            &mut frame_failure_tolerance,
+                        )?;
+                        continue;
+                    }
+                };
                 let detected_face = match self.authenticator.detect_single_face(&frame) {
                     Ok(detected_face) => detected_face,
                     Err(reason) => {
@@ -403,6 +492,39 @@ fn video_error_to_auth_failure(error: VideoError) -> AuthFailureReason {
         | VideoError::CameraNotOpen
         | VideoError::OpenFailed
         | VideoError::UnsupportedFormat => AuthFailureReason::InternalError,
+    }
+}
+
+fn handle_auth_transient_frame_failure(
+    frame_index: u32,
+    kind: TransientFrameFailureKind,
+    tolerance: &mut TransientFrameFailureTolerance,
+) -> Result<(), AuthFailureReason> {
+    match tolerance.record_transient_failure(kind) {
+        TransientFrameFailureDecision::RetryNextFrame {
+            consecutive_failures,
+            max_consecutive_failures,
+        } => {
+            write_service_event_detail(
+                "LocalCameraAuth.TransientFrameSkipped",
+                format!(
+                    "frame_index={frame_index} reason={kind:?} consecutive_failures={consecutive_failures} max_consecutive_failures={max_consecutive_failures}"
+                ),
+            );
+            Ok(())
+        }
+        TransientFrameFailureDecision::Escalate {
+            consecutive_failures,
+            max_consecutive_failures,
+        } => {
+            write_service_event_detail(
+                "LocalCameraAuth.TransientFrameEscalated",
+                format!(
+                    "frame_index={frame_index} reason={kind:?} consecutive_failures={consecutive_failures} max_consecutive_failures={max_consecutive_failures}"
+                ),
+            );
+            Err(AuthFailureReason::NoFaceDetected)
+        }
     }
 }
 

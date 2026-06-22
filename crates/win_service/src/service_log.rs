@@ -27,7 +27,7 @@ fn log_path() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join("logs")))
-        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData\WinFaceUnlock"))
+        .unwrap_or_else(|| std::env::temp_dir().join("WinFaceUnlock").join("logs"))
         .join("service.log")
 }
 

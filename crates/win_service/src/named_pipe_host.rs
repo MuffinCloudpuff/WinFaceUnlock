@@ -21,10 +21,10 @@ use crate::{
     auth_issuer::DevelopmentAuthGrantIssuer,
     credential_resolver::StoreProtectedCredentialResolver,
     credential_store_config::{
-        ServiceCredentialStore, ServiceCredentialStorePaths,
-        ensure_development_credential_if_missing, open_service_credential_store,
+        ServiceCredentialStore, ServiceCredentialStorePaths, open_service_credential_store,
     },
     presence_service::PresenceServiceCommand,
+    service_config::ServiceAuthConfig,
     service_log::write_service_event_detail,
 };
 
@@ -152,17 +152,20 @@ impl ServiceConfigApplier for ServiceFaceTemplateConfigApplier {
                 write_service_event_detail(
                     "ControlSettings.Applied",
                     format!(
-                        "presence_lock_enabled={:?} logon_wake_mode={:?} snapshot_presence_lock_enabled={} snapshot_logon_wake_mode={:?}",
+                        "presence_lock_enabled={:?} logon_wake_mode={:?} logon_face_match_threshold={:?} snapshot_presence_lock_enabled={} snapshot_logon_wake_mode={:?} snapshot_logon_face_match_threshold={:.3}",
                         patch.presence_lock_enabled,
                         patch.logon_wake_mode,
+                        patch.logon_face_match_threshold,
                         snapshot.presence_lock_enabled,
-                        snapshot.logon_wake_mode
+                        snapshot.logon_wake_mode,
+                        snapshot.logon_face_match_threshold
                     ),
                 );
-                if patch.presence_lock_enabled.is_some() {
-                    if let Some(sender) = &self.presence_command_sender {
-                        let _ = sender.send(PresenceServiceCommand::ReloadCurrentSession);
-                    }
+                if patch.presence_lock_enabled.is_some()
+                    && let Some(sender) = &self.presence_command_sender
+                {
+                    let _ =
+                        sender.send(PresenceServiceCommand::ReloadCurrentSessionFromDesktopControl);
                 }
             })
             .map_err(control_status_error_to_protocol_error)
@@ -190,14 +193,25 @@ pub(crate) fn build_development_handler_with_paths(
     paths: &ServiceCredentialStorePaths,
     presence_command_sender: Option<mpsc::Sender<PresenceServiceCommand>>,
 ) -> Result<DevelopmentServiceRequestHandler, ProtocolError> {
+    build_development_handler_with_paths_and_auth_config(
+        paths,
+        presence_command_sender,
+        ServiceAuthConfig::from_environment()?,
+    )
+}
+
+pub(crate) fn build_development_handler_with_paths_and_auth_config(
+    paths: &ServiceCredentialStorePaths,
+    presence_command_sender: Option<mpsc::Sender<PresenceServiceCommand>>,
+    auth_config: ServiceAuthConfig,
+) -> Result<DevelopmentServiceRequestHandler, ProtocolError> {
     let dev_user_id = UserId("dev-user".to_owned());
     let context = open_service_credential_store(paths)?;
-    let mut credential_store = context.store;
+    let credential_store = context.store;
     let master_key = context.master_key;
-    ensure_development_credential_if_missing(&mut credential_store, &master_key, &dev_user_id)?;
 
     Ok(ServiceRequestHandler::new(
-        DevelopmentAuthGrantIssuer::from_environment(dev_user_id)?,
+        DevelopmentAuthGrantIssuer::from_config(dev_user_id, auth_config)?,
         StoreProtectedCredentialResolver::with_master_key(credential_store, master_key),
         ServiceFaceTemplateConfigApplier::from_environment_or_default(presence_command_sender),
         SystemUnixTimeMillisClock,
@@ -237,6 +251,13 @@ mod tests {
     use common_protocol::{AuthSource, AuthTriggerSource, ServiceEvent, ServiceRequest, SessionId};
     use ipc::{IpcClient, NamedPipeClient};
 
+    use crate::{
+        credential_store_config::{
+            ensure_development_credential_if_missing, open_service_credential_store,
+        },
+        service_config::{ServiceAuthConfig, ServiceAuthMode},
+    };
+
     use super::*;
 
     #[test]
@@ -247,8 +268,12 @@ mod tests {
 
         let server_thread = thread::spawn(move || -> Result<ServiceEvent, ProtocolError> {
             let mut server = NamedPipeServer::new(server_pipe_name);
-            let paths = unique_development_store_paths();
-            let mut handler = build_development_handler_with_paths(&paths, None)?;
+            let paths = unique_development_store_paths_with_dev_credential()?;
+            let mut handler = build_development_handler_with_paths_and_auth_config(
+                &paths,
+                None,
+                manual_test_auth_config(),
+            )?;
             server.start(PipeSecurity::service_default())?;
             ready_tx
                 .send(())
@@ -275,8 +300,12 @@ mod tests {
 
     #[test]
     fn development_handler_can_issue_manual_test_grant() -> Result<(), ProtocolError> {
-        let paths = unique_development_store_paths();
-        let mut handler = build_development_handler_with_paths(&paths, None)?;
+        let paths = unique_development_store_paths_with_dev_credential()?;
+        let mut handler = build_development_handler_with_paths_and_auth_config(
+            &paths,
+            None,
+            manual_test_auth_config(),
+        )?;
 
         let event = handler.handle_request(ServiceRequest::WakeAuth {
             session_id: SessionId("session-1".to_owned()),
@@ -296,8 +325,12 @@ mod tests {
 
         let server_thread = thread::spawn(move || -> Result<Vec<ServiceEvent>, ProtocolError> {
             let mut server = NamedPipeServer::new(server_pipe_name);
-            let paths = unique_development_store_paths();
-            let mut handler = build_development_handler_with_paths(&paths, None)?;
+            let paths = unique_development_store_paths_with_dev_credential()?;
+            let mut handler = build_development_handler_with_paths_and_auth_config(
+                &paths,
+                None,
+                manual_test_auth_config(),
+            )?;
             server.start(PipeSecurity::service_default())?;
             ready_tx
                 .send(())
@@ -397,5 +430,24 @@ mod tests {
             .unwrap_or(0);
         let prefix = format!("winfaceunlock-dev-test-{}-{nanos}", std::process::id());
         ServiceCredentialStorePaths::from_store_dir(std::env::temp_dir().join(prefix))
+    }
+
+    fn unique_development_store_paths_with_dev_credential()
+    -> Result<ServiceCredentialStorePaths, ProtocolError> {
+        let paths = unique_development_store_paths();
+        let context = open_service_credential_store(&paths)?;
+        let mut credential_store = context.store;
+        ensure_development_credential_if_missing(
+            &mut credential_store,
+            &context.master_key,
+            &UserId("dev-user".to_owned()),
+        )?;
+        Ok(paths)
+    }
+
+    fn manual_test_auth_config() -> ServiceAuthConfig {
+        ServiceAuthConfig {
+            auth_mode: ServiceAuthMode::ManualTestOnly,
+        }
     }
 }

@@ -91,10 +91,20 @@ function Invoke-SetupBackend {
     param([hashtable]$Request)
 
     $requestJson = $Request | ConvertTo-Json -Depth 20 -Compress
-    $output = $requestJson | & $backendExe setup-backend 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    $requestFile = Join-Path $env:TEMP ("WinFaceUnlockSetupBackendRequest-" + [System.Guid]::NewGuid().ToString("N") + ".json")
+    try {
+        [System.IO.File]::WriteAllText($requestFile, $requestJson, [System.Text.UTF8Encoding]::new($false))
+        $commandLine = "`"$backendExe`" setup-backend < `"$requestFile`""
+        $output = & cmd.exe /D /C $commandLine 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        Remove-Item -LiteralPath $requestFile -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($exitCode -ne 0) {
         $output | ForEach-Object { Write-Host $_ }
-        throw "setup-backend failed with exit code $LASTEXITCODE for operation $($Request.operation)"
+        throw "setup-backend failed with exit code $exitCode for operation $($Request.operation)"
     }
 
     $jsonLine = $output |
@@ -152,6 +162,9 @@ if ($stagePayloadFiles.Count -eq 0) {
 if (-not ($stagePayloadFiles | Where-Object { $_.target_relative_path -eq "WinFaceUnlock.exe" })) {
     throw "inspect_payload did not include the installed control panel entrypoint WinFaceUnlock.exe."
 }
+if (-not ($stagePayloadFiles | Where-Object { $_.target_relative_path -eq "desktop_input_agent.exe" })) {
+    throw "inspect_payload did not include DesktopInputPresenceAgent desktop_input_agent.exe."
+}
 
 $sourceRequiredFiles = @(
     $stagePayloadFiles | ForEach-Object {
@@ -161,12 +174,13 @@ $sourceRequiredFiles = @(
         }
     }
 )
+$sourcePreflightInstallDir = Join-Path $env:TEMP "WinFaceUnlock"
 $sourcePreflightResponse = Invoke-SetupBackend -Request @{
     protocol_version = 1
     correlation_id = "validate-package-source-preflight"
     operation = "run_preflight"
     payload = @{
-        install_dir = $env:TEMP
+        install_dir = $sourcePreflightInstallDir
         require_elevation = $false
         required_payload_files = $sourceRequiredFiles
     }
@@ -175,17 +189,23 @@ Assert-SetupSucceeded -Response $sourcePreflightResponse -Operation "run_preflig
 
 $stageDirWasGenerated = [string]::IsNullOrWhiteSpace($StageDir)
 if ($stageDirWasGenerated) {
-    $StageDir = Join-Path $env:TEMP ("WinFaceUnlockSetupValidate-" + [System.Guid]::NewGuid().ToString("N"))
+    $StageRootDir = Join-Path $env:TEMP ("WinFaceUnlockSetupValidate-" + [System.Guid]::NewGuid().ToString("N"))
+    $StageDir = Join-Path $StageRootDir "WinFaceUnlock"
+    New-Item -ItemType Directory -Path $StageRootDir -Force | Out-Null
 }
 $StageDir = [System.IO.Path]::GetFullPath($StageDir)
 if (Test-Path $StageDir) {
     if (-not $stageDirWasGenerated) {
         throw "Explicit StageDir already exists; choose an empty/nonexistent validation directory: $StageDir"
     }
-    if ((Split-Path -Leaf $StageDir) -notlike "WinFaceUnlockSetupValidate-*") {
+    if ((Split-Path -Leaf $StageDir) -ne "WinFaceUnlock") {
         throw "Refusing to remove unexpected generated StageDir: $StageDir"
     }
-    Remove-Item -LiteralPath $StageDir -Recurse -Force
+    $stageRoot = Split-Path -Parent $StageDir
+    if ((Split-Path -Leaf $stageRoot) -notlike "WinFaceUnlockSetupValidate-*") {
+        throw "Refusing to remove unexpected generated StageRootDir: $stageRoot"
+    }
+    Remove-Item -LiteralPath $stageRoot -Recurse -Force
 }
 
 $stageResponse = Invoke-SetupBackend -Request @{
@@ -228,6 +248,10 @@ if (-not (Test-Path $installedControlApp -PathType Leaf)) {
 $installedTauriLibrary = Join-Path $StageDir "winfaceunlock_control_tauri_lib.dll"
 if (-not (Test-Path $installedTauriLibrary -PathType Leaf)) {
     throw "Staged install is missing the Tauri control library: $installedTauriLibrary"
+}
+$installedDesktopInputAgent = Join-Path $StageDir "desktop_input_agent.exe"
+if (-not (Test-Path $installedDesktopInputAgent -PathType Leaf)) {
+    throw "Staged install is missing DesktopInputPresenceAgent: $installedDesktopInputAgent"
 }
 
 Write-Host "WinFaceUnlock setup package validation passed:"

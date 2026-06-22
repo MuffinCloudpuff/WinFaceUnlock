@@ -10,6 +10,7 @@ use video_provider::{
 };
 
 use crate::{
+    camera_runtime::{CameraLeaseKind, try_acquire_camera_lease},
     presence_monitor::{PresenceMonitorError, PresenceObservationSource},
     presence_policy::PresenceObservation,
 };
@@ -41,6 +42,9 @@ impl CameraPresenceObservationSource {
     }
 
     fn observe_once(&mut self) -> Result<PresenceObservation, PresenceMonitorError> {
+        let Ok(_camera_lease) = try_acquire_camera_lease(CameraLeaseKind::PresenceLock) else {
+            return Ok(PresenceObservation::CameraUnavailable);
+        };
         let mut camera_provider = OpenCvCameraProvider::new(self.config.camera_config.clone());
         if camera_provider.open(&self.config.camera_id).is_err() {
             return Ok(PresenceObservation::CameraUnavailable);

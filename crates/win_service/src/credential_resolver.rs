@@ -11,6 +11,9 @@ use ipc::{
     ProtectedCredentialResolver,
 };
 
+const DEVELOPMENT_PLACEHOLDER_USERNAME: &str = "dev-user";
+const DEVELOPMENT_PLACEHOLDER_CREDENTIAL_REF: &str = "dev-credential-ref";
+
 pub struct StoreProtectedCredentialResolver<S: CredentialStore> {
     credential_store: S,
     master_key: Option<MasterKey>,
@@ -58,6 +61,7 @@ impl<S: CredentialStore> ProtectedCredentialMaterialResolver
             .credential_store
             .get_user(&grant.user_id)
             .map_err(credential_store_error_to_protocol_error)?;
+        reject_development_placeholder_credential(&user.username, &user.credential_ref.0)?;
         let credential_blob = self
             .credential_store
             .load_encrypted_credential_blob(&user.credential_ref)
@@ -86,6 +90,18 @@ impl<S: CredentialStore> ProtectedCredentialMaterialResolver
                 password: secret.expose_for_encryption().to_vec(),
             })
     }
+}
+
+fn reject_development_placeholder_credential(
+    username: &str,
+    credential_ref: &str,
+) -> Result<(), ProtocolError> {
+    if username == DEVELOPMENT_PLACEHOLDER_USERNAME
+        && credential_ref == DEVELOPMENT_PLACEHOLDER_CREDENTIAL_REF
+    {
+        return Err(ProtocolError::Unauthorized);
+    }
+    Ok(())
 }
 
 fn credential_domain(account_type: &AccountType, username: &str) -> String {
@@ -127,7 +143,7 @@ mod tests {
         AuthGrant, AuthScore, AuthSource, CredentialRef, GrantId, Nonce, SessionId, UserId,
     };
     use credential_store::{
-        CredentialStore, FileCredentialStore, ProtectedMasterKeyFile, UserRecord,
+        CredentialStore, FileCredentialStore, KeyProtector, ProtectedMasterKeyFile, UserRecord,
         WindowsDpapiKeyProtector,
     };
     use hardware_binding::HardwareFingerprint;
@@ -193,6 +209,32 @@ mod tests {
             credential_username(&AccountType::Domain, r"WORKSTATION\Leo16"),
             "Leo16"
         );
+    }
+
+    #[test]
+    fn resolver_rejects_development_placeholder_credential_material()
+    -> Result<(), CredentialStoreError> {
+        let mut store = FileCredentialStore::new(
+            ProtectedMasterKeyFile::new(unique_temp_path("dev-placeholder-master-key.bin")?),
+            WindowsDpapiKeyProtector::new(),
+        );
+        store.initialize(&HardwareFingerprint::empty())?;
+        store.upsert_user(UserRecord {
+            user_id: UserId("dev-user".to_owned()),
+            user_sid: "S-1-5-21-example".to_owned(),
+            username: "dev-user".to_owned(),
+            account_type: common_protocol::AccountType::Local,
+            credential_ref: CredentialRef("dev-credential-ref".to_owned()),
+        })?;
+        let master_key = WindowsDpapiKeyProtector::new()
+            .generate_master_key()
+            .map_err(|_| CredentialStoreError::StoreUnavailable)?;
+        let mut resolver = StoreProtectedCredentialResolver::with_master_key(store, master_key);
+
+        let result = resolver.resolve_protected_credential_material(&test_grant("dev-user"));
+
+        assert_eq!(result, Err(ProtocolError::Unauthorized));
+        Ok(())
     }
 
     fn test_grant(user_id: &str) -> AuthGrant {

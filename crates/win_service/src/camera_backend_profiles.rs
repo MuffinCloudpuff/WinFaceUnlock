@@ -15,7 +15,12 @@ use video_provider::{
     VideoFrameProvider,
 };
 
-use crate::service_log::write_service_event_detail;
+use crate::{
+    camera_runtime::{CameraLeaseKind, try_acquire_camera_lease},
+    service_log::write_service_event_detail,
+};
+
+const MAX_USABLE_BACKEND_OPEN_MS: u128 = 3_000;
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct CameraBackendProfile {
@@ -27,6 +32,10 @@ pub struct CameraBackendProfile {
     pub frame_width: i32,
     pub frame_height: i32,
     pub measured_at_unix_ms: u128,
+    #[serde(default = "default_probe_status")]
+    pub last_probe_status: CameraBackendProbeStatus,
+    #[serde(default)]
+    pub last_probe_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
@@ -55,8 +64,39 @@ impl CameraBackendProfileStore {
         self.profiles
             .iter()
             .find(|profile| profile.camera_id == camera_id.0)
+            .filter(|profile| profile.is_usable())
             .map(|profile| profile.preferred_backend)
     }
+
+    fn replace_profile(&mut self, profile: CameraBackendProfile) {
+        self.profiles
+            .retain(|existing| existing.camera_id != profile.camera_id);
+        self.profiles.push(profile);
+    }
+
+    fn remove_profile_for_camera(&mut self, camera_id: &CameraId) {
+        self.profiles
+            .retain(|existing| existing.camera_id != camera_id.0);
+    }
+}
+
+impl CameraBackendProfile {
+    fn is_usable(&self) -> bool {
+        self.open_ms <= MAX_USABLE_BACKEND_OPEN_MS
+            && self.last_probe_status == CameraBackendProbeStatus::Usable
+    }
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraBackendProbeStatus {
+    #[default]
+    Usable,
+    Degraded,
+}
+
+fn default_probe_status() -> CameraBackendProbeStatus {
+    CameraBackendProbeStatus::Usable
 }
 
 pub fn apply_profile_to_config(camera_id: &CameraId, config: &mut OpenCvCameraProviderConfig) {
@@ -112,13 +152,28 @@ fn camera_list_signature() -> String {
 
 pub fn refresh_camera_backend_profiles() -> Result<(), ProtocolError> {
     write_service_event_detail("CameraBackendProfiles.RefreshStarted", "");
+    let _camera_lease = match try_acquire_camera_lease(CameraLeaseKind::BackendProfiling) {
+        Ok(lease) => lease,
+        Err(reason) => {
+            write_service_event_detail(
+                "CameraBackendProfiles.RefreshSkipped",
+                format!("reason=camera-lease-denied detail={reason:?}"),
+            );
+            return Ok(());
+        }
+    };
     let provider = OpenCvCameraProvider::with_default_config();
     let sources = provider
         .list_sources()
         .map_err(|_| ProtocolError::TransportUnavailable)?;
-    let mut store = CameraBackendProfileStore::default();
+    let mut store = CameraBackendProfileStore::load();
 
     for source in sources {
+        let existing_profile = store
+            .profiles
+            .iter()
+            .find(|profile| profile.camera_id == source.id.0)
+            .cloned();
         let Some(profile) = profile_camera(&source.id, &source.display_name) else {
             write_service_event_detail(
                 "CameraBackendProfiles.CameraSkipped",
@@ -129,17 +184,7 @@ pub fn refresh_camera_backend_profiles() -> Result<(), ProtocolError> {
             );
             continue;
         };
-        write_service_event_detail(
-            "CameraBackendProfiles.CameraProfiled",
-            format!(
-                "camera_id={} backend={} open_ms={} read_ms={}",
-                profile.camera_id,
-                profile.preferred_backend.as_str(),
-                profile.open_ms,
-                profile.read_ms
-            ),
-        );
-        store.profiles.push(profile);
+        merge_profile_candidate(&mut store, existing_profile.as_ref(), profile);
     }
 
     store.save()?;
@@ -148,6 +193,61 @@ pub fn refresh_camera_backend_profiles() -> Result<(), ProtocolError> {
         format!("profile_count={}", store.profiles.len()),
     );
     Ok(())
+}
+
+fn merge_profile_candidate(
+    store: &mut CameraBackendProfileStore,
+    existing_profile: Option<&CameraBackendProfile>,
+    candidate: CameraBackendProfile,
+) {
+    if candidate.is_usable() {
+        write_service_event_detail(
+            "CameraBackendProfiles.ProfileUpdated",
+            format!(
+                "camera_id={} backend={} open_ms={} read_ms={} previous_backend={} previous_open_ms={}",
+                candidate.camera_id,
+                candidate.preferred_backend.as_str(),
+                candidate.open_ms,
+                candidate.read_ms,
+                existing_profile
+                    .map(|profile| profile.preferred_backend.as_str())
+                    .unwrap_or("<none>"),
+                existing_profile
+                    .map(|profile| profile.open_ms.to_string())
+                    .unwrap_or_else(|| "<none>".to_owned())
+            ),
+        );
+        store.replace_profile(candidate);
+        return;
+    }
+
+    if let Some(existing_profile) =
+        existing_profile.filter(|profile| CameraBackendProfile::is_usable(profile))
+    {
+        write_service_event_detail(
+            "CameraBackendProfiles.ProfileKept",
+            format!(
+                "camera_id={} kept_backend={} kept_open_ms={} candidate_backend={} candidate_open_ms={} reason=candidate-too-slow",
+                existing_profile.camera_id,
+                existing_profile.preferred_backend.as_str(),
+                existing_profile.open_ms,
+                candidate.preferred_backend.as_str(),
+                candidate.open_ms
+            ),
+        );
+        return;
+    }
+
+    write_service_event_detail(
+        "CameraBackendProfiles.ProfileDegraded",
+        format!(
+            "camera_id={} candidate_backend={} candidate_open_ms={} reason=candidate-too-slow-no-usable-existing",
+            candidate.camera_id,
+            candidate.preferred_backend.as_str(),
+            candidate.open_ms
+        ),
+    );
+    store.remove_profile_for_camera(&CameraId(candidate.camera_id.clone()));
 }
 
 fn profile_camera(camera_id: &CameraId, display_name: &str) -> Option<CameraBackendProfile> {
@@ -165,6 +265,16 @@ fn profile_camera(camera_id: &CameraId, display_name: &str) -> Option<CameraBack
             frame_width: probe.frame_width,
             frame_height: probe.frame_height,
             measured_at_unix_ms: timestamp_unix_ms(),
+            last_probe_status: if probe.open_ms <= MAX_USABLE_BACKEND_OPEN_MS {
+                CameraBackendProbeStatus::Usable
+            } else {
+                CameraBackendProbeStatus::Degraded
+            },
+            last_probe_reason: Some(if probe.open_ms <= MAX_USABLE_BACKEND_OPEN_MS {
+                "fastest-readable-backend".to_owned()
+            } else {
+                "fastest-readable-backend-too-slow".to_owned()
+            }),
         })
 }
 
@@ -209,8 +319,8 @@ fn probe_backend(camera_index: i32, backend: OpenCvCameraBackend) -> Option<Back
 fn profile_path() -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join("config")))
-        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData\WinFaceUnlock"))
+        .and_then(|path| path.parent().map(|parent| parent.join("runtime")))
+        .unwrap_or_else(|| std::env::temp_dir().join("WinFaceUnlock").join("runtime"))
         .join("camera_backend_profiles.json")
 }
 
@@ -237,6 +347,8 @@ mod tests {
                 frame_width: 640,
                 frame_height: 480,
                 measured_at_unix_ms: 1,
+                last_probe_status: CameraBackendProbeStatus::Usable,
+                last_probe_reason: Some("fastest-readable-backend".to_owned()),
             }],
         };
 
@@ -244,5 +356,84 @@ mod tests {
             store.preferred_backend_for(&CameraId("opencv-index:1".to_owned())),
             Some(OpenCvCameraBackend::Dshow)
         );
+    }
+
+    #[test]
+    fn degraded_profile_is_not_used_as_preferred_backend() {
+        let store = CameraBackendProfileStore {
+            profiles: vec![CameraBackendProfile {
+                camera_id: "opencv-index:1".to_owned(),
+                display_name: "C920".to_owned(),
+                preferred_backend: OpenCvCameraBackend::Any,
+                open_ms: MAX_USABLE_BACKEND_OPEN_MS + 1,
+                read_ms: 1,
+                frame_width: 640,
+                frame_height: 480,
+                measured_at_unix_ms: 1,
+                last_probe_status: CameraBackendProbeStatus::Degraded,
+                last_probe_reason: Some("fastest-readable-backend-too-slow".to_owned()),
+            }],
+        };
+
+        assert_eq!(
+            store.preferred_backend_for(&CameraId("opencv-index:1".to_owned())),
+            None
+        );
+    }
+
+    #[test]
+    fn slow_candidate_keeps_existing_usable_profile() {
+        let existing = CameraBackendProfile {
+            camera_id: "opencv-index:1".to_owned(),
+            display_name: "C920".to_owned(),
+            preferred_backend: OpenCvCameraBackend::Dshow,
+            open_ms: 200,
+            read_ms: 100,
+            frame_width: 640,
+            frame_height: 480,
+            measured_at_unix_ms: 1,
+            last_probe_status: CameraBackendProbeStatus::Usable,
+            last_probe_reason: Some("fastest-readable-backend".to_owned()),
+        };
+        let candidate = CameraBackendProfile {
+            camera_id: "opencv-index:1".to_owned(),
+            display_name: "C920".to_owned(),
+            preferred_backend: OpenCvCameraBackend::Any,
+            open_ms: 23_745,
+            read_ms: 296,
+            frame_width: 640,
+            frame_height: 480,
+            measured_at_unix_ms: 2,
+            last_probe_status: CameraBackendProbeStatus::Degraded,
+            last_probe_reason: Some("fastest-readable-backend-too-slow".to_owned()),
+        };
+        let mut store = CameraBackendProfileStore {
+            profiles: vec![existing.clone()],
+        };
+
+        merge_profile_candidate(&mut store, Some(&existing), candidate);
+
+        assert_eq!(store.profiles, vec![existing]);
+    }
+
+    #[test]
+    fn slow_candidate_without_existing_profile_is_not_persisted() {
+        let candidate = CameraBackendProfile {
+            camera_id: "opencv-index:1".to_owned(),
+            display_name: "C920".to_owned(),
+            preferred_backend: OpenCvCameraBackend::Any,
+            open_ms: 23_745,
+            read_ms: 296,
+            frame_width: 640,
+            frame_height: 480,
+            measured_at_unix_ms: 2,
+            last_probe_status: CameraBackendProbeStatus::Degraded,
+            last_probe_reason: Some("fastest-readable-backend-too-slow".to_owned()),
+        };
+        let mut store = CameraBackendProfileStore::default();
+
+        merge_profile_candidate(&mut store, None, candidate);
+
+        assert!(store.profiles.is_empty());
     }
 }

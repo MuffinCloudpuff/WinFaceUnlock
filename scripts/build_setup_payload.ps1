@@ -23,7 +23,7 @@ if ([string]::IsNullOrWhiteSpace($ControlAppPublishDir)) {
 $ControlAppPublishDir = [System.IO.Path]::GetFullPath($ControlAppPublishDir)
 
 if (-not $SkipBuild) {
-    $cargoArgs = @("build", "-p", "installer_cli", "-p", "diagnostics_cli", "-p", "win_service", "-p", "windows_provider")
+    $cargoArgs = @("build", "-p", "desktop_input_agent", "-p", "installer_cli", "-p", "diagnostics_cli", "-p", "win_service", "-p", "windows_provider")
     if ($Configuration -eq "release") {
         $cargoArgs += "--release"
     }
@@ -202,6 +202,7 @@ $ManifestFiles = [System.Collections.ArrayList]::new()
 
 Copy-RequiredFile -SourcePath (Join-Path $BinaryDir "installer_cli.exe") -TargetRelativePath "installer_cli.exe" -ManifestFiles $ManifestFiles
 Copy-RequiredFile -SourcePath (Join-Path $BinaryDir "diagnostics_cli.exe") -TargetRelativePath "diagnostics_cli.exe" -ManifestFiles $ManifestFiles
+Copy-RequiredFile -SourcePath (Join-Path $BinaryDir "desktop_input_agent.exe") -TargetRelativePath "desktop_input_agent.exe" -ManifestFiles $ManifestFiles
 Copy-RequiredFile -SourcePath (Join-Path $BinaryDir "win_service.exe") -TargetRelativePath "win_service.exe" -ManifestFiles $ManifestFiles
 $ProviderDllSourcePath = Join-Path $BinaryDir "windows_provider.dll"
 $ProviderDllHash = (Get-FileHash -LiteralPath $ProviderDllSourcePath -Algorithm SHA256).Hash.Substring(0, 12).ToLowerInvariant()

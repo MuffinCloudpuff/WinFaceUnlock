@@ -109,11 +109,14 @@ fn argument_value<'args>(args: &'args [String], name: &str) -> Option<&'args str
 
 #[cfg(test)]
 mod tests {
-    use common_protocol::{CredentialRef, GrantId, Nonce};
+    use common_protocol::{AccountType, CredentialRef, GrantId, Nonce, UserId};
 
     use crate::{
-        credential_store_config::ServiceCredentialStorePaths,
-        named_pipe_host::build_development_handler_with_paths,
+        credential_store_config::{
+            ServiceCredentialStorePaths, WindowsCredentialEnrollment, enroll_windows_credential,
+        },
+        named_pipe_host::build_development_handler_with_paths_and_auth_config,
+        service_config::{ServiceAuthConfig, ServiceAuthMode},
     };
 
     use super::*;
@@ -129,8 +132,25 @@ mod tests {
                 .unwrap_or(0)
         ));
         let paths = ServiceCredentialStorePaths::from_store_dir(root.clone());
+        enroll_windows_credential(
+            &paths,
+            WindowsCredentialEnrollment {
+                user_id: UserId("dev-user".to_owned()),
+                user_sid: "S-1-5-21-test".to_owned(),
+                username: "test-user".to_owned(),
+                account_type: AccountType::Local,
+                credential_ref: CredentialRef("test-credential-ref".to_owned()),
+                password: "test-password".to_owned(),
+            },
+        )?;
         let report =
-            run_console_smoke_with_handler(build_development_handler_with_paths(&paths, None)?)?;
+            run_console_smoke_with_handler(build_development_handler_with_paths_and_auth_config(
+                &paths,
+                None,
+                ServiceAuthConfig {
+                    auth_mode: ServiceAuthMode::ManualTestOnly,
+                },
+            )?)?;
 
         assert_eq!(report.health_event, ServiceEvent::HealthOk);
         assert_eq!(
@@ -140,7 +160,7 @@ mod tests {
         assert_eq!(report.issued_grant.nonce, Nonce("dev-nonce-1".to_owned()));
         assert_eq!(
             report.protected_credential.credential_ref,
-            CredentialRef("dev-credential-ref".to_owned())
+            CredentialRef("test-credential-ref".to_owned())
         );
         let _ = std::fs::remove_dir_all(root);
         Ok(())

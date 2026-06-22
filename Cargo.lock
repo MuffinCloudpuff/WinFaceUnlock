@@ -200,6 +200,7 @@ dependencies = [
 name = "control_status"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "common_protocol",
  "control_protocol",
  "serde",
@@ -300,6 +301,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "desktop_input"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "desktop_input_agent"
+version = "0.1.0"
+dependencies = [
+ "desktop_input",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1556,6 +1573,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "usage_audit"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "utf8-zero"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1764,6 +1789,7 @@ dependencies = [
  "control_protocol",
  "control_status",
  "credential_store",
+ "desktop_input",
  "face_auth",
  "face_engine",
  "face_liveness",

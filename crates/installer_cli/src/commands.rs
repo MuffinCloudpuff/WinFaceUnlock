@@ -1,4 +1,7 @@
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     installation::{FullInstallPlan, FullUninstallPlan, InstallerOrchestrator},
@@ -505,10 +508,14 @@ fn parse_full_install_plan(
         None
     };
 
+    let resource_plan = ResourceDirectoryPlan::from_root_dir(
+        install_root_from_service_binary_path(&service_binary_path)?,
+    );
+
     Ok(FullInstallPlan {
         service_plan: ServiceInstallPlan::new(service_binary_path),
         provider_plan,
-        resource_plan: ResourceDirectoryPlan::from_environment_or_default(),
+        resource_plan,
         auth_config,
         start_service: has_flag(args, "--start") || has_flag(args, "--start-service"),
     })
@@ -919,8 +926,28 @@ fn print_full_uninstall_plan(label: &str, plan: &FullUninstallPlan) {
 
 fn print_resource_directory_plan(plan: &ResourceDirectoryPlan) {
     println!("resource_root_dir: {}", plan.root_dir.display());
+    println!("runtime_dir: {}", plan.runtime_dir.display());
+    println!("logs_dir: {}", plan.logs_dir.display());
+    println!(
+        "credential_store_dir: {}",
+        plan.credential_store_dir.display()
+    );
     println!("presence_audit_dir: {}", plan.presence_audit_dir.display());
-    println!("resource_acl: SYSTEM=full, Administrators=full");
+    println!("resource_acl: root/bin/models/config restricted; runtime/logs user-writable");
+}
+
+fn install_root_from_service_binary_path(
+    service_binary_path: &Path,
+) -> Result<PathBuf, InstallerError> {
+    service_binary_path
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            InstallerError::InvalidArguments(format!(
+                "service binary path has no install root: {}",
+                service_binary_path.display()
+            ))
+        })
 }
 
 fn print_provider_install_plan(label: &str, plan: &ProviderInstallPlan) {

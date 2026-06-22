@@ -221,6 +221,7 @@ public sealed class SetupFlowCoordinator
     }
 
     public async Task<SetupResponseEnvelope> EnrollCredentialAsync(
+        string installDir,
         string username,
         string userId,
         string userSid,
@@ -236,6 +237,7 @@ public sealed class SetupFlowCoordinator
             SetupOperations.EnrollCredential,
             new EnrollCredentialPayload
             {
+                InstallDir = installDir,
                 Username = username,
                 UserId = userId,
                 UserSid = userSid,

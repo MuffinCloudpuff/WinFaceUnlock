@@ -6,13 +6,16 @@ use std::{
     time::UNIX_EPOCH,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use common_protocol::SERVICE_NAME;
 use control_protocol::{
-    ControlSettingsPatch, ControlSettingsSnapshot, DashboardStatus, DataDirectorySummary,
-    FaceRecognitionModelSummary, FaceTemplateKind, FaceTemplateList, FaceTemplateSourceState,
-    FaceTemplateSummary, LogonWakeMode, PathPresence, PresenceMonitorState, PresenceRuntimeSummary,
-    ProviderRegistrationState, ProviderStatusSummary, RegistryConfigState, ServiceConfigSummary,
-    ServiceInstallationState, ServiceRuntimeState, ServiceStatusSummary,
+    ControlSettingsPatch, ControlSettingsSnapshot, DEFAULT_LOGON_FACE_MATCH_THRESHOLD,
+    DashboardStatus, DataDirectorySummary, FaceRecognitionModelSummary, FaceTemplateKind,
+    FaceTemplateList, FaceTemplateSourceState, FaceTemplateSummary, LogonWakeMode,
+    MAX_LOGON_FACE_MATCH_THRESHOLD, MIN_LOGON_FACE_MATCH_THRESHOLD, PathPresence,
+    PresenceMonitorState, PresenceRuntimeSummary, ProviderRegistrationState, ProviderStatusSummary,
+    RegistryConfigState, ServiceConfigSummary, ServiceInstallationState, ServiceRuntimeState,
+    ServiceStatusSummary,
 };
 use serde::Deserialize;
 use windows_provider::{
@@ -25,7 +28,8 @@ use windows_service::{
     service_manager::{ServiceManager, ServiceManagerAccess},
 };
 
-const APP_DATA_DIR_NAME: &str = "WinFaceUnlock";
+const RUNTIME_DIR_NAME: &str = "runtime";
+const PREVIEW_FRAME_FILE_NAME: &str = "preview_frame.jpg";
 const PRESENCE_AUDIT_DIR_NAME: &str = "presence-audit";
 const PRESENCE_RUNTIME_STATUS_FILE_NAME: &str = "presence-runtime-status.json";
 const SERVICE_CONFIG_REGISTRY_PATH: &str = r"SOFTWARE\WinFaceUnlock\Service";
@@ -35,6 +39,7 @@ const REG_CAMERA_ID: &str = "CameraId";
 const REG_YUNET_MODEL_PATH: &str = "YuNetModelPath";
 const REG_SFACE_MODEL_PATH: &str = "SFaceModelPath";
 const REG_MINIFASNET_MODEL_PATH: &str = "MiniFasNetModelPath";
+const REG_MATCH_THRESHOLD: &str = "MatchThreshold";
 const REG_PRESENCE_LOCK_ENABLED: &str = "PresenceLockEnabled";
 const REG_PRESENCE_DETECTOR_KIND: &str = "PresenceDetectorKind";
 const REG_PRESENCE_TRACKING_MODE: &str = "PresenceTrackingMode";
@@ -52,17 +57,19 @@ pub struct ControlStatusPaths {
 
 impl ControlStatusPaths {
     pub fn from_environment_or_default() -> Self {
-        let program_data_dir = std::env::var_os("ProgramData")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join(APP_DATA_DIR_NAME);
-        Self::from_program_data_dir(program_data_dir)
+        let install_dir = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| std::env::temp_dir().join("WinFaceUnlock"));
+        Self::from_program_data_dir(install_dir)
     }
 
     pub fn from_program_data_dir(program_data_dir: PathBuf) -> Self {
         Self {
             presence_audit_dir: program_data_dir.join(PRESENCE_AUDIT_DIR_NAME),
-            presence_runtime_status_path: program_data_dir.join(PRESENCE_RUNTIME_STATUS_FILE_NAME),
+            presence_runtime_status_path: program_data_dir
+                .join(RUNTIME_DIR_NAME)
+                .join(PRESENCE_RUNTIME_STATUS_FILE_NAME),
             program_data_dir,
         }
     }
@@ -342,6 +349,8 @@ trait SettingsSource {
     fn read_logon_wake_mode(&self) -> Result<Option<String>, ControlStatusError>;
     fn read_auto_wake_on_advise(&self) -> Result<Option<String>, ControlStatusError>;
     fn write_logon_wake_mode(&self, mode: LogonWakeMode) -> Result<(), ControlStatusError>;
+    fn read_logon_face_match_threshold(&self) -> Result<Option<String>, ControlStatusError>;
+    fn write_logon_face_match_threshold(&self, threshold: f32) -> Result<(), ControlStatusError>;
 }
 
 fn load_dashboard_status(
@@ -462,7 +471,8 @@ pub fn summarize_selected_face_template_file(
     Ok(FaceTemplateSummary {
         face_template_ref: face_template_ref.into(),
         user_id: selected_template_set.user_id.clone(),
-        display_name: Some(selected_template_set.user_id),
+        display_name: Some(default_face_display_name()),
+        avatar_preview: read_face_avatar_preview(template_path),
         template_kind: FaceTemplateKind::SelectedTemplateSet,
         recognition_model: FaceRecognitionModelSummary {
             model_family: selected_template_set.recognizer_model_family,
@@ -475,6 +485,20 @@ pub fn summarize_selected_face_template_file(
         created_at_unix_ms: selected_template_set.enrollment_created_at_unix_ms,
         updated_at_unix_ms: metadata_modified_unix_ms(&metadata),
         source_state,
+    })
+}
+
+fn default_face_display_name() -> String {
+    "用户1".to_owned()
+}
+
+fn read_face_avatar_preview(template_path: &Path) -> Option<control_protocol::FaceAvatarPreview> {
+    let preview_frame_path = template_path.parent()?.join(PREVIEW_FRAME_FILE_NAME);
+    let image_bytes = fs::read(&preview_frame_path).ok()?;
+    Some(control_protocol::FaceAvatarPreview {
+        mime_type: "image/jpeg".to_owned(),
+        image_base64: BASE64_STANDARD.encode(image_bytes),
+        updated_at_unix_ms: metadata_modified_unix_ms(&fs::metadata(preview_frame_path).ok()?),
     })
 }
 
@@ -626,6 +650,20 @@ fn legacy_logon_wake_mode(auto_wake_on_advise: Option<String>) -> Option<LogonWa
         .and_then(|enabled| enabled.then_some(LogonWakeMode::InputTriggered))
 }
 
+fn parse_logon_face_match_threshold(value: &str) -> Option<f32> {
+    let threshold = value.trim().parse::<f32>().ok()?;
+    if is_valid_logon_face_match_threshold(threshold) {
+        Some(threshold)
+    } else {
+        None
+    }
+}
+
+fn is_valid_logon_face_match_threshold(threshold: f32) -> bool {
+    threshold.is_finite()
+        && (MIN_LOGON_FACE_MATCH_THRESHOLD..=MAX_LOGON_FACE_MATCH_THRESHOLD).contains(&threshold)
+}
+
 fn load_control_settings(
     source: &impl SettingsSource,
 ) -> Result<ControlSettingsSnapshot, ControlStatusError> {
@@ -640,6 +678,11 @@ fn load_control_settings(
             .as_deref()
             .and_then(parse_logon_wake_mode)
             .or_else(|| legacy_logon_wake_mode(source.read_auto_wake_on_advise().ok().flatten())),
+        logon_face_match_threshold: source
+            .read_logon_face_match_threshold()?
+            .as_deref()
+            .and_then(parse_logon_face_match_threshold)
+            .unwrap_or(DEFAULT_LOGON_FACE_MATCH_THRESHOLD),
     })
 }
 
@@ -652,6 +695,14 @@ fn update_control_settings(
     }
     if let Some(mode) = patch.logon_wake_mode {
         source.write_logon_wake_mode(mode)?;
+    }
+    if let Some(threshold) = patch.logon_face_match_threshold {
+        if !is_valid_logon_face_match_threshold(threshold) {
+            return Err(ControlStatusError::SettingsPersistenceFailed(format!(
+                "logon face match threshold must be between {MIN_LOGON_FACE_MATCH_THRESHOLD:.2} and {MAX_LOGON_FACE_MATCH_THRESHOLD:.2}"
+            )));
+        }
+        source.write_logon_face_match_threshold(threshold)?;
     }
     load_control_settings(source)
 }
@@ -698,6 +749,20 @@ impl SettingsSource for WindowsSettingsSource {
             PROVIDER_ROOT_REGISTRY_PATH,
             REG_VALUE_AUTO_WAKE_ON_ADVISE,
             bool_registry_value(!matches!(mode, LogonWakeMode::BackgroundPolicy)),
+        )
+        .map_err(settings_write_error)
+    }
+
+    fn read_logon_face_match_threshold(&self) -> Result<Option<String>, ControlStatusError> {
+        registry::read_string_value(SERVICE_CONFIG_REGISTRY_PATH, REG_MATCH_THRESHOLD)
+            .map_err(settings_read_error)
+    }
+
+    fn write_logon_face_match_threshold(&self, threshold: f32) -> Result<(), ControlStatusError> {
+        registry::write_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_MATCH_THRESHOLD,
+            &format!("{threshold:.3}"),
         )
         .map_err(settings_write_error)
     }
@@ -763,18 +828,20 @@ impl StatusSource for WindowsStatusSource<'_> {
     }
 
     fn query_data_directory_status(&self) -> Result<DataDirectorySummary, ControlStatusError> {
+        let paths = self.resolved_paths_from_service_config()?;
         Ok(DataDirectorySummary {
-            program_data_dir: Some(self.paths.program_data_dir.display().to_string()),
-            program_data_presence: path_presence(&self.paths.program_data_dir),
-            presence_audit_dir: Some(self.paths.presence_audit_dir.display().to_string()),
-            presence_audit_presence: path_presence(&self.paths.presence_audit_dir),
+            program_data_dir: Some(paths.program_data_dir.display().to_string()),
+            program_data_presence: path_presence(&paths.program_data_dir),
+            presence_audit_dir: Some(paths.presence_audit_dir.display().to_string()),
+            presence_audit_presence: path_presence(&paths.presence_audit_dir),
         })
     }
 
     fn query_presence_runtime_status(
         &self,
     ) -> Result<Option<PresenceRuntimeSummary>, ControlStatusError> {
-        if !self.paths.presence_runtime_status_path.exists() {
+        let paths = self.resolved_paths_from_service_config()?;
+        if !paths.presence_runtime_status_path.exists() {
             return Ok(Some(PresenceRuntimeSummary {
                 monitor_state: PresenceMonitorState::Unavailable,
                 session_id: None,
@@ -782,12 +849,11 @@ impl StatusSource for WindowsStatusSource<'_> {
                 updated_at_unix_ms: None,
             }));
         }
-        let text =
-            fs::read_to_string(&self.paths.presence_runtime_status_path).map_err(|error| {
-                ControlStatusError::PresenceRuntimeStatusUnavailable(format!(
-                    "presence runtime status file cannot be read: {error}"
-                ))
-            })?;
+        let text = fs::read_to_string(&paths.presence_runtime_status_path).map_err(|error| {
+            ControlStatusError::PresenceRuntimeStatusUnavailable(format!(
+                "presence runtime status file cannot be read: {error}"
+            ))
+        })?;
         let status: PresenceRuntimeStatusFile = serde_json::from_str(&text).map_err(|error| {
             ControlStatusError::PresenceRuntimeStatusUnavailable(format!(
                 "presence runtime status file is invalid: {error}"
@@ -795,6 +861,37 @@ impl StatusSource for WindowsStatusSource<'_> {
         })?;
         Ok(Some(status.into_summary()))
     }
+}
+
+impl WindowsStatusSource<'_> {
+    fn resolved_paths_from_service_config(&self) -> Result<ControlStatusPaths, ControlStatusError> {
+        let template_path =
+            registry::read_string_value(SERVICE_CONFIG_REGISTRY_PATH, REG_FACE_TEMPLATE_PATH)
+                .map_err(service_config_error)?;
+        template_path
+            .as_deref()
+            .and_then(install_dir_from_service_template_path)
+            .map(ControlStatusPaths::from_program_data_dir)
+            .or_else(|| Some(self.paths.clone()))
+            .ok_or_else(|| {
+                ControlStatusError::DataDirectoryStatusUnavailable(
+                    "install data root could not be resolved".to_owned(),
+                )
+            })
+    }
+}
+
+fn install_dir_from_service_template_path(template_path: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(template_path);
+    let face_enrollment_dir = path.parent()?;
+    if face_enrollment_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("face-enrollment"))
+    {
+        return face_enrollment_dir.parent().map(Path::to_path_buf);
+    }
+    None
 }
 
 fn map_observed_service_status(status: ServiceStatus) -> ObservedServiceStatus {
@@ -1333,6 +1430,7 @@ mod tests {
         presence_lock_enabled: RefCell<Option<String>>,
         logon_wake_mode: RefCell<Option<String>>,
         auto_wake_on_advise: RefCell<Option<String>>,
+        logon_face_match_threshold: RefCell<Option<String>>,
     }
 
     impl SettingsSource for FakeSettingsSource {
@@ -1360,6 +1458,19 @@ mod tests {
             self.auto_wake_on_advise.replace(Some(
                 bool_registry_value(!matches!(mode, LogonWakeMode::BackgroundPolicy)).to_owned(),
             ));
+            Ok(())
+        }
+
+        fn read_logon_face_match_threshold(&self) -> Result<Option<String>, ControlStatusError> {
+            Ok(self.logon_face_match_threshold.borrow().clone())
+        }
+
+        fn write_logon_face_match_threshold(
+            &self,
+            threshold: f32,
+        ) -> Result<(), ControlStatusError> {
+            self.logon_face_match_threshold
+                .replace(Some(format!("{threshold:.3}")));
             Ok(())
         }
     }
@@ -1515,6 +1626,7 @@ mod tests {
     fn face_template_list_reads_active_service_template_summary()
     -> Result<(), Box<dyn std::error::Error>> {
         let template_path = unique_temp_path("selected_templates.json");
+        let avatar_path = template_path.with_file_name(PREVIEW_FRAME_FILE_NAME);
         fs::write(
             &template_path,
             r#"{
@@ -1532,6 +1644,7 @@ mod tests {
                 ]
             }"#,
         )?;
+        fs::write(&avatar_path, [0xff, 0xd8, 0xff, 0xd9])?;
         let source = FakeStatusSource {
             service_config: Ok(ObservedServiceConfigStatus {
                 registry_config_exists: true,
@@ -1546,6 +1659,7 @@ mod tests {
 
         let templates = load_face_template_list(&source)?;
         let _ = fs::remove_file(template_path);
+        let _ = fs::remove_file(avatar_path);
         let summary = templates
             .templates
             .first()
@@ -1554,6 +1668,14 @@ mod tests {
         assert_eq!(templates.templates.len(), 1);
         assert_eq!(summary.face_template_ref, ACTIVE_SERVICE_FACE_TEMPLATE_REF);
         assert_eq!(summary.user_id, "dev-user");
+        assert_eq!(summary.display_name.as_deref(), Some("用户1"));
+        let avatar_preview = summary
+            .avatar_preview
+            .as_ref()
+            .ok_or("expected preview frame avatar")?;
+        assert_eq!(avatar_preview.mime_type, "image/jpeg");
+        assert_eq!(avatar_preview.image_base64, "/9j/2Q==");
+        assert!(avatar_preview.updated_at_unix_ms.is_some());
         assert_eq!(summary.selected_template_count, 2);
         assert_eq!(summary.rejected_sample_count, Some(1));
         assert_eq!(summary.recognition_model.model_family, "opencv_sface");
@@ -1665,6 +1787,7 @@ mod tests {
             &ControlSettingsPatch {
                 presence_lock_enabled: Some(false),
                 logon_wake_mode: None,
+                logon_face_match_threshold: None,
             },
         )?;
 
@@ -1731,6 +1854,7 @@ mod tests {
             &ControlSettingsPatch {
                 presence_lock_enabled: None,
                 logon_wake_mode: Some(LogonWakeMode::InputTriggered),
+                logon_face_match_threshold: None,
             },
         )?;
 
@@ -1743,6 +1867,77 @@ mod tests {
             Some(LOGON_WAKE_MODE_INPUT_TRIGGERED)
         );
         assert_eq!(source.auto_wake_on_advise.borrow().as_deref(), Some("true"));
+        Ok(())
+    }
+
+    #[test]
+    fn settings_default_logon_face_threshold_when_registry_value_is_missing()
+    -> Result<(), ControlStatusError> {
+        let source = FakeSettingsSource::default();
+
+        let settings = load_control_settings(&source)?;
+
+        assert_eq!(
+            settings.logon_face_match_threshold,
+            DEFAULT_LOGON_FACE_MATCH_THRESHOLD
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn settings_reads_logon_face_threshold_from_registry() -> Result<(), ControlStatusError> {
+        let source = FakeSettingsSource {
+            logon_face_match_threshold: RefCell::new(Some("0.52".to_owned())),
+            ..FakeSettingsSource::default()
+        };
+
+        let settings = load_control_settings(&source)?;
+
+        assert_eq!(settings.logon_face_match_threshold, 0.52);
+        Ok(())
+    }
+
+    #[test]
+    fn settings_update_writes_logon_face_threshold() -> Result<(), ControlStatusError> {
+        let source = FakeSettingsSource::default();
+
+        let settings = update_control_settings(
+            &source,
+            &ControlSettingsPatch {
+                presence_lock_enabled: None,
+                logon_wake_mode: None,
+                logon_face_match_threshold: Some(0.50),
+            },
+        )?;
+
+        assert_eq!(settings.logon_face_match_threshold, 0.50);
+        assert_eq!(
+            source.logon_face_match_threshold.borrow().as_deref(),
+            Some("0.500")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn settings_update_rejects_out_of_range_logon_face_threshold() -> Result<(), &'static str> {
+        let source = FakeSettingsSource::default();
+
+        let error = match update_control_settings(
+            &source,
+            &ControlSettingsPatch {
+                presence_lock_enabled: None,
+                logon_wake_mode: None,
+                logon_face_match_threshold: Some(0.10),
+            },
+        ) {
+            Ok(_) => return Err("out-of-range threshold should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ControlStatusError::SettingsPersistenceFailed(_)
+        ));
         Ok(())
     }
 

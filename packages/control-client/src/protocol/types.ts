@@ -49,11 +49,13 @@ export type LogonWakeMode = 'input_triggered' | 'background_policy' | 'hybrid';
 export interface ControlSettingsSnapshot {
   presence_lock_enabled: boolean;
   logon_wake_mode?: LogonWakeMode;
+  logon_face_match_threshold: number;
 }
 
 export interface ControlSettingsPatch {
   presence_lock_enabled?: boolean;
   logon_wake_mode?: LogonWakeMode;
+  logon_face_match_threshold?: number;
 }
 
 export type WindowsCredentialAccountType = 'local' | 'microsoft_account' | 'domain';
@@ -69,6 +71,7 @@ export interface WindowsCredentialEnrollmentPayload {
 
 export interface WindowsCredentialAccountProfile {
   windows_account_username: string;
+  display_name?: string;
   user_id: string;
   user_sid: string;
   account_type: WindowsCredentialAccountType;
@@ -78,6 +81,7 @@ export interface WindowsCredentialAccountProfile {
 
 export interface WindowsCredentialEnrollmentOutcome {
   windows_account_username: string;
+  display_name?: string;
   user_id: string;
   user_sid: string;
   account_type: WindowsCredentialAccountType;
@@ -97,6 +101,7 @@ export interface FaceTemplateSummary {
   face_template_ref: string;
   user_id: string;
   display_name?: string;
+  avatar_preview?: FaceAvatarPreview;
   template_kind: FaceTemplateKind;
   recognition_model: FaceRecognitionModelSummary;
   selected_template_count: number;
@@ -104,6 +109,12 @@ export interface FaceTemplateSummary {
   created_at_unix_ms?: number;
   updated_at_unix_ms?: number;
   source_state: FaceTemplateSourceState;
+}
+
+export interface FaceAvatarPreview {
+  mime_type: string;
+  image_base64: string;
+  updated_at_unix_ms?: number;
 }
 
 export interface FaceTemplateList {

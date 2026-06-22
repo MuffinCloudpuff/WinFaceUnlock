@@ -269,11 +269,8 @@ impl PresencePolicy {
         self.person_absent_consecutive_count =
             self.person_absent_consecutive_count.saturating_add(1);
 
-        let absence_follows_reliable_presence =
-            self.person_departure_evidence_count > 0 || self.person_confirmed_present_observed;
-        let lock_requested = absence_follows_reliable_presence
-            && self.person_absent_consecutive_count
-                >= self.config.presence_person_absent_required_frames;
+        let lock_requested = self.person_absent_consecutive_count
+            >= self.config.presence_person_absent_required_frames;
 
         PresencePolicyDecision {
             monitor_state: if lock_requested {
@@ -515,26 +512,22 @@ mod tests {
     }
 
     #[test]
-    fn abrupt_person_absence_without_departure_evidence_does_not_lock() {
+    fn consecutive_person_absence_requests_lock_without_prior_presence() {
         let mut policy = PresencePolicy::new(PresencePolicyConfig {
             presence_person_absent_required_frames: 2,
             ..PresencePolicyConfig::default()
         });
 
-        let _ = policy.record_observation(PresenceObservation::PersonPresent {
-            confidence: 0.80,
-            bbox_center_x_ratio: 0.50,
-            bbox_area_ratio: 0.40,
-        });
         let first_absent = policy.record_observation(PresenceObservation::PersonAbsent);
         let decision = policy.record_observation(PresenceObservation::PersonAbsent);
 
         assert_eq!(first_absent.next_check_interval_ms, 200);
+        assert_eq!(decision.monitor_state, PresenceMonitorState::LockRequested);
+        assert!(decision.lock_requested);
         assert_eq!(
-            decision.monitor_state,
-            PresenceMonitorState::PersonAbsenceSuspect
+            decision.lock_reason,
+            Some(PresenceLockReason::PersonLeftFrame)
         );
-        assert!(!decision.lock_requested);
     }
 
     #[test]

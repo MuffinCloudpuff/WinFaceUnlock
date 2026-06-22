@@ -29,6 +29,10 @@ pub trait AuthGrantIssuer {
     }
 
     fn cancel_auth(&mut self, _session_id: &SessionId) {}
+
+    fn reload_auth_config(&mut self) -> Result<(), ProtocolError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -235,6 +239,7 @@ where
         }
         self.service_config_applier
             .apply_face_template(&template_path, &camera_id)?;
+        self.grant_issuer.reload_auth_config()?;
         Ok(ServiceEvent::FaceTemplateApplied { template_path })
     }
 
@@ -245,7 +250,14 @@ where
         if !patch.has_updates() {
             return Err(ProtocolError::InvalidMessage);
         }
+        if !patch.has_valid_values() {
+            return Err(ProtocolError::InvalidMessage);
+        }
+        let should_reload_auth_config = patch.logon_face_match_threshold.is_some();
         self.service_config_applier.apply_control_settings(&patch)?;
+        if should_reload_auth_config {
+            self.grant_issuer.reload_auth_config()?;
+        }
         Ok(ServiceEvent::ControlSettingsApplied)
     }
 }
@@ -311,6 +323,9 @@ mod tests {
     }
 
     struct StartedThenSuccessfulGrantIssuer;
+    struct ReloadRecordingGrantIssuer {
+        reload_count: usize,
+    }
 
     impl AuthGrantIssuer for StartedThenSuccessfulGrantIssuer {
         fn issue_auth_grant(
@@ -341,6 +356,23 @@ mod tests {
                 issued_at_unix_ms,
                 expires_at_unix_ms: issued_at_unix_ms + DEFAULT_GRANT_TTL.as_millis() as i64,
             }))
+        }
+    }
+
+    impl AuthGrantIssuer for ReloadRecordingGrantIssuer {
+        fn issue_auth_grant(
+            &mut self,
+            _session_id: &SessionId,
+            _source: AuthSource,
+            _trigger_source: AuthTriggerSource,
+            _issued_at_unix_ms: i64,
+        ) -> AuthGrantIssueResult {
+            AuthGrantIssueResult::Failed(AuthFailureReason::InternalError)
+        }
+
+        fn reload_auth_config(&mut self) -> Result<(), ProtocolError> {
+            self.reload_count += 1;
+            Ok(())
         }
     }
 
@@ -611,6 +643,26 @@ mod tests {
     }
 
     #[test]
+    fn handler_reloads_auth_config_after_applying_face_template() -> Result<(), ProtocolError> {
+        let mut handler = ServiceRequestHandler::new(
+            ReloadRecordingGrantIssuer { reload_count: 0 },
+            FixedCredentialResolver,
+            RecordingServiceConfigApplier::new(),
+            FixedClock { now_unix_ms: 1_000 },
+        );
+        let template_path = PathBuf::from(r"C:\ProgramData\WinFaceUnlock\selected_templates.json");
+
+        let event = handler.handle_request(ServiceRequest::ApplyFaceTemplate {
+            template_path: template_path.clone(),
+            camera_id: "opencv-index:0".to_owned(),
+        })?;
+
+        assert_eq!(event, ServiceEvent::FaceTemplateApplied { template_path });
+        assert_eq!(handler.grant_issuer.reload_count, 1);
+        Ok(())
+    }
+
+    #[test]
     fn handler_applies_control_settings_via_config_applier() -> Result<(), ProtocolError> {
         let mut handler = ServiceRequestHandler::new(
             SuccessfulGrantIssuer,
@@ -621,11 +673,54 @@ mod tests {
         let patch = ControlSettingsPatch {
             presence_lock_enabled: Some(true),
             logon_wake_mode: None,
+            logon_face_match_threshold: None,
         };
 
         let event = handler.handle_request(ServiceRequest::ApplyControlSettings { patch })?;
 
         assert_eq!(event, ServiceEvent::ControlSettingsApplied);
         Ok(())
+    }
+
+    #[test]
+    fn handler_reloads_auth_config_after_applying_logon_face_threshold() -> Result<(), ProtocolError>
+    {
+        let mut handler = ServiceRequestHandler::new(
+            ReloadRecordingGrantIssuer { reload_count: 0 },
+            FixedCredentialResolver,
+            RecordingServiceConfigApplier::new(),
+            FixedClock { now_unix_ms: 1_000 },
+        );
+        let patch = ControlSettingsPatch {
+            presence_lock_enabled: None,
+            logon_wake_mode: None,
+            logon_face_match_threshold: Some(0.50),
+        };
+
+        let event = handler.handle_request(ServiceRequest::ApplyControlSettings { patch })?;
+
+        assert_eq!(event, ServiceEvent::ControlSettingsApplied);
+        assert_eq!(handler.grant_issuer.reload_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn handler_rejects_invalid_logon_face_threshold() {
+        let mut handler = ServiceRequestHandler::new(
+            ReloadRecordingGrantIssuer { reload_count: 0 },
+            FixedCredentialResolver,
+            RecordingServiceConfigApplier::new(),
+            FixedClock { now_unix_ms: 1_000 },
+        );
+        let patch = ControlSettingsPatch {
+            presence_lock_enabled: None,
+            logon_wake_mode: None,
+            logon_face_match_threshold: Some(1.50),
+        };
+
+        let result = handler.handle_request(ServiceRequest::ApplyControlSettings { patch });
+
+        assert_eq!(result, Err(ProtocolError::InvalidMessage));
+        assert_eq!(handler.grant_issuer.reload_count, 0);
     }
 }

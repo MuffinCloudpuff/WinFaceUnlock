@@ -109,9 +109,7 @@ mod tests {
     #[test]
     fn full_uninstall_plan_can_request_data_deletion() {
         let plan = FullUninstallPlan {
-            resource_plan: ResourceDirectoryPlan::from_root_dir(PathBuf::from(
-                r"C:\ProgramData\WinFaceUnlock",
-            )),
+            resource_plan: ResourceDirectoryPlan::from_root_dir(PathBuf::from(r"C:\WinFaceUnlock")),
             stop_service_first: true,
             delete_data: true,
         };
@@ -129,9 +127,7 @@ mod tests {
             provider_plan: ProviderInstallPlan::new(PathBuf::from(
                 r"C:\WinFaceUnlock\windows_provider.dll",
             )),
-            resource_plan: ResourceDirectoryPlan::from_root_dir(PathBuf::from(
-                r"C:\ProgramData\WinFaceUnlock",
-            )),
+            resource_plan: ResourceDirectoryPlan::from_root_dir(PathBuf::from(r"C:\WinFaceUnlock")),
             auth_config: None,
             start_service: true,
         };

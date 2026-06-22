@@ -235,6 +235,7 @@ pub struct StagePayloadFile {
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct EnrollCredentialPayload {
+    pub install_dir: Option<PathBuf>,
     pub username: String,
     #[serde(default = "default_user_id")]
     pub user_id: String,
@@ -642,6 +643,7 @@ mod tests {
         assert_eq!(payload.user_id, "dev-user");
         assert_eq!(payload.user_sid, "S-1-5-21-winfaceunlock-pending");
         assert_eq!(payload.account_type, "local");
+        assert_eq!(payload.install_dir, None);
         assert_eq!(payload.credential_ref, None);
         assert_eq!(payload.store_dir, None);
         assert_eq!(payload.password_secret_transport, None);

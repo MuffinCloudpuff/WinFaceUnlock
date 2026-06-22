@@ -14,8 +14,16 @@ pub struct PresenceAuditConfig {
 
 impl PresenceAuditConfig {
     pub fn program_data_default() -> Self {
+        let audit_dir = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.join("presence-audit")))
+            .unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join("WinFaceUnlock")
+                    .join("presence-audit")
+            });
         Self {
-            audit_dir: PathBuf::from(r"C:\ProgramData\WinFaceUnlock\presence-audit"),
+            audit_dir,
             presence_audit_enabled: true,
             presence_audit_save_full_frame_thumbnail: false,
             presence_audit_save_screen_snapshot: true,

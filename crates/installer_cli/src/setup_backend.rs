@@ -450,8 +450,7 @@ fn stop_existing_service_before_payload_staging(install_dir: &Path) -> Result<()
 
     #[cfg(all(windows, not(test)))]
     {
-        return ServiceManagerFacade::connect()
-            .and_then(|manager| manager.stop_service_if_exists());
+        ServiceManagerFacade::connect().and_then(|manager| manager.stop_service_if_exists())
     }
 
     #[cfg(any(not(windows), test))]
@@ -644,12 +643,13 @@ fn enroll_credential(request: &SetupRequestEnvelope) -> SetupResponseEnvelope {
         .clone()
         .unwrap_or_else(|| format!("windows-credential-{}", payload.user_id));
     let safe_details = json!({
+        "install_dir": payload.install_dir,
         "username": payload.username,
         "user_id": payload.user_id,
         "user_sid": payload.user_sid,
         "account_type": payload.account_type,
         "credential_ref": credential_ref,
-        "store_dir": payload.store_dir,
+        "store_dir": credential_store_dir_from_payload(&payload),
         "password_transport": credential_password_transport_label(&payload),
     });
 
@@ -772,6 +772,15 @@ fn credential_password_transport_label(payload: &EnrollCredentialPayload) -> &st
         .unwrap_or("native_windows_credential_prompt")
 }
 
+fn credential_store_dir_from_payload(payload: &EnrollCredentialPayload) -> Option<PathBuf> {
+    payload.store_dir.clone().or_else(|| {
+        payload
+            .install_dir
+            .as_ref()
+            .map(|dir| dir.join("credential-store"))
+    })
+}
+
 #[cfg(all(windows, not(test)))]
 fn enroll_credential_from_payload(
     payload: &EnrollCredentialPayload,
@@ -813,9 +822,7 @@ fn enroll_credential_with_secret_transport(
         return Err(CredentialEnrollmentError::EmptyPassword);
     }
 
-    let store_paths = payload
-        .store_dir
-        .clone()
+    let store_paths = credential_store_dir_from_payload(payload)
         .map(ServiceCredentialStorePaths::from_store_dir)
         .unwrap_or_else(ServiceCredentialStorePaths::from_environment_or_default);
     enroll_windows_credential(
@@ -849,9 +856,7 @@ fn enroll_credential_with_native_prompt(
         return Err(CredentialEnrollmentError::EmptyPassword);
     }
 
-    let store_paths = payload
-        .store_dir
-        .clone()
+    let store_paths = credential_store_dir_from_payload(payload)
         .map(ServiceCredentialStorePaths::from_store_dir)
         .unwrap_or_else(ServiceCredentialStorePaths::from_environment_or_default);
     enroll_windows_credential(
@@ -1785,12 +1790,9 @@ mod tests {
 
     #[test]
     fn stage_payload_copies_file_through_backend() -> Result<(), std::io::Error> {
-        let root = std::env::temp_dir().join(format!(
-            "winfaceunlock-stage-backend-{}",
-            std::process::id()
-        ));
+        let root = unique_setup_backend_temp_dir("stage-backend");
         let source_dir = root.join("source");
-        let install_dir = root.join("install");
+        let install_dir = root.join("WinFaceUnlock");
         std::fs::create_dir_all(&source_dir)?;
         let source_path = source_dir.join("win_service.exe");
         std::fs::write(&source_path, b"service")?;
@@ -1825,12 +1827,9 @@ mod tests {
 
     #[test]
     fn stage_payload_resolves_relative_source_from_payload_root() -> Result<(), std::io::Error> {
-        let root = std::env::temp_dir().join(format!(
-            "winfaceunlock-stage-backend-relative-{}",
-            std::process::id()
-        ));
+        let root = unique_setup_backend_temp_dir("stage-backend-relative");
         let payload_root_dir = root.join("payload");
-        let install_dir = root.join("install");
+        let install_dir = root.join("WinFaceUnlock");
         std::fs::create_dir_all(payload_root_dir.join("models"))?;
         std::fs::write(
             payload_root_dir.join(r"models\face_detection_yunet_2023mar.onnx"),
@@ -2100,5 +2099,16 @@ mod tests {
         assert_eq!(summary["selected_template_count"], json!(2));
         assert_eq!(summary["rejected_sample_count"], Value::Null);
         Ok(())
+    }
+
+    fn unique_setup_backend_temp_dir(name: &str) -> std::path::PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "winfaceunlock-{name}-{}-{suffix}",
+            std::process::id()
+        ))
     }
 }

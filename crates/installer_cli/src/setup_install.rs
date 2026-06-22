@@ -102,7 +102,7 @@ pub fn build_install_plan(
     Ok(FullInstallPlan {
         service_plan: ServiceInstallPlan::new(service_binary_path),
         provider_plan,
-        resource_plan: ResourceDirectoryPlan::from_environment_or_default(),
+        resource_plan: ResourceDirectoryPlan::from_root_dir(payload.install_dir.clone()),
         auth_config,
         start_service: payload.start_service,
     })

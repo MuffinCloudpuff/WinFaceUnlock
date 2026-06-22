@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use common_protocol::ProtocolError;
 use face_liveness::MiniFasNetLivenessProviderConfig;
@@ -182,11 +182,15 @@ pub enum PresencePersonDetectorModel {
 
 impl ServicePresenceConfig {
     pub fn from_environment() -> Result<Self, ProtocolError> {
-        Self::from_lookup(|env_name| {
+        let mut config = Self::from_lookup(|env_name| {
             std::env::var(env_name)
                 .ok()
                 .or_else(|| registry_value_for_env_name(env_name))
-        })
+        })?;
+        if let Some(install_dir) = current_exe_dir() {
+            config.resolve_relative_paths_against_install_dir(&install_dir);
+        }
+        Ok(config)
     }
 
     fn from_lookup(
@@ -299,15 +303,37 @@ impl ServicePresenceConfig {
             .unwrap_or(DEFAULT_PRESENCE_POSE_MIN_LANDMARK_PRESENCE),
         })
     }
+
+    fn resolve_relative_paths_against_install_dir(&mut self, install_dir: &Path) {
+        resolve_relative_path_against_install_dir(
+            &mut self.presence_person_model_path,
+            install_dir,
+        );
+        if let Some(config_path) = &mut self.presence_person_model_config_path {
+            resolve_relative_path_against_install_dir(config_path, install_dir);
+        }
+        if let Some(debug_output_dir) = &mut self.presence_person_debug_output_dir {
+            resolve_relative_path_against_install_dir(debug_output_dir, install_dir);
+        }
+        resolve_relative_path_against_install_dir(
+            &mut self.presence_pose_bridge_dll_path,
+            install_dir,
+        );
+        resolve_relative_path_against_install_dir(&mut self.presence_pose_model_path, install_dir);
+    }
 }
 
 impl ServiceAuthConfig {
     pub fn from_environment() -> Result<Self, ProtocolError> {
-        Self::from_lookup(|env_name| {
+        let mut config = Self::from_lookup(|env_name| {
             std::env::var(env_name)
                 .ok()
                 .or_else(|| registry_value_for_env_name(env_name))
-        })
+        })?;
+        if let Some(install_dir) = current_exe_dir() {
+            config.resolve_relative_paths_against_install_dir(&install_dir);
+        }
+        Ok(config)
     }
 
     fn from_lookup(
@@ -374,6 +400,28 @@ impl ServiceAuthConfig {
             }),
             _ => Err(ProtocolError::InvalidMessage),
         }
+    }
+
+    fn resolve_relative_paths_against_install_dir(&mut self, install_dir: &Path) {
+        let ServiceAuthMode::LocalCamera(local_camera_config) = &mut self.auth_mode else {
+            return;
+        };
+        resolve_relative_path_against_install_dir(
+            &mut local_camera_config.face_template_path,
+            install_dir,
+        );
+        resolve_relative_path_against_install_dir(
+            &mut local_camera_config.yunet_model_path,
+            install_dir,
+        );
+        resolve_relative_path_against_install_dir(
+            &mut local_camera_config.sface_model_path,
+            install_dir,
+        );
+        resolve_relative_path_against_install_dir(
+            &mut local_camera_config.minifasnet_config.model_path,
+            install_dir,
+        );
     }
 }
 
@@ -517,6 +565,18 @@ fn optional_path(
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+fn current_exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+}
+
+fn resolve_relative_path_against_install_dir(path: &mut PathBuf, install_dir: &Path) {
+    if path.is_relative() {
+        *path = install_dir.join(&path);
+    }
 }
 
 fn optional_u32(
@@ -839,6 +899,68 @@ mod tests {
             PathBuf::from(DEFAULT_PRESENCE_YOLOV8_PERSON_MODEL_PATH)
         );
         assert_eq!(config.presence_person_model_config_path, None);
+        Ok(())
+    }
+
+    #[test]
+    fn presence_runtime_paths_resolve_relative_defaults_under_install_dir()
+    -> Result<(), ProtocolError> {
+        let install_dir = PathBuf::from(r"D:\tools\WinFaceUnlock");
+        let mut config = ServicePresenceConfig::from_lookup(|_| None)?;
+
+        config.resolve_relative_paths_against_install_dir(&install_dir);
+
+        assert_eq!(
+            config.presence_person_model_path,
+            install_dir.join(DEFAULT_PRESENCE_YOLOV8_PERSON_MODEL_PATH)
+        );
+        assert_eq!(
+            config.presence_pose_bridge_dll_path,
+            install_dir.join(DEFAULT_PRESENCE_POSE_BRIDGE_DLL_PATH)
+        );
+        assert_eq!(
+            config.presence_pose_model_path,
+            install_dir.join(DEFAULT_PRESENCE_POSE_MODEL_PATH)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn auth_runtime_paths_resolve_relative_defaults_under_install_dir() -> Result<(), ProtocolError>
+    {
+        let install_dir = PathBuf::from(r"D:\tools\WinFaceUnlock");
+        let values = HashMap::from([
+            (ENV_AUTH_MODE, AUTH_MODE_LOCAL_CAMERA),
+            (
+                ENV_FACE_TEMPLATE_PATH,
+                r"face-enrollment\selected_templates.json",
+            ),
+        ]);
+        let mut config = ServiceAuthConfig::from_lookup(|env_name| {
+            values.get(env_name).map(|value| value.to_string())
+        })?;
+
+        config.resolve_relative_paths_against_install_dir(&install_dir);
+
+        let ServiceAuthMode::LocalCamera(local_camera_config) = config.auth_mode else {
+            return Err(ProtocolError::InvalidMessage);
+        };
+        assert_eq!(
+            local_camera_config.face_template_path,
+            install_dir.join(r"face-enrollment\selected_templates.json")
+        );
+        assert_eq!(
+            local_camera_config.yunet_model_path,
+            install_dir.join(DEFAULT_YUNET_MODEL_PATH)
+        );
+        assert_eq!(
+            local_camera_config.sface_model_path,
+            install_dir.join(DEFAULT_SFACE_MODEL_PATH)
+        );
+        assert_eq!(
+            local_camera_config.minifasnet_config.model_path,
+            install_dir.join(DEFAULT_MINIFASNET_MODEL_PATH)
+        );
         Ok(())
     }
 }

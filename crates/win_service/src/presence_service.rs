@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::Path,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -15,6 +15,13 @@ use face_engine::{FaceTemplate, FaceTemplateCodecError, FaceTemplateSet, OpenCvF
 
 use crate::{
     camera_backend_profiles::apply_profile_to_config,
+    camera_runtime::{
+        InterfaceRuntimeState, InterfaceRuntimeStateSource, update_interface_runtime_state,
+    },
+    desktop_agent_launcher::ensure_desktop_input_presence_agent,
+    desktop_input_state::{
+        DesktopInputSnapshotActivitySource, desktop_input_agent_sample_interval,
+    },
     desktop_session::active_user_session_id,
     presence_camera::{CameraPresenceObservationConfig, CameraPresenceObservationSource},
     presence_monitor::{NoopUnknownFaceAuditSink, PresenceMonitor, PresenceMonitorConfig},
@@ -25,15 +32,19 @@ use crate::{
         OpenCvDnnPersonDetectorConfig, OrtYoloV8PersonDetectorConfig, PersonDetectorConfig,
     },
     presence_policy::PresencePolicyConfig,
+    presence_sampling_gate::{
+        HumanInputGatedObservationSource, PresenceSamplingGate, PresenceSamplingGateConfig,
+    },
     service_config::{
         PresenceDetectorKind, PresencePersonDetectorModel, PresenceTrackingMode, ServiceAuthConfig,
         ServiceAuthMode, ServicePresenceConfig,
     },
+    service_log::write_service_event_detail,
     session_lock::WindowsSessionLocker,
 };
 
-const PRESENCE_RUNTIME_STATUS_PATH: &str =
-    r"C:\ProgramData\WinFaceUnlock\presence-runtime-status.json";
+const RUNTIME_DIR_NAME: &str = "runtime";
+const PRESENCE_RUNTIME_STATUS_FILE_NAME: &str = "presence-runtime-status.json";
 
 #[derive(serde::Serialize)]
 struct PresenceRuntimeStatus<'a> {
@@ -47,7 +58,7 @@ struct PresenceRuntimeStatus<'a> {
 pub enum PresenceServiceCommand {
     StartForUserSession { session_id: u32 },
     StopForUserSession { session_id: u32 },
-    ReloadCurrentSession,
+    ReloadCurrentSessionFromDesktopControl,
     Shutdown,
 }
 
@@ -61,11 +72,15 @@ pub fn spawn_presence_service_controller() -> mpsc::Sender<PresenceServiceComman
 
 fn run_presence_service_controller(receiver: mpsc::Receiver<PresenceServiceCommand>) {
     let mut running_monitor: Option<RunningPresenceMonitor> = None;
-    if let Some(session_id) = active_user_session_id() {
-        running_monitor = start_presence_monitor_thread(session_id);
-    } else {
-        write_presence_runtime_status("waiting-for-session", None, "no active user session");
-    }
+    write_presence_runtime_status(
+        "waiting-for-session",
+        None,
+        "waiting for unlock/logon or desktop settings reload",
+    );
+    write_service_event_detail(
+        "PresenceMonitor.WaitingForSession",
+        "reason=waiting-for-interface-state-event",
+    );
 
     while let Ok(command) = receiver.recv() {
         match command {
@@ -74,27 +89,55 @@ fn run_presence_service_controller(receiver: mpsc::Receiver<PresenceServiceComma
                     .as_ref()
                     .is_some_and(RunningPresenceMonitor::is_running)
                 {
+                    write_service_event_detail(
+                        "PresenceMonitor.StartIgnored",
+                        format!("session_id={session_id} reason=already-running"),
+                    );
                     eprintln!(
                         "WinFaceUnlock presence monitor already running; ignoring session {session_id} start"
                     );
                     continue;
                 }
                 if let Some(previous_monitor) = running_monitor.take() {
+                    write_service_event_detail(
+                        "PresenceMonitor.StopBeforeStart",
+                        format!("session_id={session_id}"),
+                    );
                     previous_monitor.stop_and_join();
                 }
+                write_service_event_detail(
+                    "PresenceMonitor.StartRequested",
+                    format!("session_id={session_id} source=session-change"),
+                );
                 running_monitor = start_presence_monitor_thread(session_id);
             }
             PresenceServiceCommand::StopForUserSession { session_id } => {
                 if let Some(previous_monitor) = running_monitor.take() {
+                    write_service_event_detail(
+                        "PresenceMonitor.StopRequested",
+                        format!("session_id={session_id} source=session-change"),
+                    );
                     eprintln!("WinFaceUnlock stopping presence monitor for session {session_id}");
                     previous_monitor.stop_and_join();
                 }
             }
-            PresenceServiceCommand::ReloadCurrentSession => {
+            PresenceServiceCommand::ReloadCurrentSessionFromDesktopControl => {
+                update_interface_runtime_state(
+                    InterfaceRuntimeState::DesktopUnlocked,
+                    InterfaceRuntimeStateSource::DesktopControlReload,
+                );
                 if let Some(previous_monitor) = running_monitor.take() {
+                    write_service_event_detail(
+                        "PresenceMonitor.ReloadStoppingCurrent",
+                        "reason=settings-reload",
+                    );
                     previous_monitor.stop_and_join();
                 }
                 if let Some(session_id) = active_user_session_id() {
+                    write_service_event_detail(
+                        "PresenceMonitor.ReloadStartRequested",
+                        format!("session_id={session_id} source=desktop-control"),
+                    );
                     running_monitor = start_presence_monitor_thread(session_id);
                 } else {
                     write_presence_runtime_status(
@@ -102,10 +145,18 @@ fn run_presence_service_controller(receiver: mpsc::Receiver<PresenceServiceComma
                         None,
                         "no active user session after settings reload",
                     );
+                    write_service_event_detail(
+                        "PresenceMonitor.ReloadWaitingForSession",
+                        "reason=no-active-user-session",
+                    );
                 }
             }
             PresenceServiceCommand::Shutdown => {
                 if let Some(previous_monitor) = running_monitor.take() {
+                    write_service_event_detail(
+                        "PresenceMonitor.ShutdownStoppingCurrent",
+                        "reason=service-shutdown",
+                    );
                     previous_monitor.stop_and_join();
                 }
                 return;
@@ -139,11 +190,19 @@ fn start_presence_monitor_thread(session_id: u32) -> Option<RunningPresenceMonit
                 Some(session_id),
                 "presence config could not be read",
             );
+            write_service_event_detail(
+                "PresenceMonitor.StartFailed",
+                format!("session_id={session_id} reason=presence-config-unavailable"),
+            );
             return None;
         }
     };
     if !presence_config.presence_lock_enabled {
         write_presence_runtime_status("disabled", Some(session_id), "presence lock disabled");
+        write_service_event_detail(
+            "PresenceMonitor.Disabled",
+            format!("session_id={session_id}"),
+        );
         eprintln!("WinFaceUnlock presence monitor disabled; ignoring session {session_id} start");
         return None;
     }
@@ -156,6 +215,10 @@ fn start_presence_monitor_thread(session_id: u32) -> Option<RunningPresenceMonit
                 Some(session_id),
                 "service auth config could not be read",
             );
+            write_service_event_detail(
+                "PresenceMonitor.StartFailed",
+                format!("session_id={session_id} reason=service-auth-config-unavailable"),
+            );
             return None;
         }
     };
@@ -165,6 +228,10 @@ fn start_presence_monitor_thread(session_id: u32) -> Option<RunningPresenceMonit
             Some(session_id),
             "presence monitor requires local-camera auth config",
         );
+        write_service_event_detail(
+            "PresenceMonitor.StartFailed",
+            format!("session_id={session_id} reason=local-camera-auth-required"),
+        );
         eprintln!(
             "WinFaceUnlock presence monitor requires local-camera auth config; ignoring session {session_id} start"
         );
@@ -172,12 +239,40 @@ fn start_presence_monitor_thread(session_id: u32) -> Option<RunningPresenceMonit
     };
 
     write_presence_runtime_status("starting", Some(session_id), "session is active");
+    write_service_event_detail(
+        "PresenceMonitor.Starting",
+        format!(
+            "session_id={} camera_id={} detector_kind={:?} tracking_mode={:?}",
+            session_id,
+            local_camera_config.camera_id.0,
+            presence_config.presence_detector_kind,
+            presence_config.presence_tracking_mode
+        ),
+    );
+    match ensure_desktop_input_presence_agent(session_id, desktop_input_agent_sample_interval()) {
+        Ok(()) => {
+            write_service_event_detail(
+                "DesktopInputPresenceAgent.EnsureRequested",
+                format!("session_id={session_id}"),
+            );
+        }
+        Err(error) => {
+            write_service_event_detail(
+                "DesktopInputPresenceAgent.EnsureFailed",
+                format!("session_id={session_id} error={error:?}"),
+            );
+        }
+    }
     let stop_requested = Arc::new(AtomicBool::new(false));
     let thread_stop_requested = Arc::clone(&stop_requested);
     let join_handle = thread::Builder::new()
         .name(format!("winfaceunlock-presence-session-{session_id}"))
         .spawn(move || {
             write_presence_runtime_status("running", Some(session_id), "presence monitor started");
+            write_service_event_detail(
+                "PresenceMonitor.Running",
+                format!("session_id={session_id}"),
+            );
             let result = run_presence_monitor_for_local_camera(
                 session_id,
                 *local_camera_config,
@@ -187,13 +282,27 @@ fn start_presence_monitor_thread(session_id: u32) -> Option<RunningPresenceMonit
             match result {
                 Ok(summary) => {
                     write_presence_runtime_status("stopped", Some(session_id), "monitor exited");
+                    write_service_event_detail(
+                        "PresenceMonitor.Stopped",
+                        format!("session_id={session_id} summary={summary:?}"),
+                    );
                     eprintln!("WinFaceUnlock presence monitor stopped: {summary:?}");
                 }
                 Err(error) => {
                     write_presence_runtime_status("failed", Some(session_id), "monitor failed");
+                    write_service_event_detail(
+                        "PresenceMonitor.Failed",
+                        format!("session_id={session_id} error={error:?}"),
+                    );
                     eprintln!("WinFaceUnlock presence monitor failed: {error:?}");
                 }
             }
+        })
+        .map_err(|error| {
+            write_service_event_detail(
+                "PresenceMonitor.StartFailed",
+                format!("session_id={session_id} reason=thread-spawn-failed error={error}"),
+            );
         })
         .ok()?;
 
@@ -214,6 +323,13 @@ fn run_presence_monitor_for_local_camera(
         PresenceDetectorKind::OpenCvDnnPerson | PresenceDetectorKind::MediaPipePoseLite
     ) && presence_config.presence_tracking_mode == PresenceTrackingMode::ContinuousLowFps
     {
+        write_service_event_detail(
+            "PresenceMonitor.CameraModeSelected",
+            format!(
+                "session_id={} mode=person-continuous camera_id={}",
+                session_id, local_camera_config.camera_id.0
+            ),
+        );
         return run_person_presence_monitor_for_local_camera(
             session_id,
             local_camera_config,
@@ -222,6 +338,13 @@ fn run_presence_monitor_for_local_camera(
         );
     }
 
+    write_service_event_detail(
+        "PresenceMonitor.CameraModeSelected",
+        format!(
+            "session_id={} mode=face-policy camera_id={}",
+            session_id, local_camera_config.camera_id.0
+        ),
+    );
     run_face_presence_monitor_for_local_camera(
         session_id,
         local_camera_config,
@@ -254,6 +377,14 @@ fn run_face_presence_monitor_for_local_camera(
         pending_unknown_face_crop_path: None,
     })
     .map_err(|_| ProtocolError::TransportUnavailable)?;
+    let source = HumanInputGatedObservationSource::new(
+        source,
+        PresenceSamplingGate::new(
+            PresenceSamplingGateConfig::default(),
+            DesktopInputSnapshotActivitySource::new(session_id),
+        ),
+        Arc::clone(&stop_requested),
+    );
 
     let mut monitor = PresenceMonitor::new(
         PresenceMonitorConfig {
@@ -281,6 +412,32 @@ fn run_person_presence_monitor_for_local_camera(
     let mut camera_config = local_camera_config.camera_config;
     apply_profile_to_config(&local_camera_config.camera_id, &mut camera_config);
     let detector_config = person_detector_config_from_presence_config(&presence_config)?;
+    write_service_event_detail(
+        "PresenceMonitor.PersonConfigResolved",
+        format!(
+            "session_id={} detector_model={:?} detector_config={:?} model_path={} model_exists={} config_path={} config_exists={} debug_output_dir={}",
+            session_id,
+            presence_config.presence_person_detector_model,
+            detector_config,
+            presence_config.presence_person_model_path.display(),
+            presence_config.presence_person_model_path.exists(),
+            presence_config
+                .presence_person_model_config_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<none>".to_owned()),
+            presence_config
+                .presence_person_model_config_path
+                .as_ref()
+                .map(|path| path.exists())
+                .unwrap_or(true),
+            presence_config
+                .presence_person_debug_output_dir
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<none>".to_owned())
+        ),
+    );
     let source =
         PersonCameraPresenceObservationSource::new(PersonCameraPresenceObservationConfig {
             camera_id: local_camera_config.camera_id,
@@ -288,7 +445,21 @@ fn run_person_presence_monitor_for_local_camera(
             detector_config,
             debug_output_dir: presence_config.presence_person_debug_output_dir.clone(),
         })
-        .map_err(|_| ProtocolError::TransportUnavailable)?;
+        .map_err(|error| {
+            write_service_event_detail(
+                "PresenceMonitor.PersonSourceCreateFailed",
+                format!("session_id={session_id} error={error:?}"),
+            );
+            ProtocolError::TransportUnavailable
+        })?;
+    let source = HumanInputGatedObservationSource::new(
+        source,
+        PresenceSamplingGate::new(
+            PresenceSamplingGateConfig::default(),
+            DesktopInputSnapshotActivitySource::new(session_id),
+        ),
+        Arc::clone(&stop_requested),
+    );
 
     let mut monitor = PresenceMonitor::new(
         PresenceMonitorConfig {
@@ -302,9 +473,13 @@ fn run_person_presence_monitor_for_local_camera(
         NoopUnknownFaceAuditSink,
         source,
     );
-    monitor
-        .run()
-        .map_err(|_| ProtocolError::TransportUnavailable)
+    monitor.run().map_err(|error| {
+        write_service_event_detail(
+            "PresenceMonitor.PersonRunFailed",
+            format!("session_id={session_id} error={error:?}"),
+        );
+        ProtocolError::TransportUnavailable
+    })
 }
 
 fn person_detector_config_from_presence_config(
@@ -397,13 +572,31 @@ fn write_presence_runtime_status(state: &str, session_id: Option<u32>, reason: &
         reason,
         updated_at_unix_ms: current_time_unix_ms(),
     };
-    let path = Path::new(PRESENCE_RUNTIME_STATUS_PATH);
+    let path = presence_runtime_status_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
     if let Ok(bytes) = serde_json::to_vec_pretty(&status) {
         let _ = fs::write(path, bytes);
     }
+}
+
+fn presence_runtime_status_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.parent().map(|install_dir| {
+                install_dir
+                    .join(RUNTIME_DIR_NAME)
+                    .join(PRESENCE_RUNTIME_STATUS_FILE_NAME)
+            })
+        })
+        .unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join("WinFaceUnlock")
+                .join(RUNTIME_DIR_NAME)
+                .join(PRESENCE_RUNTIME_STATUS_FILE_NAME)
+        })
 }
 
 fn current_time_unix_ms() -> i64 {

@@ -96,6 +96,10 @@ public sealed record StagePayloadFile
 
 public sealed record EnrollCredentialPayload
 {
+    [JsonPropertyName("install_dir")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? InstallDir { get; init; }
+
     [JsonPropertyName("username")]
     public string Username { get; init; } = "";
 

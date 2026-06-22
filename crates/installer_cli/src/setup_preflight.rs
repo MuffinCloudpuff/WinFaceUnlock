@@ -6,8 +6,6 @@ use std::{
 
 use setup_api::{PreflightPayload, RequiredPayloadFile, SetupPreflightCheck, SetupStepStatus};
 
-use crate::resource_directory::ResourceDirectoryPlan;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreflightOutcome {
     pub checks: Vec<SetupPreflightCheck>,
@@ -41,7 +39,7 @@ pub fn run_preflight(payload: &PreflightPayload) -> PreflightOutcome {
         check_install_dir_writable(&payload.install_dir),
         check_process_elevation(payload.require_elevation),
         check_recovery_entry_point(),
-        check_program_data_root(),
+        check_install_data_root(&payload.install_dir),
     ];
 
     let (payload_check, missing_payload_files) =
@@ -179,19 +177,22 @@ fn check_recovery_entry_point() -> SetupPreflightCheck {
     }
 }
 
-fn check_program_data_root() -> SetupPreflightCheck {
-    let plan = ResourceDirectoryPlan::from_environment_or_default();
-    if plan.root_dir.file_name().and_then(|name| name.to_str()) == Some("WinFaceUnlock") {
+fn check_install_data_root(install_dir: &Path) -> SetupPreflightCheck {
+    if install_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("WinFaceUnlock"))
+    {
         SetupPreflightCheck::succeeded(
-            "program_data_root_valid",
-            "ProgramData root is scoped to WinFaceUnlock.",
+            "install_data_root_valid",
+            "Install data root is scoped to WinFaceUnlock.",
         )
     } else {
         SetupPreflightCheck::failed(
-            "program_data_root_valid",
+            "install_data_root_valid",
             format!(
-                "ProgramData root is not scoped to WinFaceUnlock: {}",
-                plan.root_dir.display()
+                "Install data root is not scoped to WinFaceUnlock: {}",
+                install_dir.display()
             ),
         )
     }

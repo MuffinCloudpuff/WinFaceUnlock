@@ -27,6 +27,10 @@ where
             cached_grant_outcomes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+
+    pub fn try_with_issuer<R>(&self, read: impl FnOnce(&I) -> R) -> Option<R> {
+        self.issuer.lock().ok().map(|issuer| read(&issuer))
+    }
 }
 
 impl<I> AuthGrantIssuer for CameraAuthOrchestrator<I>

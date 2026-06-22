@@ -12,6 +12,10 @@ export function AccountArea() {
     useCredentialEnrollment();
   const credentialConfigured = accountProfile?.credential_secret_state === 'configured';
   const shouldShowCredentialInput = !credentialConfigured || isEditingCredential;
+  const accountDisplayName =
+    accountProfile?.display_name ??
+    accountProfile?.windows_account_username ??
+    '用户1';
 
   useEffect(() => {
     if (credentialEnrollmentCompletedAt === null) {
@@ -57,7 +61,7 @@ export function AccountArea() {
           <User className="relative z-10 h-10 w-10 text-slate-400" strokeWidth={1.5} />
         </div>
         <h2 className="text-xl font-medium text-slate-800 tracking-tight">
-          {accountProfile?.windows_account_username ?? 'Admin User'}
+          {accountDisplayName}
         </h2>
       </motion.div>
 

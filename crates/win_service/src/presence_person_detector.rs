@@ -539,7 +539,7 @@ fn parse_yolov8_person_values(
     confidence_threshold: f32,
     nms_threshold: f32,
 ) -> Result<Vec<PersonDetection>, PresencePersonDetectorError> {
-    let layout = YoloOutputLayout::from_shape(&shape)?;
+    let layout = YoloOutputLayout::from_shape(shape)?;
     let candidates = match layout {
         YoloOutputLayout::AttributesByAnchor {
             attribute_count,
@@ -577,32 +577,33 @@ fn yolo_frame_to_nchw_input(
     input_height: usize,
 ) -> Result<Vec<f32>, PresencePersonDetectorError> {
     let image = video_frame_to_mat(frame)?;
-    let mut resized = Mat::default();
-    imgproc::resize(
+    let image = if image.channels() == 1 {
+        let mut bgr = Mat::default();
+        imgproc::cvt_color(
+            &image,
+            &mut bgr,
+            imgproc::COLOR_GRAY2BGR,
+            0,
+            AlgorithmHint::ALGO_HINT_DEFAULT,
+        )
+        .map_err(|_| PresencePersonDetectorError::InvalidFrame)?;
+        bgr
+    } else {
+        image
+    };
+    let blob = dnn::blob_from_image(
         &image,
-        &mut resized,
+        1.0 / 255.0,
         Size::new(input_width as i32, input_height as i32),
-        0.0,
-        0.0,
-        imgproc::INTER_LINEAR,
+        Scalar::new(0.0, 0.0, 0.0, 0.0),
+        true,
+        false,
+        core::CV_32F,
     )
     .map_err(|_| PresencePersonDetectorError::InvalidFrame)?;
-    let bytes = resized
-        .data_typed::<u8>()
-        .map_err(|_| PresencePersonDetectorError::InvalidFrame)?;
-    let pixel_count = input_width * input_height;
-    if bytes.len() < pixel_count * 3 {
-        return Err(PresencePersonDetectorError::InvalidFrame);
-    }
-
-    let mut input = vec![0.0_f32; pixel_count * 3];
-    for pixel_index in 0..pixel_count {
-        let bgr_index = pixel_index * 3;
-        input[pixel_index] = bytes[bgr_index + 2] as f32 / 255.0;
-        input[pixel_count + pixel_index] = bytes[bgr_index + 1] as f32 / 255.0;
-        input[2 * pixel_count + pixel_index] = bytes[bgr_index] as f32 / 255.0;
-    }
-    Ok(input)
+    blob.data_typed::<f32>()
+        .map(|values| values.to_vec())
+        .map_err(|_| PresencePersonDetectorError::InvalidFrame)
 }
 
 fn mat_shape(mat: &Mat) -> Result<Vec<i32>, PresencePersonDetectorError> {
@@ -927,5 +928,42 @@ mod tests {
 
         assert_eq!(detections.len(), 1);
         assert_eq!(detections[0].confidence, 0.90);
+    }
+
+    #[test]
+    fn yolo_input_accepts_gray_frame_by_expanding_to_bgr() -> Result<(), PresencePersonDetectorError>
+    {
+        let frame = VideoFrame {
+            width: 2,
+            height: 2,
+            format: PixelFormat::Gray8,
+            data: vec![0, 64, 128, 255],
+        };
+
+        let input = yolo_frame_to_nchw_input(&frame, 2, 2)?;
+
+        assert_eq!(input.len(), 12);
+        assert_eq!(input[0], 0.0);
+        assert_eq!(input[3], 1.0);
+        assert_eq!(input[4], 0.0);
+        assert_eq!(input[8], 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn yolo_input_accepts_bgr_frame_via_blob_preprocessing()
+    -> Result<(), PresencePersonDetectorError> {
+        let frame = VideoFrame {
+            width: 2,
+            height: 2,
+            format: PixelFormat::Bgr8,
+            data: vec![0, 0, 0, 0, 0, 255, 0, 255, 0, 255, 255, 255],
+        };
+
+        let input = yolo_frame_to_nchw_input(&frame, 2, 2)?;
+
+        assert_eq!(input.len(), 12);
+        assert!(input.iter().any(|value| *value > 0.0));
+        Ok(())
     }
 }

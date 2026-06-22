@@ -15,6 +15,7 @@ export type TriggerMode = 'keyboard' | 'silent' | 'hybrid';
 export interface EnrolledFaceViewModel {
   id: string;
   name: string;
+  avatarImageSrc?: string;
 }
 
 export interface IntruderSnapshotViewModel {
@@ -26,11 +27,13 @@ export interface SettingsAreaViewModel {
   autoLock: boolean;
   intruderSnap: boolean;
   triggerMode: TriggerMode;
+  logonFaceMatchThreshold: number;
   enrolledFaces: EnrolledFaceViewModel[];
   intruders: IntruderSnapshotViewModel[];
   setIntruderSnap: (enabled: boolean) => void;
   changeAutoLock: (enabled: boolean) => void;
   changeTriggerMode: (mode: TriggerMode) => void;
+  changeLogonFaceMatchThreshold: (threshold: number) => void;
   deleteFace: (faceTemplateRef: string) => void;
 }
 
@@ -40,6 +43,8 @@ export function useSettingsArea(): SettingsAreaViewModel {
   const [intruderSnap, setIntruderSnap] = useState(true);
   const [triggerMode, setTriggerMode] = useState<TriggerMode>('keyboard');
   const triggerModeRequestId = useRef(0);
+  const [logonFaceMatchThreshold, setLogonFaceMatchThreshold] = useState(0.75);
+  const logonFaceMatchThresholdRequestId = useRef(0);
   const faceDeleteRequestId = useRef(0);
   const [enrolledFaces, setEnrolledFaces] = useState<EnrolledFaceViewModel[]>([]);
 
@@ -84,6 +89,9 @@ export function useSettingsArea(): SettingsAreaViewModel {
         if (backendTriggerMode) {
           setTriggerMode(backendTriggerMode);
         }
+        setLogonFaceMatchThreshold(
+          normalizeLogonFaceMatchThreshold(response.safe_details.logon_face_match_threshold),
+        );
       })
       .catch((error) => {
         console.warn('Failed to load WinFaceUnlock settings.', error);
@@ -174,6 +182,56 @@ export function useSettingsArea(): SettingsAreaViewModel {
     [triggerMode],
   );
 
+  const changeLogonFaceMatchThreshold = useCallback(
+    (nextThreshold: number) => {
+      const normalizedThreshold = normalizeLogonFaceMatchThreshold(nextThreshold);
+      const previousThreshold = logonFaceMatchThreshold;
+      setLogonFaceMatchThreshold(normalizedThreshold);
+
+      if (!isControlRuntimeAvailable()) {
+        return;
+      }
+
+      const requestId = logonFaceMatchThresholdRequestId.current + 1;
+      logonFaceMatchThresholdRequestId.current = requestId;
+
+      updateControlSettings(controlTransport, {
+        logon_face_match_threshold: normalizedThreshold,
+      })
+        .then((response) => {
+          if (requestId !== logonFaceMatchThresholdRequestId.current) {
+            return;
+          }
+
+          if (response.operation_status === 'completed') {
+            setLogonFaceMatchThreshold(
+              normalizeLogonFaceMatchThreshold(
+                response.safe_details.logon_face_match_threshold,
+              ),
+            );
+            return;
+          }
+
+          setLogonFaceMatchThreshold(previousThreshold);
+          console.warn(
+            'WinFaceUnlock logon face match threshold update was not completed.',
+            response,
+          );
+        })
+        .catch((error) => {
+          if (requestId !== logonFaceMatchThresholdRequestId.current) {
+            return;
+          }
+          setLogonFaceMatchThreshold(previousThreshold);
+          console.warn(
+            'Failed to update WinFaceUnlock logon face match threshold.',
+            error,
+          );
+        });
+    },
+    [logonFaceMatchThreshold],
+  );
+
   const deleteFace = useCallback((faceTemplateRef: string) => {
     if (!isControlRuntimeAvailable()) {
       setEnrolledFaces((currentFaces) =>
@@ -215,13 +273,22 @@ export function useSettingsArea(): SettingsAreaViewModel {
     autoLock,
     intruderSnap,
     triggerMode,
+    logonFaceMatchThreshold,
     enrolledFaces,
     intruders,
     setIntruderSnap,
     changeAutoLock,
     changeTriggerMode,
+    changeLogonFaceMatchThreshold,
     deleteFace,
   };
+}
+
+function normalizeLogonFaceMatchThreshold(threshold: number): number {
+  if (!Number.isFinite(threshold)) {
+    return 0.75;
+  }
+  return Math.min(0.9, Math.max(0.3, Number(threshold.toFixed(2))));
 }
 
 function faceTemplateToViewModel(template: FaceTemplateSummary): EnrolledFaceViewModel {
@@ -229,9 +296,18 @@ function faceTemplateToViewModel(template: FaceTemplateSummary): EnrolledFaceVie
     id: template.face_template_ref,
     name:
       template.display_name ??
-      template.user_id ??
       `人脸 ${template.selected_template_count}`,
+    avatarImageSrc: faceAvatarPreviewToImageSrc(template),
   };
+}
+
+function faceAvatarPreviewToImageSrc(template: FaceTemplateSummary): string | undefined {
+  const preview = template.avatar_preview;
+  if (!preview?.mime_type || !preview.image_base64) {
+    return undefined;
+  }
+
+  return `data:${preview.mime_type};base64,${preview.image_base64}`;
 }
 
 function logonWakeModeToTriggerMode(mode?: LogonWakeMode): TriggerMode | undefined {
