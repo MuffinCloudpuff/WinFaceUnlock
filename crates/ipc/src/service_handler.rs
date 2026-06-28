@@ -1,14 +1,9 @@
-use std::{
-    path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use common_protocol::{
     AuthFailureReason, AuthGrant, AuthSource, AuthTriggerSource, ProtectedCredential,
     ProtectedCredentialMaterial, ProtocolError, ServiceEvent, ServiceRequest, SessionId,
 };
-use control_protocol::ControlSettingsPatch;
-
 use crate::GrantRegistry;
 
 pub trait AuthGrantIssuer {
@@ -19,6 +14,21 @@ pub trait AuthGrantIssuer {
         trigger_source: AuthTriggerSource,
         issued_at_unix_ms: i64,
     ) -> AuthGrantIssueResult;
+
+    fn issue_auth_grant_with_observer(
+        &mut self,
+        session_id: &SessionId,
+        source: AuthSource,
+        trigger_source: AuthTriggerSource,
+        issued_at_unix_ms: i64,
+        on_grant_issued: &mut dyn FnMut(&AuthGrant),
+    ) -> AuthGrantIssueResult {
+        let result = self.issue_auth_grant(session_id, source, trigger_source, issued_at_unix_ms);
+        if let AuthGrantIssueResult::Issued(grant) = &result {
+            on_grant_issued(grant);
+        }
+        result
+    }
 
     fn fetch_auth_result(
         &mut self,
@@ -56,16 +66,6 @@ pub trait ProtectedCredentialMaterialResolver {
     ) -> Result<ProtectedCredentialMaterial, ProtocolError>;
 }
 
-pub trait ServiceConfigApplier {
-    fn apply_face_template(
-        &mut self,
-        template_path: &Path,
-        camera_id: &str,
-    ) -> Result<(), ProtocolError>;
-    fn apply_control_settings(&mut self, patch: &ControlSettingsPatch)
-    -> Result<(), ProtocolError>;
-}
-
 pub trait UnixTimeMillisClock {
     fn now_unix_ms(&self) -> i64;
 }
@@ -83,31 +83,27 @@ impl UnixTimeMillisClock for SystemUnixTimeMillisClock {
     }
 }
 
-pub struct ServiceRequestHandler<I, R, A, C> {
+pub struct ServiceRequestHandler<I, R, C> {
     grant_issuer: I,
     credential_resolver: R,
-    service_config_applier: A,
     clock: C,
     grant_registry: GrantRegistry,
 }
 
-impl<I, R, A, C> ServiceRequestHandler<I, R, A, C>
+impl<I, R, C> ServiceRequestHandler<I, R, C>
 where
     I: AuthGrantIssuer,
     R: ProtectedCredentialResolver + ProtectedCredentialMaterialResolver,
-    A: ServiceConfigApplier,
     C: UnixTimeMillisClock,
 {
     pub fn new(
         grant_issuer: I,
         credential_resolver: R,
-        service_config_applier: A,
         clock: C,
     ) -> Self {
         Self {
             grant_issuer,
             credential_resolver,
-            service_config_applier,
             clock,
             grant_registry: GrantRegistry::default(),
         }
@@ -171,12 +167,9 @@ where
                 self.grant_registry.remove_grants_for_session(&session_id);
                 Ok(ServiceEvent::AuthCancelled { session_id })
             }
-            ServiceRequest::ApplyFaceTemplate {
-                template_path,
-                camera_id,
-            } => self.handle_apply_face_template(template_path, camera_id),
-            ServiceRequest::ApplyControlSettings { patch } => {
-                self.handle_apply_control_settings(patch)
+            ServiceRequest::ReloadAuthConfig => {
+                self.grant_issuer.reload_auth_config()?;
+                Ok(ServiceEvent::AuthConfigReloaded)
             }
             ServiceRequest::HealthCheck => Ok(ServiceEvent::HealthOk),
         }
@@ -229,37 +222,6 @@ where
         }
     }
 
-    fn handle_apply_face_template(
-        &mut self,
-        template_path: PathBuf,
-        camera_id: String,
-    ) -> Result<ServiceEvent, ProtocolError> {
-        if template_path.as_os_str().is_empty() || camera_id.trim().is_empty() {
-            return Err(ProtocolError::InvalidMessage);
-        }
-        self.service_config_applier
-            .apply_face_template(&template_path, &camera_id)?;
-        self.grant_issuer.reload_auth_config()?;
-        Ok(ServiceEvent::FaceTemplateApplied { template_path })
-    }
-
-    fn handle_apply_control_settings(
-        &mut self,
-        patch: ControlSettingsPatch,
-    ) -> Result<ServiceEvent, ProtocolError> {
-        if !patch.has_updates() {
-            return Err(ProtocolError::InvalidMessage);
-        }
-        if !patch.has_valid_values() {
-            return Err(ProtocolError::InvalidMessage);
-        }
-        let should_reload_auth_config = patch.logon_face_match_threshold.is_some();
-        self.service_config_applier.apply_control_settings(&patch)?;
-        if should_reload_auth_config {
-            self.grant_issuer.reload_auth_config()?;
-        }
-        Ok(ServiceEvent::ControlSettingsApplied)
-    }
 }
 
 #[cfg(test)]
@@ -377,20 +339,6 @@ mod tests {
     }
 
     struct FixedCredentialResolver;
-    struct RecordingServiceConfigApplier {
-        applied_template_paths: Vec<PathBuf>,
-        applied_settings_patches: Vec<ControlSettingsPatch>,
-    }
-
-    impl RecordingServiceConfigApplier {
-        fn new() -> Self {
-            Self {
-                applied_template_paths: Vec::new(),
-                applied_settings_patches: Vec::new(),
-            }
-        }
-    }
-
     impl ProtectedCredentialResolver for FixedCredentialResolver {
         fn resolve_protected_credential(
             &mut self,
@@ -418,39 +366,18 @@ mod tests {
         }
     }
 
-    impl ServiceConfigApplier for RecordingServiceConfigApplier {
-        fn apply_face_template(
-            &mut self,
-            template_path: &Path,
-            _camera_id: &str,
-        ) -> Result<(), ProtocolError> {
-            self.applied_template_paths
-                .push(template_path.to_path_buf());
-            Ok(())
-        }
-
-        fn apply_control_settings(
-            &mut self,
-            patch: &ControlSettingsPatch,
-        ) -> Result<(), ProtocolError> {
-            self.applied_settings_patches.push(patch.clone());
-            Ok(())
-        }
-    }
-
     #[test]
     fn handler_issues_grant_then_redeems_protected_credential_once() -> Result<(), ProtocolError> {
         let mut handler = ServiceRequestHandler::new(
             SuccessfulGrantIssuer,
             FixedCredentialResolver,
-            RecordingServiceConfigApplier::new(),
             FixedClock { now_unix_ms: 1_000 },
         );
 
         let issued = handler.handle_request(ServiceRequest::WakeAuth {
             session_id: SessionId("session-1".to_owned()),
             source: AuthSource::LocalCamera,
-            trigger_source: AuthTriggerSource::InputTriggered,
+            trigger_source: AuthTriggerSource::CredentialScreenEntered,
         })?;
         let ready = handler.handle_request(ServiceRequest::FetchCredential {
             session_id: SessionId("session-1".to_owned()),
@@ -483,14 +410,13 @@ mod tests {
         let mut handler = ServiceRequestHandler::new(
             SuccessfulGrantIssuer,
             FixedCredentialResolver,
-            RecordingServiceConfigApplier::new(),
             FixedClock { now_unix_ms: 1_000 },
         );
 
         handler.handle_request(ServiceRequest::WakeAuth {
             session_id: SessionId("session-1".to_owned()),
             source: AuthSource::LocalCamera,
-            trigger_source: AuthTriggerSource::InputTriggered,
+            trigger_source: AuthTriggerSource::CredentialScreenEntered,
         })?;
         let result = handler.handle_request(ServiceRequest::FetchCredential {
             session_id: SessionId("other-session".to_owned()),
@@ -507,14 +433,13 @@ mod tests {
         let mut handler = ServiceRequestHandler::new(
             SuccessfulGrantIssuer,
             FixedCredentialResolver,
-            RecordingServiceConfigApplier::new(),
             FixedClock { now_unix_ms: 1_000 },
         );
 
         handler.handle_request(ServiceRequest::WakeAuth {
             session_id: SessionId("session-1".to_owned()),
             source: AuthSource::LocalCamera,
-            trigger_source: AuthTriggerSource::InputTriggered,
+            trigger_source: AuthTriggerSource::CredentialScreenEntered,
         })?;
         let ready = handler.handle_request(ServiceRequest::FetchCredentialMaterial {
             session_id: SessionId("session-1".to_owned()),
@@ -540,14 +465,13 @@ mod tests {
         let mut handler = ServiceRequestHandler::new(
             FailingGrantIssuer,
             FixedCredentialResolver,
-            RecordingServiceConfigApplier::new(),
             FixedClock { now_unix_ms: 1_000 },
         );
 
         let event = handler.handle_request(ServiceRequest::WakeAuth {
             session_id: SessionId("session-1".to_owned()),
             source: AuthSource::LocalCamera,
-            trigger_source: AuthTriggerSource::InputTriggered,
+            trigger_source: AuthTriggerSource::CredentialScreenEntered,
         })?;
 
         assert_eq!(
@@ -565,7 +489,6 @@ mod tests {
         let mut handler = ServiceRequestHandler::new(
             StartedThenSuccessfulGrantIssuer,
             FixedCredentialResolver,
-            RecordingServiceConfigApplier::new(),
             FixedClock { now_unix_ms: 1_000 },
         );
         let session_id = SessionId("session-1".to_owned());
@@ -573,7 +496,7 @@ mod tests {
         let started = handler.handle_request(ServiceRequest::WakeAuth {
             session_id: session_id.clone(),
             source: AuthSource::LocalCamera,
-            trigger_source: AuthTriggerSource::InputTriggered,
+            trigger_source: AuthTriggerSource::CredentialScreenEntered,
         })?;
         let succeeded = handler.handle_request(ServiceRequest::FetchAuthResult {
             session_id: session_id.clone(),
@@ -595,14 +518,13 @@ mod tests {
         let mut handler = ServiceRequestHandler::new(
             SuccessfulGrantIssuer,
             FixedCredentialResolver,
-            RecordingServiceConfigApplier::new(),
             FixedClock { now_unix_ms: 1_000 },
         );
 
         handler.handle_request(ServiceRequest::WakeAuth {
             session_id: SessionId("session-1".to_owned()),
             source: AuthSource::LocalCamera,
-            trigger_source: AuthTriggerSource::InputTriggered,
+            trigger_source: AuthTriggerSource::CredentialScreenEntered,
         })?;
         let cancel_event = handler.handle_request(ServiceRequest::Cancel {
             session_id: SessionId("session-1".to_owned()),
@@ -624,103 +546,17 @@ mod tests {
     }
 
     #[test]
-    fn handler_applies_face_template_via_config_applier() -> Result<(), ProtocolError> {
-        let mut handler = ServiceRequestHandler::new(
-            SuccessfulGrantIssuer,
-            FixedCredentialResolver,
-            RecordingServiceConfigApplier::new(),
-            FixedClock { now_unix_ms: 1_000 },
-        );
-        let template_path = PathBuf::from(r"C:\ProgramData\WinFaceUnlock\selected_templates.json");
-
-        let event = handler.handle_request(ServiceRequest::ApplyFaceTemplate {
-            template_path: template_path.clone(),
-            camera_id: "opencv-index:1".to_owned(),
-        })?;
-
-        assert_eq!(event, ServiceEvent::FaceTemplateApplied { template_path });
-        Ok(())
-    }
-
-    #[test]
-    fn handler_reloads_auth_config_after_applying_face_template() -> Result<(), ProtocolError> {
+    fn handler_reloads_auth_config() -> Result<(), ProtocolError> {
         let mut handler = ServiceRequestHandler::new(
             ReloadRecordingGrantIssuer { reload_count: 0 },
             FixedCredentialResolver,
-            RecordingServiceConfigApplier::new(),
             FixedClock { now_unix_ms: 1_000 },
         );
-        let template_path = PathBuf::from(r"C:\ProgramData\WinFaceUnlock\selected_templates.json");
 
-        let event = handler.handle_request(ServiceRequest::ApplyFaceTemplate {
-            template_path: template_path.clone(),
-            camera_id: "opencv-index:0".to_owned(),
-        })?;
+        let event = handler.handle_request(ServiceRequest::ReloadAuthConfig)?;
 
-        assert_eq!(event, ServiceEvent::FaceTemplateApplied { template_path });
+        assert_eq!(event, ServiceEvent::AuthConfigReloaded);
         assert_eq!(handler.grant_issuer.reload_count, 1);
         Ok(())
-    }
-
-    #[test]
-    fn handler_applies_control_settings_via_config_applier() -> Result<(), ProtocolError> {
-        let mut handler = ServiceRequestHandler::new(
-            SuccessfulGrantIssuer,
-            FixedCredentialResolver,
-            RecordingServiceConfigApplier::new(),
-            FixedClock { now_unix_ms: 1_000 },
-        );
-        let patch = ControlSettingsPatch {
-            presence_lock_enabled: Some(true),
-            logon_wake_mode: None,
-            logon_face_match_threshold: None,
-        };
-
-        let event = handler.handle_request(ServiceRequest::ApplyControlSettings { patch })?;
-
-        assert_eq!(event, ServiceEvent::ControlSettingsApplied);
-        Ok(())
-    }
-
-    #[test]
-    fn handler_reloads_auth_config_after_applying_logon_face_threshold() -> Result<(), ProtocolError>
-    {
-        let mut handler = ServiceRequestHandler::new(
-            ReloadRecordingGrantIssuer { reload_count: 0 },
-            FixedCredentialResolver,
-            RecordingServiceConfigApplier::new(),
-            FixedClock { now_unix_ms: 1_000 },
-        );
-        let patch = ControlSettingsPatch {
-            presence_lock_enabled: None,
-            logon_wake_mode: None,
-            logon_face_match_threshold: Some(0.50),
-        };
-
-        let event = handler.handle_request(ServiceRequest::ApplyControlSettings { patch })?;
-
-        assert_eq!(event, ServiceEvent::ControlSettingsApplied);
-        assert_eq!(handler.grant_issuer.reload_count, 1);
-        Ok(())
-    }
-
-    #[test]
-    fn handler_rejects_invalid_logon_face_threshold() {
-        let mut handler = ServiceRequestHandler::new(
-            ReloadRecordingGrantIssuer { reload_count: 0 },
-            FixedCredentialResolver,
-            RecordingServiceConfigApplier::new(),
-            FixedClock { now_unix_ms: 1_000 },
-        );
-        let patch = ControlSettingsPatch {
-            presence_lock_enabled: None,
-            logon_wake_mode: None,
-            logon_face_match_threshold: Some(1.50),
-        };
-
-        let result = handler.handle_request(ServiceRequest::ApplyControlSettings { patch });
-
-        assert_eq!(result, Err(ProtocolError::InvalidMessage));
-        assert_eq!(handler.grant_issuer.reload_count, 0);
     }
 }

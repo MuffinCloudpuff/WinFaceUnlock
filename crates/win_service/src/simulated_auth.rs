@@ -1,4 +1,4 @@
-use common_protocol::{
+﻿use common_protocol::{
     AuthGrant, AuthScore, AuthSource, AuthTriggerSource, DEFAULT_GRANT_TTL, GrantId, Nonce,
     SessionId, UserId,
 };
@@ -57,7 +57,7 @@ mod tests {
         let issued_result = issuer.issue_auth_grant(
             &SessionId("session-1".to_owned()),
             AuthSource::ManualTest,
-            AuthTriggerSource::InputTriggered,
+            AuthTriggerSource::CredentialScreenEntered,
             1_000,
         );
         assert!(matches!(issued_result, AuthGrantIssueResult::Issued(_)));

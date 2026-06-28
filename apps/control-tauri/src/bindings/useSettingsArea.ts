@@ -10,7 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { controlTransport, isControlRuntimeAvailable } from './controlTransport';
 import { subscribeFaceTemplatesChanged } from './faceTemplateEvents';
 
-export type TriggerMode = 'keyboard' | 'silent' | 'hybrid';
+export type TriggerMode = 'keyboard' | 'silent';
 
 export interface EnrolledFaceViewModel {
   id: string;
@@ -311,24 +311,22 @@ function faceAvatarPreviewToImageSrc(template: FaceTemplateSummary): string | un
 }
 
 function logonWakeModeToTriggerMode(mode?: LogonWakeMode): TriggerMode | undefined {
-  if (mode === 'input_triggered') {
+  if (mode === 'triggered_recognition' || mode === 'input_triggered') {
     return 'keyboard';
   }
-  if (mode === 'background_policy') {
+  if (
+    mode === 'background_silent_recognition' ||
+    mode === 'background_policy' ||
+    mode === 'hybrid'
+  ) {
     return 'silent';
-  }
-  if (mode === 'hybrid') {
-    return 'hybrid';
   }
   return undefined;
 }
 
 function triggerModeToLogonWakeMode(mode: TriggerMode): LogonWakeMode {
   if (mode === 'silent') {
-    return 'background_policy';
+    return 'background_silent_recognition';
   }
-  if (mode === 'hybrid') {
-    return 'hybrid';
-  }
-  return 'input_triggered';
+  return 'triggered_recognition';
 }

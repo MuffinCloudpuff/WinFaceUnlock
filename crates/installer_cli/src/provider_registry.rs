@@ -7,11 +7,11 @@ use std::{
 };
 
 use windows_provider::{
-    COM_CLSID_REGISTRY_PATH, COM_INPROC_SERVER_REGISTRY_PATH, LOGON_WAKE_MODE_INPUT_TRIGGERED,
-    PROVIDER_CLSID_BRACED, PROVIDER_CLSID_REGISTRY_PATH, PROVIDER_ROOT_REGISTRY_PATH,
-    REG_VALUE_AUTO_WAKE_ON_ADVISE, REG_VALUE_LOGON_WAKE_MODE, REG_VALUE_TILE_VISIBILITY,
-    REG_VALUE_WAKE_AUTH_SOURCE, TILE_VISIBILITY_HIDDEN_UNTIL_READY, WAKE_AUTH_SOURCE_LOCAL_CAMERA,
-    WINDOWS_PROVIDER_NAME,
+    COM_CLSID_REGISTRY_PATH, COM_INPROC_SERVER_REGISTRY_PATH,
+    LOGON_WAKE_MODE_TRIGGERED_RECOGNITION, PROVIDER_CLSID_BRACED, PROVIDER_CLSID_REGISTRY_PATH,
+    PROVIDER_ROOT_REGISTRY_PATH, REG_VALUE_AUTO_WAKE_ON_ADVISE, REG_VALUE_LOGON_WAKE_MODE,
+    REG_VALUE_TILE_VISIBILITY, REG_VALUE_WAKE_AUTH_SOURCE, TILE_VISIBILITY_HIDDEN_UNTIL_READY,
+    WAKE_AUTH_SOURCE_LOCAL_CAMERA, WINDOWS_PROVIDER_NAME,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,6 +26,7 @@ pub struct ProviderInstallPlan {
     pub tile_visibility: &'static str,
     pub auto_wake_on_advise: bool,
     pub wake_auth_source: &'static str,
+    pub logon_wake_mode: Option<&'static str>,
 }
 
 impl ProviderInstallPlan {
@@ -41,6 +42,7 @@ impl ProviderInstallPlan {
             tile_visibility: TILE_VISIBILITY_HIDDEN_UNTIL_READY,
             auto_wake_on_advise: true,
             wake_auth_source: WAKE_AUTH_SOURCE_LOCAL_CAMERA,
+            logon_wake_mode: Some(LOGON_WAKE_MODE_TRIGGERED_RECOGNITION),
         }
     }
 
@@ -51,6 +53,7 @@ impl ProviderInstallPlan {
 
     pub fn with_auto_wake_on_advise(mut self, auto_wake_on_advise: bool) -> Self {
         self.auto_wake_on_advise = auto_wake_on_advise;
+        self.logon_wake_mode = auto_wake_on_advise.then_some(LOGON_WAKE_MODE_TRIGGERED_RECOGNITION);
         self
     }
 
@@ -125,11 +128,15 @@ impl ProviderRegistry {
             REG_VALUE_WAKE_AUTH_SOURCE,
             plan.wake_auth_source,
         )?;
-        registry::set_string_value(
-            plan.project_registry_path,
-            REG_VALUE_LOGON_WAKE_MODE,
-            LOGON_WAKE_MODE_INPUT_TRIGGERED,
-        )?;
+        if let Some(logon_wake_mode) = plan.logon_wake_mode {
+            registry::set_string_value(
+                plan.project_registry_path,
+                REG_VALUE_LOGON_WAKE_MODE,
+                logon_wake_mode,
+            )?;
+        } else {
+            registry::delete_value(plan.project_registry_path, REG_VALUE_LOGON_WAKE_MODE)?;
+        }
         Ok(())
     }
 
@@ -226,7 +233,8 @@ mod registry {
         Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS},
         System::Registry::{
             HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
-            RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegSetValueExW,
+            RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegOpenKeyExW,
+            RegSetValueExW,
         },
     };
 
@@ -270,6 +278,17 @@ mod registry {
             Ok(())
         } else {
             Err(registry_error("delete tree", path, status))
+        }
+    }
+
+    pub fn delete_value(path: &str, value_name: &str) -> Result<(), ProviderRegistryError> {
+        let key = create_key(path)?;
+        let name = to_wide_null(value_name);
+        let status = unsafe { RegDeleteValueW(key.raw, name.as_ptr()) };
+        if status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND {
+            Ok(())
+        } else {
+            Err(registry_error("delete value", path, status))
         }
     }
 
@@ -360,6 +379,10 @@ mod registry {
         Err(unsupported(path, "delete tree"))
     }
 
+    pub fn delete_value(path: &str, _value_name: &str) -> Result<(), ProviderRegistryError> {
+        Err(unsupported(path, "delete value"))
+    }
+
     pub fn key_exists(_path: &str) -> bool {
         false
     }
@@ -386,6 +409,10 @@ mod tests {
         assert_eq!(plan.provider_clsid, PROVIDER_CLSID_BRACED);
         assert_eq!(plan.tile_visibility, TILE_VISIBILITY_HIDDEN_UNTIL_READY);
         assert!(plan.auto_wake_on_advise);
+        assert_eq!(
+            plan.logon_wake_mode,
+            Some(LOGON_WAKE_MODE_TRIGGERED_RECOGNITION)
+        );
         assert!(
             plan.credential_provider_registry_path
                 .contains(PROVIDER_CLSID_BRACED)
@@ -394,6 +421,16 @@ mod tests {
             plan.com_inproc_server_registry_path
                 .contains(PROVIDER_CLSID_BRACED)
         );
+    }
+
+    #[test]
+    fn disabling_auto_wake_clears_logon_wake_mode() {
+        let plan =
+            ProviderInstallPlan::new(PathBuf::from(r"C:\WinFaceUnlock\windows_provider.dll"))
+                .with_auto_wake_on_advise(false);
+
+        assert!(!plan.auto_wake_on_advise);
+        assert_eq!(plan.logon_wake_mode, None);
     }
 
     #[test]

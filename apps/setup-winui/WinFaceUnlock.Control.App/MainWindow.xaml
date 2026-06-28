@@ -561,11 +561,9 @@
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="*" />
-                                            <ColumnDefinition Width="*" />
                                         </Grid.ColumnDefinitions>
-                                        <Button Content="敲击键盘" BorderThickness="0" Background="Transparent" Foreground="#64748B" />
+                                        <Button Content="触发识别" BorderThickness="0" Background="#007ACC" Foreground="White" CornerRadius="8" />
                                         <Button Grid.Column="1" Content="后台静默" BorderThickness="0" Background="Transparent" Foreground="#64748B" />
-                                        <Button Grid.Column="2" Content="智能混合" BorderThickness="0" Background="#007ACC" Foreground="White" CornerRadius="8" />
                                     </Grid>
                                 </StackPanel>
                             </StackPanel>

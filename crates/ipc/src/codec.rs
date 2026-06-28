@@ -1,4 +1,4 @@
-use common_protocol::{ProtocolError, ServiceEvent, ServiceRequest};
+﻿use common_protocol::{ProtocolError, ServiceEvent, ServiceRequest};
 use serde::{Serialize, de::DeserializeOwned};
 
 const MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -57,7 +57,7 @@ mod tests {
         let request = ServiceRequest::WakeAuth {
             session_id: SessionId("session-1".to_owned()),
             source: AuthSource::LocalCamera,
-            trigger_source: AuthTriggerSource::InputTriggered,
+            trigger_source: AuthTriggerSource::CredentialScreenEntered,
         };
 
         let frame = encode_request(&request)?;

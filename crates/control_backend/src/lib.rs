@@ -8,6 +8,9 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use std::os::windows::process::CommandExt;
+
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use common_protocol::{
@@ -158,7 +161,7 @@ where
             .send_service_request(ServiceRequest::WakeAuth {
                 session_id: session_id.clone(),
                 source: AuthSource::LocalCamera,
-                trigger_source: AuthTriggerSource::InputTriggered,
+                trigger_source: AuthTriggerSource::CredentialScreenEntered,
             })
             .map_err(auth_wake_protocol_error)?;
 
@@ -246,21 +249,28 @@ where
         template_path: &Path,
         camera_id: &str,
     ) -> Result<(), ControlBackendError> {
+        let install_dir = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .ok_or_else(|| ControlBackendError::face_enrollment_failed("Failed to determine install directory"))?;
+
+        let template_store = control_status::WindowsFaceTemplateStatusStore::from_environment_or_default();
+        template_store
+            .apply_local_camera_auth_config(template_path, camera_id, &install_dir)
+            .map_err(|e| ControlBackendError::face_enrollment_failed(format!("{:?}", e)))?;
+
         let event = self
             .service_client
-            .send_service_request(ServiceRequest::ApplyFaceTemplate {
-                template_path: template_path.to_path_buf(),
-                camera_id: camera_id.to_owned(),
-            })
+            .send_service_request(ServiceRequest::ReloadAuthConfig)
             .map_err(face_template_apply_protocol_error)?;
 
         match event {
-            ServiceEvent::FaceTemplateApplied { .. } => Ok(()),
+            ServiceEvent::AuthConfigReloaded => Ok(()),
             ServiceEvent::RequestRejected { reason } => {
                 Err(face_template_apply_protocol_error(reason))
             }
             _ => Err(ControlBackendError::face_enrollment_failed(
-                "service returned an invalid face template apply response",
+                "service returned an invalid auth config reload response",
             )),
         }
     }
@@ -301,20 +311,32 @@ where
         &self,
         patch: &ControlSettingsPatch,
     ) -> Result<ControlSettingsSnapshot, ControlBackendError> {
-        let event = self
-            .service_client
-            .send_service_request(ServiceRequest::ApplyControlSettings {
-                patch: patch.clone(),
-            })
-            .map_err(settings_update_protocol_error)?;
-
-        match event {
-            ServiceEvent::ControlSettingsApplied => self.load_settings(),
-            ServiceEvent::RequestRejected { reason } => Err(settings_update_protocol_error(reason)),
-            _ => Err(ControlBackendError::settings_persistence_failed(
-                "service returned an invalid settings update response",
-            )),
+        if !patch.has_updates() || !patch.has_valid_values() {
+            return Err(ControlBackendError::settings_persistence_failed("Invalid patch"));
         }
+
+        let should_reload_auth_config = patch.logon_face_match_threshold.is_some();
+
+        self.settings_reader
+            .update_settings(patch)
+            .map_err(ControlBackendError::status_reader_error)?;
+
+        if should_reload_auth_config {
+            let event = self
+                .service_client
+                .send_service_request(ServiceRequest::ReloadAuthConfig)
+                .map_err(settings_update_protocol_error)?;
+
+            match event {
+                ServiceEvent::AuthConfigReloaded => {}
+                ServiceEvent::RequestRejected { reason } => return Err(settings_update_protocol_error(reason)),
+                _ => return Err(ControlBackendError::settings_persistence_failed(
+                    "service returned an invalid auth config reload response",
+                )),
+            }
+        }
+
+        self.load_settings()
     }
 }
 
@@ -638,6 +660,7 @@ where
         }
 
         let mut command = Command::new(&self.diagnostics_cli_path);
+        command.creation_flags(CREATE_NO_WINDOW);
         if let Some(parent) = self.diagnostics_cli_path.parent() {
             command.current_dir(parent);
         }
@@ -740,6 +763,7 @@ where
         }
 
         let mut command = Command::new(&self.diagnostics_cli_path);
+        command.creation_flags(CREATE_NO_WINDOW);
         if let Some(parent) = self.diagnostics_cli_path.parent() {
             command.current_dir(parent);
         }
@@ -2566,7 +2590,7 @@ mod tests {
         RecordingSettingsStore {
             current: Rc::new(RefCell::new(Ok(ControlSettingsSnapshot {
                 presence_lock_enabled: true,
-                logon_wake_mode: Some(LogonWakeMode::InputTriggered),
+                logon_wake_mode: Some(LogonWakeMode::TriggeredRecognition),
                 logon_face_match_threshold: 0.75,
             }))),
             last_patch: Rc::new(RefCell::new(None)),
@@ -3348,7 +3372,7 @@ mod tests {
         assert!(decoded_settings.presence_lock_enabled);
         assert_eq!(
             decoded_settings.logon_wake_mode,
-            Some(LogonWakeMode::InputTriggered)
+            Some(LogonWakeMode::TriggeredRecognition)
         );
         assert_eq!(decoded_settings.logon_face_match_threshold, 0.75);
         Ok(())
@@ -3879,9 +3903,7 @@ mod tests {
     fn service_ipc_template_applier_sends_apply_face_template_request()
     -> Result<(), Box<dyn std::error::Error>> {
         let service_client =
-            face_auth_service_client_fixture(vec![Ok(ServiceEvent::FaceTemplateApplied {
-                template_path: PathBuf::from(r"C:\ProgramData\WinFaceUnlock\selected.json"),
-            })]);
+            face_auth_service_client_fixture(vec![Ok(ServiceEvent::AuthConfigReloaded)]);
         let requests = service_client.requests.clone();
         let applier = ServiceIpcFaceEnrollmentTemplateApplier::new(service_client);
         let template_path = PathBuf::from(r"C:\ProgramData\WinFaceUnlock\selected.json");
@@ -3891,10 +3913,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             requests.borrow().as_slice(),
-            &[ServiceRequest::ApplyFaceTemplate {
-                template_path,
-                camera_id: "opencv-index:1".to_owned(),
-            }]
+            &[ServiceRequest::ReloadAuthConfig]
         );
         Ok(())
     }
@@ -4068,7 +4087,7 @@ mod tests {
             &requests.borrow()[0],
             ServiceRequest::WakeAuth {
                 source: AuthSource::LocalCamera,
-                trigger_source: AuthTriggerSource::InputTriggered,
+                trigger_source: AuthTriggerSource::CredentialScreenEntered,
                 ..
             }
         ));
@@ -4152,7 +4171,8 @@ mod tests {
     }
 
     #[test]
-    fn update_settings_accepts_input_triggered_logon_wake_mode() -> Result<(), serde_json::Error> {
+    fn update_settings_accepts_triggered_recognition_logon_wake_mode()
+    -> Result<(), serde_json::Error> {
         let settings_store = settings_store_fixture();
         let last_patch = settings_store.last_patch.clone();
         let handler = ControlHandler::new(
@@ -4164,7 +4184,7 @@ mod tests {
         );
 
         let response = handler.handle_request(update_settings_request(json!({
-            "logon_wake_mode": "input_triggered",
+            "logon_wake_mode": "triggered_recognition",
         })));
 
         assert_eq!(response.operation_status, ControlOperationStatus::Completed);
@@ -4172,13 +4192,13 @@ mod tests {
             serde_json::from_value(response.safe_details)?;
         assert_eq!(
             decoded_settings.logon_wake_mode,
-            Some(LogonWakeMode::InputTriggered)
+            Some(LogonWakeMode::TriggeredRecognition)
         );
         assert_eq!(
             last_patch.borrow().as_ref(),
             Some(&ControlSettingsPatch {
                 presence_lock_enabled: None,
-                logon_wake_mode: Some(LogonWakeMode::InputTriggered),
+                logon_wake_mode: Some(LogonWakeMode::TriggeredRecognition),
                 logon_face_match_threshold: None,
             })
         );

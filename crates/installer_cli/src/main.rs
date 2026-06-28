@@ -9,6 +9,7 @@ mod setup_install;
 mod setup_payload;
 mod setup_preflight;
 mod setup_presence;
+mod user_startup;
 
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();

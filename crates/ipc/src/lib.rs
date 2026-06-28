@@ -17,8 +17,8 @@ pub use grant_registry::GrantRegistry;
 pub use named_pipe::{NamedPipeClient, NamedPipeServer, PipeSecurityDescriptor};
 pub use service_handler::{
     AuthGrantIssueResult, AuthGrantIssuer, ProtectedCredentialMaterialResolver,
-    ProtectedCredentialResolver, ServiceConfigApplier, ServiceRequestHandler,
-    SystemUnixTimeMillisClock, UnixTimeMillisClock,
+    ProtectedCredentialResolver, ServiceRequestHandler, SystemUnixTimeMillisClock,
+    UnixTimeMillisClock,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

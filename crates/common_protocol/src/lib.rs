@@ -1,6 +1,5 @@
-use std::{fmt, hash::Hash, path::PathBuf, time::Duration};
+use std::{fmt, hash::Hash, time::Duration};
 
-use control_protocol::ControlSettingsPatch;
 use serde::{Deserialize, Serialize};
 
 pub const SERVICE_NAME: &str = "WinFaceUnlockService";
@@ -35,9 +34,12 @@ pub enum AuthSource {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AuthTriggerSource {
-    InputTriggered,
-    BackgroundPolicy,
+    #[serde(alias = "InputTriggered", alias = "input-triggered")]
+    CredentialScreenEntered,
+    #[serde(alias = "BackgroundPolicy", alias = "background-policy")]
+    BackgroundSilentMonitor,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -140,13 +142,7 @@ pub enum ServiceRequest {
     Cancel {
         session_id: SessionId,
     },
-    ApplyFaceTemplate {
-        template_path: PathBuf,
-        camera_id: String,
-    },
-    ApplyControlSettings {
-        patch: ControlSettingsPatch,
-    },
+    ReloadAuthConfig,
     HealthCheck,
 }
 
@@ -173,10 +169,7 @@ pub enum ServiceEvent {
     AuthCancelled {
         session_id: SessionId,
     },
-    FaceTemplateApplied {
-        template_path: PathBuf,
-    },
-    ControlSettingsApplied,
+    AuthConfigReloaded,
     RequestRejected {
         reason: ProtocolError,
     },

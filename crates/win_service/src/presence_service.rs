@@ -522,21 +522,14 @@ fn face_presence_policy_config(presence_config: &ServicePresenceConfig) -> Prese
 }
 
 fn person_presence_policy_config(presence_config: &ServicePresenceConfig) -> PresencePolicyConfig {
-    let stable_interval_ms = presence_detector_interval_ms(presence_config.presence_detector_fps);
     let suspect_interval_ms =
         presence_detector_interval_ms(presence_config.presence_person_suspect_fps);
     PresencePolicyConfig {
-        presence_stable_initial_interval_ms: stable_interval_ms,
-        presence_stable_second_interval_ms: stable_interval_ms,
-        presence_stable_max_interval_ms: stable_interval_ms,
         presence_no_face_suspect_interval_ms: suspect_interval_ms,
         presence_unknown_face_suspect_interval_ms: suspect_interval_ms,
         presence_owner_match_threshold: presence_config.presence_owner_match_threshold,
-        presence_person_stable_interval_ms: stable_interval_ms,
         presence_person_suspect_interval_ms: suspect_interval_ms,
         presence_person_absent_required_frames: presence_config.presence_absent_required_frames,
-        presence_person_boundary_margin_ratio: presence_config.presence_boundary_margin_ratio,
-        presence_person_movement_delta_ratio: presence_config.presence_movement_delta_ratio,
         ..PresencePolicyConfig::default()
     }
 }

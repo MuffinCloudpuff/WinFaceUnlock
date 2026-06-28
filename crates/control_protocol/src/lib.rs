@@ -216,9 +216,14 @@ impl ControlSettingsPatch {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogonWakeMode {
-    InputTriggered,
-    BackgroundPolicy,
-    Hybrid,
+    #[serde(alias = "input_triggered", alias = "input-triggered")]
+    TriggeredRecognition,
+    #[serde(
+        alias = "background_policy",
+        alias = "background-policy",
+        alias = "hybrid"
+    )]
+    BackgroundSilentRecognition,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
@@ -804,7 +809,7 @@ mod tests {
             operation: ControlOperation::UpdateSettings,
             payload: json!(ControlSettingsPatch {
                 presence_lock_enabled: Some(true),
-                logon_wake_mode: Some(LogonWakeMode::InputTriggered),
+                logon_wake_mode: Some(LogonWakeMode::TriggeredRecognition),
                 logon_face_match_threshold: Some(0.55),
             }),
         };
@@ -812,7 +817,7 @@ mod tests {
         let json_text = serde_json::to_string(&request)?;
         assert!(json_text.contains("\"operation\":\"update_settings\""));
         assert!(json_text.contains("\"presence_lock_enabled\":true"));
-        assert!(json_text.contains("\"logon_wake_mode\":\"input_triggered\""));
+        assert!(json_text.contains("\"logon_wake_mode\":\"triggered_recognition\""));
         assert!(json_text.contains("\"logon_face_match_threshold\":0.55"));
 
         let decoded: ControlRequestEnvelope = serde_json::from_str(&json_text)?;
@@ -834,7 +839,7 @@ mod tests {
         assert!(
             ControlSettingsPatch {
                 presence_lock_enabled: None,
-                logon_wake_mode: Some(LogonWakeMode::InputTriggered),
+                logon_wake_mode: Some(LogonWakeMode::TriggeredRecognition),
                 logon_face_match_threshold: None,
             }
             .has_updates()

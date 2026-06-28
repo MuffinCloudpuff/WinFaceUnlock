@@ -13,6 +13,7 @@ use crate::{
     service_registry::{
         ServiceAuthRegistry, ServiceAuthRegistryConfig, ServicePresenceRegistryPatch,
     },
+    user_startup::UserStartupPlan,
 };
 use windows_provider::{
     TILE_VISIBILITY_HIDDEN_UNTIL_READY, TILE_VISIBILITY_VISIBLE, WAKE_AUTH_SOURCE_LOCAL_CAMERA,
@@ -511,12 +512,15 @@ fn parse_full_install_plan(
     let resource_plan = ResourceDirectoryPlan::from_root_dir(
         install_root_from_service_binary_path(&service_binary_path)?,
     );
+    let tray_binary_path =
+        install_root_from_service_binary_path(&service_binary_path)?.join("control_tray.exe");
 
     Ok(FullInstallPlan {
         service_plan: ServiceInstallPlan::new(service_binary_path),
         provider_plan,
         resource_plan,
         auth_config,
+        user_startup_plan: UserStartupPlan::new(tray_binary_path),
         start_service: has_flag(args, "--start") || has_flag(args, "--start-service"),
     })
 }
@@ -532,6 +536,7 @@ fn parse_full_uninstall_plan(args: &[String]) -> Result<FullUninstallPlan, Insta
         resource_plan: ResourceDirectoryPlan::from_environment_or_default(),
         stop_service_first: !has_flag(args, "--no-stop"),
         delete_data: !has_flag(args, "--preserve-data"),
+        remove_user_startup: !has_flag(args, "--keep-user-startup"),
     })
 }
 
@@ -908,6 +913,10 @@ fn print_full_install_plan(label: &str, plan: &FullInstallPlan) {
     println!("{label}");
     print_resource_directory_plan(&plan.resource_plan);
     print_install_plan("service plan", &plan.service_plan);
+    println!(
+        "user_tray_startup: {}",
+        plan.user_startup_plan.tray_binary_path.display()
+    );
     if let Some(config) = &plan.auth_config {
         print_service_auth_config("service auth config", config);
     } else {
@@ -922,6 +931,7 @@ fn print_full_uninstall_plan(label: &str, plan: &FullUninstallPlan) {
     print_resource_directory_plan(&plan.resource_plan);
     println!("stop_service_first: {}", plan.stop_service_first);
     println!("delete_data: {}", plan.delete_data);
+    println!("remove_user_startup: {}", plan.remove_user_startup);
 }
 
 fn print_resource_directory_plan(plan: &ResourceDirectoryPlan) {
@@ -967,6 +977,10 @@ fn print_provider_install_plan(label: &str, plan: &ProviderInstallPlan) {
     println!("tile_visibility: {}", plan.tile_visibility);
     println!("auto_wake_on_advise: {}", plan.auto_wake_on_advise);
     println!("wake_auth_source: {}", plan.wake_auth_source);
+    println!(
+        "logon_wake_mode: {}",
+        plan.logon_wake_mode.unwrap_or("<disabled>")
+    );
 }
 
 fn print_service_auth_config(label: &str, config: &ServiceAuthRegistryConfig) {

@@ -28,7 +28,8 @@ use crate::{
     provider_state::{ProviderState, WakeRequestStart},
 };
 
-const AUTOMATIC_WAKE_ATTEMPT_LIMIT: u32 = 3;
+pub(crate) const AUTOMATIC_WAKE_ATTEMPT_LIMIT: u32 = 3;
+const BACKGROUND_SILENT_WAKE_ATTEMPT_LIMIT: u32 = u32::MAX;
 const AUTOMATIC_WAKE_RETRY_DELAY_MS: u64 = 600;
 const ADVISE_INPUT_WAIT_TIMEOUT_MS: u64 = 10 * 60 * 1_000;
 const ADVISE_INPUT_POLL_INTERVAL_MS: u64 = 250;
@@ -39,6 +40,12 @@ const TRANSPORT_WAKE_RETRY_DELAY_MS: u64 = 1_000;
 pub(crate) enum WakeStartPolicy {
     Immediate,
     WaitForUserInputAfterAdvise,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WakeAttemptPolicy {
+    Finite { attempt_limit: u32 },
+    WhileAdvised,
 }
 
 #[implement(ICredentialProvider)]
@@ -88,34 +95,24 @@ impl ICredentialProvider_Impl for WinFaceUnlockProvider_Impl {
         write_provider_event("Provider.Advise");
         self.state.set_events(pcpe.cloned(), upadvisecontext);
         match ProviderRuntimeConfig::from_registry_or_default().logon_wake_mode {
-            Some(ProviderLogonWakeMode::InputTriggered) => {
+            Some(ProviderLogonWakeMode::TriggeredRecognition) => {
                 request_wake_in_background(
                     self.state.clone(),
-                    "Provider.InputTriggeredWake",
+                    "Provider.TriggeredRecognitionWake",
                     WakeStartPolicy::WaitForUserInputAfterAdvise,
-                    AuthTriggerSource::InputTriggered,
+                    WakeAttemptPolicy::Finite {
+                        attempt_limit: AUTOMATIC_WAKE_ATTEMPT_LIMIT,
+                    },
+                    AuthTriggerSource::CredentialScreenEntered,
                 );
             }
-            Some(ProviderLogonWakeMode::BackgroundPolicy) => {
+            Some(ProviderLogonWakeMode::BackgroundSilentRecognition) => {
                 request_wake_in_background(
                     self.state.clone(),
-                    "Provider.BackgroundPolicyWake",
+                    "Provider.BackgroundSilentRecognitionWake",
                     WakeStartPolicy::Immediate,
-                    AuthTriggerSource::BackgroundPolicy,
-                );
-            }
-            Some(ProviderLogonWakeMode::Hybrid) => {
-                request_wake_in_background(
-                    self.state.clone(),
-                    "Provider.BackgroundPolicyWake",
-                    WakeStartPolicy::Immediate,
-                    AuthTriggerSource::BackgroundPolicy,
-                );
-                request_wake_in_background(
-                    self.state.clone(),
-                    "Provider.InputTriggeredWake",
-                    WakeStartPolicy::WaitForUserInputAfterAdvise,
-                    AuthTriggerSource::InputTriggered,
+                    WakeAttemptPolicy::WhileAdvised,
+                    AuthTriggerSource::BackgroundSilentMonitor,
                 );
             }
             None => {}
@@ -184,9 +181,14 @@ pub(crate) fn request_wake_in_background(
     state: Arc<ProviderState>,
     trigger_name: &'static str,
     start_policy: WakeStartPolicy,
+    attempt_policy: WakeAttemptPolicy,
     trigger_source: AuthTriggerSource,
 ) {
-    let session_id = match state.begin_wake_request(AUTOMATIC_WAKE_ATTEMPT_LIMIT) {
+    let configured_attempt_limit = match attempt_policy {
+        WakeAttemptPolicy::Finite { attempt_limit } => attempt_limit,
+        WakeAttemptPolicy::WhileAdvised => BACKGROUND_SILENT_WAKE_ATTEMPT_LIMIT,
+    };
+    let session_id = match state.begin_wake_request(configured_attempt_limit) {
         WakeRequestStart::Started { session_id } => session_id,
         WakeRequestStart::Blocked { reason } => {
             write_provider_event_detail("Provider.WakeSkipped", format!("reason={reason:?}"));
@@ -202,10 +204,7 @@ pub(crate) fn request_wake_in_background(
         .spawn(move || {
             let _worker_guard = worker_guard;
             if !wait_for_wake_start_policy(&worker_state, start_policy) {
-                write_provider_event_detail(
-                    "Provider.WakeStopped",
-                    "reason=user-input-wait-ended",
-                );
+                write_provider_event_detail("Provider.WakeStopped", "reason=user-input-wait-ended");
                 worker_state.apply_wake_transport_error(
                     ProtocolError::TransportUnavailable,
                     1,
@@ -217,17 +216,22 @@ pub(crate) fn request_wake_in_background(
             let runtime_config = ProviderRuntimeConfig::from_registry_or_default();
             let broker_client =
                 ProviderBrokerClient::service_default(runtime_config.wake_auth_source);
-            for attempt_number in 1..=AUTOMATIC_WAKE_ATTEMPT_LIMIT {
+            let mut attempt_number = 1;
+            while attempt_number <= configured_attempt_limit && worker_state.has_events_sink() {
                 if attempt_number > 1 {
                     thread::sleep(Duration::from_millis(AUTOMATIC_WAKE_RETRY_DELAY_MS));
+                    if !worker_state.has_events_sink() {
+                        break;
+                    }
                     worker_state
-                        .mark_automatic_retry_started(attempt_number, AUTOMATIC_WAKE_ATTEMPT_LIMIT);
+                        .mark_automatic_retry_started(attempt_number, configured_attempt_limit);
                 }
 
                 write_provider_event_detail(
                     "Provider.WakeRequestStarted",
                     format!(
-                        "attempt={attempt_number}/{AUTOMATIC_WAKE_ATTEMPT_LIMIT} session_id={}",
+                        "attempt={attempt_number}/{} session_id={}",
+                        wake_attempt_limit_label(attempt_policy, configured_attempt_limit),
                         session_id.0
                     ),
                 );
@@ -238,22 +242,26 @@ pub(crate) fn request_wake_in_background(
                     TRANSPORT_WAKE_ATTEMPT_LIMIT,
                 ) {
                     Ok(outcome) => {
-                        let automatic_retry_pending = matches!(
-                            &outcome,
-                            ProviderWakeOutcome::AuthFailed { .. }
-                        ) && attempt_number < AUTOMATIC_WAKE_ATTEMPT_LIMIT
-                            && worker_state.has_events_sink();
+                        let automatic_retry_pending =
+                            matches!(&outcome, ProviderWakeOutcome::AuthFailed { .. })
+                                && worker_state.has_events_sink()
+                                && match attempt_policy {
+                                    WakeAttemptPolicy::Finite { attempt_limit } => {
+                                        attempt_number < attempt_limit
+                                    }
+                                    WakeAttemptPolicy::WhileAdvised => true,
+                                };
                         write_wake_outcome_detail(
                             "Provider.WakeCompleted",
                             &outcome,
                             attempt_number,
-                            AUTOMATIC_WAKE_ATTEMPT_LIMIT,
+                            configured_attempt_limit,
                             automatic_retry_pending,
                         );
                         worker_state.apply_wake_outcome(
                             outcome,
                             attempt_number,
-                            AUTOMATIC_WAKE_ATTEMPT_LIMIT,
+                            configured_attempt_limit,
                             automatic_retry_pending,
                         );
                         if !automatic_retry_pending {
@@ -264,17 +272,19 @@ pub(crate) fn request_wake_in_background(
                         write_provider_event_detail(
                             "Provider.WakeTransportFailed",
                             format!(
-                                "attempt={attempt_number}/{AUTOMATIC_WAKE_ATTEMPT_LIMIT} error={error:?}"
+                                "attempt={attempt_number}/{} error={error:?}",
+                                wake_attempt_limit_label(attempt_policy, configured_attempt_limit)
                             ),
                         );
                         worker_state.apply_wake_transport_error(
                             error,
                             attempt_number,
-                            AUTOMATIC_WAKE_ATTEMPT_LIMIT,
+                            configured_attempt_limit,
                         );
                         return;
                     }
                 }
+                attempt_number = attempt_number.saturating_add(1);
             }
         });
     if spawn_result.is_err() {
@@ -284,6 +294,16 @@ pub(crate) fn request_wake_in_background(
             1,
             AUTOMATIC_WAKE_ATTEMPT_LIMIT,
         );
+    }
+}
+
+fn wake_attempt_limit_label(
+    attempt_policy: WakeAttemptPolicy,
+    configured_attempt_limit: u32,
+) -> String {
+    match attempt_policy {
+        WakeAttemptPolicy::Finite { .. } => configured_attempt_limit.to_string(),
+        WakeAttemptPolicy::WhileAdvised => "continuous".to_owned(),
     }
 }
 

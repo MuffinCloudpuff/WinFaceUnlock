@@ -148,7 +148,6 @@ export function SettingsArea() {
                {[
                  { id: 'keyboard', label: '敲击键盘', Icon: Keyboard, disabled: false },
                  { id: 'silent', label: '后台静默', Icon: Camera, disabled: false },
-                 { id: 'hybrid', label: '智能混合', Icon: ScanFace, disabled: false },
                ].map(({ id, label, Icon, disabled }) => (
                  <button
                    key={id}
@@ -196,15 +195,19 @@ export function SettingsArea() {
                  step="0.01"
                  value={logonFaceMatchThreshold}
                  aria-label="登录匹配阈值"
-                 onChange={(event) =>
-                   handleLogonFaceMatchThresholdChange(Number(event.currentTarget.value))
-                 }
+                 onChange={(event) => {
+                   let val = Number(event.currentTarget.value);
+                   if (Math.abs(val - 0.75) < 0.03) {
+                     val = 0.75;
+                   }
+                   handleLogonFaceMatchThresholdChange(val);
+                 }}
                  className="h-2 w-full cursor-pointer accent-[#007acc]"
                />
-               <div className="grid grid-cols-3 text-[11px] font-medium text-slate-400">
-                 <span>宽松 0.30</span>
-                 <span className="text-center">默认 0.75</span>
-                 <span className="text-right">严格 0.90</span>
+               <div className="relative h-4 text-[11px] font-medium text-slate-400 mt-1">
+                 <span className="absolute left-0">宽松 0.30</span>
+                 <span className="absolute left-[75%] -translate-x-1/2">默认 0.75</span>
+                 <span className="absolute right-0">严格 0.90</span>
                </div>
              </div>
           </div>

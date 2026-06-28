@@ -118,16 +118,37 @@ where
                     .lock()
                     .map_err(|_| AuthFailureReason::InternalError)
                     .and_then(|mut issuer| {
-                        match issuer.issue_auth_grant(
+                        let mut grant_was_published = false;
+                        let mut publish_grant = |grant: &AuthGrant| {
+                            if let Ok(mut cached_grant_outcomes) = cached_grant_outcomes.lock() {
+                                cached_grant_outcomes
+                                    .insert(session_id_for_worker.clone(), Ok(grant.clone()));
+                                grant_was_published = true;
+                                write_service_event_detail(
+                                    "CameraAuthJob.AuthGrantPublished",
+                                    format!("session_id={}", session_id_for_worker.0),
+                                );
+                            }
+                        };
+                        match issuer.issue_auth_grant_with_observer(
                             &session_id_for_worker,
                             source,
                             trigger_source,
                             issued_at_unix_ms,
+                            &mut publish_grant,
                         ) {
                             AuthGrantIssueResult::Issued(grant) => Ok(grant),
                             AuthGrantIssueResult::Failed(reason) => Err(reason),
                             AuthGrantIssueResult::Started => Err(AuthFailureReason::InternalError),
                         }
+                        .inspect(|grant| {
+                            if !grant_was_published
+                                && let Ok(mut cached_grant_outcomes) = cached_grant_outcomes.lock()
+                            {
+                                cached_grant_outcomes
+                                    .insert(session_id_for_worker.clone(), Ok(grant.clone()));
+                            }
+                        })
                     });
                 match &result {
                     Ok(_) => write_service_event_detail(
@@ -139,7 +160,9 @@ where
                         format!("session_id={} reason={reason:?}", session_id_for_worker.0),
                     ),
                 }
-                if let Ok(mut cached_grant_outcomes) = cached_grant_outcomes.lock() {
+                if result.is_err()
+                    && let Ok(mut cached_grant_outcomes) = cached_grant_outcomes.lock()
+                {
                     cached_grant_outcomes.insert(session_id_for_worker.clone(), result);
                 }
                 if let Ok(mut running_sessions) = running_sessions.lock() {
@@ -180,7 +203,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        Condvar,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use common_protocol::{AuthScore, GrantId, Nonce, UserId};
 
@@ -221,7 +247,7 @@ mod tests {
             runner.issue_auth_grant(
                 &session_id,
                 AuthSource::LocalCamera,
-                AuthTriggerSource::InputTriggered,
+                AuthTriggerSource::CredentialScreenEntered,
                 1_000,
             ),
             AuthGrantIssueResult::Started
@@ -247,7 +273,7 @@ mod tests {
             runner.issue_auth_grant(
                 &session_id,
                 AuthSource::LocalCamera,
-                AuthTriggerSource::InputTriggered,
+                AuthTriggerSource::CredentialScreenEntered,
                 1_000,
             ),
             AuthGrantIssueResult::Started
@@ -267,7 +293,7 @@ mod tests {
             runner.issue_auth_grant(
                 &session_id,
                 AuthSource::LocalCamera,
-                AuthTriggerSource::InputTriggered,
+                AuthTriggerSource::CredentialScreenEntered,
                 1_000,
             ),
             AuthGrantIssueResult::Issued(_)
@@ -283,7 +309,7 @@ mod tests {
             runner.issue_auth_grant(
                 &session_id,
                 AuthSource::LocalCamera,
-                AuthTriggerSource::InputTriggered,
+                AuthTriggerSource::CredentialScreenEntered,
                 1_000,
             ),
             AuthGrantIssueResult::Started
@@ -300,7 +326,7 @@ mod tests {
             runner.issue_auth_grant(
                 &session_id,
                 AuthSource::LocalCamera,
-                AuthTriggerSource::InputTriggered,
+                AuthTriggerSource::CredentialScreenEntered,
                 6_000,
             ),
             AuthGrantIssueResult::Started
@@ -349,7 +375,7 @@ mod tests {
             runner.issue_auth_grant(
                 &session_id,
                 AuthSource::LocalCamera,
-                AuthTriggerSource::InputTriggered,
+                AuthTriggerSource::CredentialScreenEntered,
                 1_000,
             ),
             AuthGrantIssueResult::Started
@@ -358,7 +384,7 @@ mod tests {
             runner.issue_auth_grant(
                 &session_id,
                 AuthSource::LocalCamera,
-                AuthTriggerSource::InputTriggered,
+                AuthTriggerSource::CredentialScreenEntered,
                 1_000,
             ),
             AuthGrantIssueResult::Started
@@ -371,5 +397,101 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(started_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn observer_publishes_grant_before_issuer_finishes_cleanup() {
+        struct CleanupBlockingIssuer {
+            observer_called: Arc<AtomicUsize>,
+            cleanup_release: Arc<(Mutex<bool>, Condvar)>,
+        }
+
+        impl AuthGrantIssuer for CleanupBlockingIssuer {
+            fn issue_auth_grant(
+                &mut self,
+                session_id: &SessionId,
+                source: AuthSource,
+                trigger_source: AuthTriggerSource,
+                issued_at_unix_ms: i64,
+            ) -> AuthGrantIssueResult {
+                self.issue_auth_grant_with_observer(
+                    session_id,
+                    source,
+                    trigger_source,
+                    issued_at_unix_ms,
+                    &mut |_| {},
+                )
+            }
+
+            fn issue_auth_grant_with_observer(
+                &mut self,
+                session_id: &SessionId,
+                source: AuthSource,
+                _trigger_source: AuthTriggerSource,
+                issued_at_unix_ms: i64,
+                on_grant_issued: &mut dyn FnMut(&AuthGrant),
+            ) -> AuthGrantIssueResult {
+                let grant = AuthGrant {
+                    grant_id: GrantId("grant-before-cleanup".to_owned()),
+                    nonce: Nonce("nonce-before-cleanup".to_owned()),
+                    session_id: session_id.clone(),
+                    user_id: UserId("user-1".to_owned()),
+                    source,
+                    score: AuthScore {
+                        match_score: 0.9,
+                        liveness_score: Some(0.99),
+                    },
+                    issued_at_unix_ms,
+                    expires_at_unix_ms: issued_at_unix_ms + 5_000,
+                };
+
+                on_grant_issued(&grant);
+                self.observer_called.fetch_add(1, Ordering::SeqCst);
+
+                let (lock, release) = &*self.cleanup_release;
+                let mut cleanup_released = lock.lock().unwrap_or_else(|e| e.into_inner());
+                while !*cleanup_released {
+                    cleanup_released = release
+                        .wait(cleanup_released)
+                        .unwrap_or_else(|e| e.into_inner());
+                }
+
+                AuthGrantIssueResult::Issued(grant)
+            }
+        }
+
+        let observer_called = Arc::new(AtomicUsize::new(0));
+        let cleanup_release = Arc::new((Mutex::new(false), Condvar::new()));
+        let mut runner = CameraAuthOrchestrator::new(CleanupBlockingIssuer {
+            observer_called: Arc::clone(&observer_called),
+            cleanup_release: Arc::clone(&cleanup_release),
+        });
+        let session_id = SessionId("cleanup-blocked-session".to_owned());
+
+        assert_eq!(
+            runner.issue_auth_grant(
+                &session_id,
+                AuthSource::LocalCamera,
+                AuthTriggerSource::CredentialScreenEntered,
+                1_000,
+            ),
+            AuthGrantIssueResult::Started
+        );
+
+        let mut completed = None;
+        for _ in 0..100 {
+            completed = runner.fetch_auth_result(&session_id, 1_000);
+            if completed.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(matches!(completed, Some(Ok(_))));
+        assert_eq!(observer_called.load(Ordering::SeqCst), 1);
+
+        let (lock, release) = &*cleanup_release;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        release.notify_all();
     }
 }

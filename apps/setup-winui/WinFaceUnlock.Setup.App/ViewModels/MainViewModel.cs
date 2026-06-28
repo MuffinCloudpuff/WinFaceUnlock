@@ -398,14 +398,24 @@ public sealed class MainViewModel : NotifyObject
     {
         if (InstallSucceeded)
         {
-            TryLaunchInstalledApp();
+            TryLaunchInstalledTray();
+            TryLaunchInstalledControlPanel();
         }
 
         _closeWindow();
         return Task.CompletedTask;
     }
 
-    private void TryLaunchInstalledApp()
+    private void TryLaunchInstalledTray()
+    {
+        var trayPath = Path.Combine(InstallDir, "control_tray.exe");
+        if (File.Exists(trayPath))
+        {
+            TryStartInstalledProcess(trayPath);
+        }
+    }
+
+    private void TryLaunchInstalledControlPanel()
     {
         var candidates = new[]
         {
@@ -420,12 +430,17 @@ public sealed class MainViewModel : NotifyObject
             return;
         }
 
+        TryStartInstalledProcess(appPath);
+    }
+
+    private static void TryStartInstalledProcess(string appPath)
+    {
         try
         {
             Process.Start(new ProcessStartInfo
             {
                 FileName = appPath,
-                WorkingDirectory = Path.GetDirectoryName(appPath) ?? InstallDir,
+                WorkingDirectory = Path.GetDirectoryName(appPath) ?? Environment.CurrentDirectory,
                 UseShellExecute = true
             });
         }
@@ -569,8 +584,16 @@ public sealed class MainViewModel : NotifyObject
     private void RecordFailure(string stepKey, Exception error)
     {
         ErrorMessage = $"{StepTitle(stepKey)}: {error.Message}";
-        ErrorDetails = error.ToString();
-        WriteInstallLog($"Exception recorded. step={stepKey}; {error}");
+        ErrorDetails = error is SetupBackendException backendError
+            ? string.Join(
+                Environment.NewLine,
+                new[]
+                {
+                    backendError.DiagnosticDetails(),
+                    backendError.ToString()
+                }.Where(part => !string.IsNullOrWhiteSpace(part)))
+            : error.ToString();
+        WriteInstallLog($"Exception recorded. step={stepKey}; {ErrorDetails}");
     }
 
     private SetupStepViewModel Step(string key)

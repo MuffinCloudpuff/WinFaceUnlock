@@ -280,7 +280,7 @@ fn cleanup_stale_bundle_dirs(current_extraction_dir: &Path) {
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("bundle-"))
         {
-            let _ = fs::remove_dir_all(&path);
+            let _ = remove_dir_all_with_retry(&path);
         }
     }
 }
@@ -305,7 +305,24 @@ fn cleanup_marked_bundle_dir(extraction_dir: &Path) -> Result<(), io::Error> {
         ));
     }
 
-    fs::remove_dir_all(extraction_dir)
+    remove_dir_all_with_retry(&extraction_dir)
+}
+
+fn remove_dir_all_with_retry(path: &Path) -> Result<(), io::Error> {
+    let mut last_err = io::Error::from_raw_os_error(0);
+    for _ in 0..20 {
+        match fs::remove_dir_all(path) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                if !path.exists() {
+                    return Ok(());
+                }
+                last_err = e;
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+        }
+    }
+    Err(last_err)
 }
 
 fn extract_bundle(extraction_dir: &Path) -> Result<(), Box<dyn Error>> {

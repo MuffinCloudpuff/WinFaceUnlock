@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/common_protocol",
+    "crates/control_tray",
     "crates/control_backend",
     "crates/control_protocol",
     "crates/control_status",

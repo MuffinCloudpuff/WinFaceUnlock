@@ -208,6 +208,9 @@ public sealed record InstallSystemComponentsPayload
     [JsonPropertyName("service_binary_relative_path")]
     public string ServiceBinaryRelativePath { get; init; } = "win_service.exe";
 
+    [JsonPropertyName("control_tray_relative_path")]
+    public string ControlTrayRelativePath { get; init; } = "control_tray.exe";
+
     [JsonPropertyName("provider_binary_relative_path")]
     public string ProviderBinaryRelativePath { get; init; } = @"provider\windows_provider.dll";
 

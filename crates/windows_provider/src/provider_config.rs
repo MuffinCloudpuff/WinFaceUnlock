@@ -13,6 +13,8 @@ pub const TILE_VISIBILITY_VISIBLE: &str = "visible";
 pub const TILE_VISIBILITY_HIDDEN_UNTIL_READY: &str = "hidden-until-ready";
 pub const WAKE_AUTH_SOURCE_LOCAL_CAMERA: &str = "local-camera";
 pub const WAKE_AUTH_SOURCE_MANUAL_TEST: &str = "manual-test";
+pub const LOGON_WAKE_MODE_TRIGGERED_RECOGNITION: &str = "triggered-recognition";
+pub const LOGON_WAKE_MODE_BACKGROUND_SILENT_RECOGNITION: &str = "background-silent-recognition";
 pub const LOGON_WAKE_MODE_INPUT_TRIGGERED: &str = "input-triggered";
 pub const LOGON_WAKE_MODE_BACKGROUND_POLICY: &str = "background-policy";
 pub const LOGON_WAKE_MODE_HYBRID: &str = "hybrid";
@@ -27,9 +29,8 @@ pub struct ProviderRuntimeConfig {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderLogonWakeMode {
-    InputTriggered,
-    BackgroundPolicy,
-    Hybrid,
+    TriggeredRecognition,
+    BackgroundSilentRecognition,
 }
 
 impl ProviderRuntimeConfig {
@@ -104,20 +105,22 @@ fn wake_auth_source_from_config_value(value: &str) -> AuthSource {
 
 fn logon_wake_mode_from_config_value(value: &str) -> Option<ProviderLogonWakeMode> {
     match value {
-        LOGON_WAKE_MODE_INPUT_TRIGGERED | "input_triggered" => {
-            Some(ProviderLogonWakeMode::InputTriggered)
-        }
-        LOGON_WAKE_MODE_BACKGROUND_POLICY | "background_policy" => {
-            Some(ProviderLogonWakeMode::BackgroundPolicy)
-        }
-        LOGON_WAKE_MODE_HYBRID => Some(ProviderLogonWakeMode::Hybrid),
+        LOGON_WAKE_MODE_TRIGGERED_RECOGNITION
+        | "triggered_recognition"
+        | LOGON_WAKE_MODE_INPUT_TRIGGERED
+        | "input_triggered" => Some(ProviderLogonWakeMode::TriggeredRecognition),
+        LOGON_WAKE_MODE_BACKGROUND_SILENT_RECOGNITION
+        | "background_silent_recognition"
+        | LOGON_WAKE_MODE_BACKGROUND_POLICY
+        | "background_policy"
+        | LOGON_WAKE_MODE_HYBRID => Some(ProviderLogonWakeMode::BackgroundSilentRecognition),
         _ => None,
     }
 }
 
 fn legacy_logon_wake_mode(auto_wake_on_advise: bool) -> Option<ProviderLogonWakeMode> {
     if auto_wake_on_advise {
-        Some(ProviderLogonWakeMode::InputTriggered)
+        Some(ProviderLogonWakeMode::TriggeredRecognition)
     } else {
         None
     }
@@ -267,19 +270,27 @@ mod tests {
     fn logon_wake_mode_config_uses_backend_semantic_value() {
         assert_eq!(
             logon_wake_mode_from_config_value(LOGON_WAKE_MODE_INPUT_TRIGGERED),
-            Some(ProviderLogonWakeMode::InputTriggered)
+            Some(ProviderLogonWakeMode::TriggeredRecognition)
         );
         assert_eq!(
             logon_wake_mode_from_config_value("input_triggered"),
-            Some(ProviderLogonWakeMode::InputTriggered)
+            Some(ProviderLogonWakeMode::TriggeredRecognition)
+        );
+        assert_eq!(
+            logon_wake_mode_from_config_value(LOGON_WAKE_MODE_TRIGGERED_RECOGNITION),
+            Some(ProviderLogonWakeMode::TriggeredRecognition)
         );
         assert_eq!(
             logon_wake_mode_from_config_value(LOGON_WAKE_MODE_BACKGROUND_POLICY),
-            Some(ProviderLogonWakeMode::BackgroundPolicy)
+            Some(ProviderLogonWakeMode::BackgroundSilentRecognition)
+        );
+        assert_eq!(
+            logon_wake_mode_from_config_value(LOGON_WAKE_MODE_BACKGROUND_SILENT_RECOGNITION),
+            Some(ProviderLogonWakeMode::BackgroundSilentRecognition)
         );
         assert_eq!(
             logon_wake_mode_from_config_value(LOGON_WAKE_MODE_HYBRID),
-            Some(ProviderLogonWakeMode::Hybrid)
+            Some(ProviderLogonWakeMode::BackgroundSilentRecognition)
         );
         assert_eq!(logon_wake_mode_from_config_value("keyboard"), None);
     }
@@ -288,7 +299,7 @@ mod tests {
     fn legacy_auto_wake_maps_to_input_triggered_logon_wake_mode() {
         assert_eq!(
             legacy_logon_wake_mode(true),
-            Some(ProviderLogonWakeMode::InputTriggered)
+            Some(ProviderLogonWakeMode::TriggeredRecognition)
         );
         assert_eq!(legacy_logon_wake_mode(false), None);
     }

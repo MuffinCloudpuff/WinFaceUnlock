@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 
 namespace WinFaceUnlock.Setup.BackendClient;
@@ -6,6 +7,7 @@ namespace WinFaceUnlock.Setup.BackendClient;
 public sealed class SetupBackendClient
 {
     public const int ProtocolVersion = 1;
+    private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -43,21 +45,23 @@ public sealed class SetupBackendClient
         var requestJson = JsonSerializer.Serialize(request, JsonOptions);
 
         using var process = StartBackendProcess();
-        await process.StandardInput.WriteAsync(requestJson.AsMemory(), cancellationToken);
-        await process.StandardInput.FlushAsync(cancellationToken);
+        process.StandardInput.Write(requestJson);
+        process.StandardInput.Flush();
         process.StandardInput.Close();
 
         var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
+        await process.WaitForExitAsync(cancellationToken)
+            .ConfigureAwait(false);
 
-        var stdout = await stdoutTask;
-        var stderr = await stderrTask;
+        var stdout = await stdoutTask.ConfigureAwait(false);
+        var stderr = await stderrTask.ConfigureAwait(false);
         var responseJson = LastJsonObjectLine(stdout);
         if (responseJson is null)
         {
             throw new SetupBackendException(
                 "Setup backend did not return a JSON response.",
+                _backendExePath,
                 process.ExitCode,
                 SafeOutputTail(stdout),
                 SafeOutputTail(stderr));
@@ -66,6 +70,7 @@ public sealed class SetupBackendClient
         var response = JsonSerializer.Deserialize<SetupResponseEnvelope>(responseJson, JsonOptions)
             ?? throw new SetupBackendException(
                 "Setup backend returned an empty response.",
+                _backendExePath,
                 process.ExitCode,
                 SafeOutputTail(stdout),
                 SafeOutputTail(stderr));
@@ -74,6 +79,7 @@ public sealed class SetupBackendClient
         {
             throw new SetupBackendException(
                 "Setup backend exited with a non-zero code after reporting success.",
+                _backendExePath,
                 process.ExitCode,
                 response.Message,
                 SafeOutputTail(stderr));
@@ -91,6 +97,9 @@ public sealed class SetupBackendClient
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            StandardInputEncoding = Utf8NoBom,
+            StandardOutputEncoding = Utf8NoBom,
+            StandardErrorEncoding = Utf8NoBom,
             CreateNoWindow = true,
             WorkingDirectory = Path.GetDirectoryName(_backendExePath) ?? Environment.CurrentDirectory
         };
@@ -125,17 +134,33 @@ public sealed class SetupBackendException : Exception
 {
     public SetupBackendException(
         string message,
+        string backendExePath,
         int exitCode,
         string stdoutTail,
         string stderrTail)
         : base(message)
     {
+        BackendExePath = backendExePath;
         ExitCode = exitCode;
         StdoutTail = stdoutTail;
         StderrTail = stderrTail;
     }
 
+    public string BackendExePath { get; }
     public int ExitCode { get; }
     public string StdoutTail { get; }
     public string StderrTail { get; }
+
+    public string DiagnosticDetails()
+    {
+        return string.Join(
+            Environment.NewLine,
+            new[]
+            {
+                $"backend_exe={BackendExePath}",
+                $"exit_code={ExitCode}",
+                string.IsNullOrWhiteSpace(StdoutTail) ? "" : $"stdout_tail={StdoutTail}",
+                string.IsNullOrWhiteSpace(StderrTail) ? "" : $"stderr_tail={StderrTail}"
+            }.Where(line => !string.IsNullOrWhiteSpace(line)));
+    }
 }

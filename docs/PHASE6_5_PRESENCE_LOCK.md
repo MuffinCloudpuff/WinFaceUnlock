@@ -137,31 +137,46 @@ CameraUnavailable
 
 ## 采样策略
 
-### 稳定本人在场
+### 默认人形检测策略
 
-Presence Lock 不应固定高频运行。建议使用递增间隔：
+当前默认生产链路是人形检测。键鼠静默超过 60 秒后，只打开一次短采样窗口，
+拿到第一个有效检测结果后再进入策略状态机。
+
+检测到有人在场时，进入稳定退避：
 
 ```text
-首次检测：10 秒后
-第一次检测到本人：下一次 30 秒后
-第二次及以后检测到本人：下一次 60 秒后
+第 1 次有效有人：10 秒后再看
+第 2 次连续有效有人：30 秒后再看
+第 3 次及以后连续有效有人：60 秒后再看
 最大稳定间隔：60 秒
 ```
 
-### 连续无脸
-
-如果检测不到人脸，进入 `NoFaceSuspect`：
+检测不到人时，进入离座确认：
 
 ```text
-检测间隔：10 秒
-锁屏条件：连续 3 次无脸
-动作：调用 LockWorkStation
+检测间隔：1 秒
+锁屏条件：连续 3 次有效无人
+动作：调用当前用户 Session 的 LockWorkStation
 ```
 
 当前实现要求先通过键鼠输入采样门控：最近 60 秒内有键盘或鼠标输入时，
 Presence Monitor 不打开摄像头；超过阈值后才短暂打开摄像头采样。摄像头采样窗口
 结束后必须立即释放摄像头租约。完整约束见
-`docs/PRESENCE_LOCK_SAMPLING_GATE_ARCHITECTURE.md`。
+`docs/PRESENCE_LOCK_SAMPLING_GATE_ARCHITECTURE.md` 和
+`docs/PRESENCE_LOCK_FINAL_SAMPLING_POLICY.md`。
+
+空帧、读帧失败、无效帧、摄像头打开失败不能算作无人；这些只会产生
+`CameraUnavailable` 或在采样窗口内重试，不得作为锁屏证据。
+
+### 兼容人脸策略
+
+旧的人脸策略仍可用于诊断和未来 identity-aware presence：
+
+```text
+StableOwnerPresent：10 秒、30 秒、60 秒退避
+NoFaceSuspect：连续 3 次无脸锁屏
+UnknownFaceSuspect：连续 3 次低匹配锁屏并触发审计
+```
 
 ### 检测到非本人
 

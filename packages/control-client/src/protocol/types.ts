@@ -44,7 +44,12 @@ export interface ControlResponseEnvelope<TDetails = unknown> {
   next_recommended_action?: string;
 }
 
-export type LogonWakeMode = 'input_triggered' | 'background_policy' | 'hybrid';
+export type LogonWakeMode =
+  | 'triggered_recognition'
+  | 'background_silent_recognition'
+  | 'input_triggered'
+  | 'background_policy'
+  | 'hybrid';
 
 export interface ControlSettingsSnapshot {
   presence_lock_enabled: boolean;

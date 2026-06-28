@@ -1,4 +1,6 @@
 mod frame;
+#[cfg(windows)]
+mod mf_bindings;
 mod opencv_camera;
 mod provider;
 

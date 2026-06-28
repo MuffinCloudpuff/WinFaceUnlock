@@ -87,6 +87,23 @@ if (-not (Test-Path $appEntrypoint -PathType Leaf)) {
     throw "Extracted WinUI entrypoint is missing: $appEntrypoint"
 }
 
+$setupAppValidationArgs = @(
+    "--winfaceunlock-setup-app-validate-backend",
+    "`"$backendExe`"",
+    "`"$payloadRootDir`""
+) -join " "
+$setupAppValidationProcess = Start-Process `
+    -FilePath $appEntrypoint `
+    -ArgumentList $setupAppValidationArgs `
+    -PassThru
+if (-not $setupAppValidationProcess.WaitForExit(30000)) {
+    Stop-Process -Id $setupAppValidationProcess.Id -Force -ErrorAction SilentlyContinue
+    throw "WinUI setup app backend validation timed out after 30 seconds."
+}
+if ($setupAppValidationProcess.ExitCode -ne 0) {
+    throw "WinUI setup app backend validation failed with exit code $($setupAppValidationProcess.ExitCode)"
+}
+
 function Invoke-SetupBackend {
     param([hashtable]$Request)
 
@@ -161,6 +178,9 @@ if ($stagePayloadFiles.Count -eq 0) {
 }
 if (-not ($stagePayloadFiles | Where-Object { $_.target_relative_path -eq "WinFaceUnlock.exe" })) {
     throw "inspect_payload did not include the installed control panel entrypoint WinFaceUnlock.exe."
+}
+if (-not ($stagePayloadFiles | Where-Object { $_.target_relative_path -eq "control_tray.exe" })) {
+    throw "inspect_payload did not include the tray entrypoint control_tray.exe."
 }
 if (-not ($stagePayloadFiles | Where-Object { $_.target_relative_path -eq "desktop_input_agent.exe" })) {
     throw "inspect_payload did not include DesktopInputPresenceAgent desktop_input_agent.exe."
@@ -249,6 +269,10 @@ $installedTauriLibrary = Join-Path $StageDir "winfaceunlock_control_tauri_lib.dl
 if (-not (Test-Path $installedTauriLibrary -PathType Leaf)) {
     throw "Staged install is missing the Tauri control library: $installedTauriLibrary"
 }
+$installedControlTray = Join-Path $StageDir "control_tray.exe"
+if (-not (Test-Path $installedControlTray -PathType Leaf)) {
+    throw "Staged install is missing the tray entrypoint: $installedControlTray"
+}
 $installedDesktopInputAgent = Join-Path $StageDir "desktop_input_agent.exe"
 if (-not (Test-Path $installedDesktopInputAgent -PathType Leaf)) {
     throw "Staged install is missing DesktopInputPresenceAgent: $installedDesktopInputAgent"
@@ -261,3 +285,4 @@ Write-Host "  backend_exe: $backendExe"
 Write-Host "  payload_root_dir: $payloadRootDir"
 Write-Host "  staged_validation_dir: $StageDir"
 Write-Host "  staged_control_app: $installedControlApp"
+Write-Host "  staged_control_tray: $installedControlTray"

@@ -42,6 +42,7 @@ export interface FaceEnrollmentViewModel {
   isCommandPending: boolean;
   startEnrollment: () => void;
   cancelEnrollment: () => void;
+  switchCamera: (cameraId: string) => void;
   cancelAndResetEnrollment: () => void;
   resetEnrollment: () => void;
 }
@@ -348,6 +349,40 @@ export function useFaceEnrollment(): FaceEnrollmentViewModel {
       });
   }, [failFromError, failFromResponse, isCommandPending, sessionStatus]);
 
+  const switchCamera = useCallback(
+    (nextCameraId: string) => {
+      if (isCommandPending || !sessionStatus || !isControlRuntimeAvailable()) {
+        return;
+      }
+      setIsCommandPending(true);
+      
+      cancelFaceEnrollment(controlTransport, {
+        enrollment_session_id: sessionStatus.enrollment_session_id,
+      })
+        .then(() => {
+          setSelectedCameraId(nextCameraId);
+          setPreviewImageSrc(undefined);
+          setUiState('starting');
+          return startFaceEnrollment(controlTransport, { camera_id: nextCameraId });
+        })
+        .then((response) => {
+          if (response.operation_status !== 'completed') {
+            failFromResponse(response);
+            return;
+          }
+          setSessionStatus(response.safe_details);
+          setUiState('running');
+        })
+        .catch((error) => {
+          failFromError(error, 'Failed to switch camera.');
+        })
+        .finally(() => {
+          setIsCommandPending(false);
+        });
+    },
+    [failFromError, failFromResponse, isCommandPending, sessionStatus, setSelectedCameraId],
+  );
+
   const resetEnrollment = useCallback(() => {
     finishingSessionIdRef.current = null;
     setSessionStatus(null);
@@ -394,6 +429,7 @@ export function useFaceEnrollment(): FaceEnrollmentViewModel {
     isCommandPending,
     startEnrollment,
     cancelEnrollment,
+    switchCamera,
     cancelAndResetEnrollment,
     resetEnrollment,
   };

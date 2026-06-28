@@ -20,7 +20,10 @@ use common_protocol::AuthTriggerSource;
 use crate::{
     auth_package::retrieve_negotiate_auth_package_id,
     fields::{FIELD_ID_STATUS, FIELD_ID_TITLE, allocate_wide_string, field_spec},
-    provider::{WakeStartPolicy, request_wake_in_background},
+    provider::{
+        AUTOMATIC_WAKE_ATTEMPT_LIMIT, WakeAttemptPolicy, WakeStartPolicy,
+        request_wake_in_background,
+    },
     provider_log::{write_provider_event, write_provider_event_detail},
     provider_state::ProviderState,
     serialization::pack_credential_material,
@@ -63,7 +66,10 @@ impl ICredentialProviderCredential_Impl for WinFaceUnlockCredential_Impl {
             self.state.clone(),
             "Credential.SelectedWake",
             WakeStartPolicy::Immediate,
-            AuthTriggerSource::InputTriggered,
+            WakeAttemptPolicy::Finite {
+                attempt_limit: AUTOMATIC_WAKE_ATTEMPT_LIMIT,
+            },
+            AuthTriggerSource::CredentialScreenEntered,
         );
         Ok(false.into())
     }

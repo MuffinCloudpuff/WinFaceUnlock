@@ -1,4 +1,4 @@
-use common_protocol::{
+﻿use common_protocol::{
     AuthGrant, AuthSource, AuthTriggerSource, PIPE_NAME, ProtectedCredential, ProtocolError,
     SERVICE_NAME, ServiceEvent, ServiceRequest, SessionId,
 };
@@ -65,7 +65,7 @@ fn run_console_smoke_with_handler(
     let issued_grant = match handler.handle_request(ServiceRequest::WakeAuth {
         session_id: SessionId("dev-session".to_owned()),
         source: AuthSource::ManualTest,
-        trigger_source: AuthTriggerSource::InputTriggered,
+        trigger_source: AuthTriggerSource::CredentialScreenEntered,
     })? {
         ServiceEvent::AuthSucceeded { grant } => grant,
         _ => return Err(ProtocolError::InvalidMessage),

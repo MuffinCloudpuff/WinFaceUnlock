@@ -13,9 +13,9 @@ export function AccountArea() {
   const credentialConfigured = accountProfile?.credential_secret_state === 'configured';
   const shouldShowCredentialInput = !credentialConfigured || isEditingCredential;
   const accountDisplayName =
-    accountProfile?.display_name ??
     accountProfile?.windows_account_username ??
-    '用户1';
+    accountProfile?.display_name ??
+    '本机账户';
 
   useEffect(() => {
     if (credentialEnrollmentCompletedAt === null) {

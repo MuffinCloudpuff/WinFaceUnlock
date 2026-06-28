@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     fmt,
     fs::{self, OpenOptions},
     io::Write,
@@ -437,7 +437,7 @@ pub fn send_wake_auth(
         ServiceRequest::WakeAuth {
             session_id,
             source,
-            trigger_source: AuthTriggerSource::InputTriggered,
+            trigger_source: AuthTriggerSource::CredentialScreenEntered,
         },
     )
 }
@@ -789,7 +789,7 @@ fn run_guided_enroll_with_output_dir(
     if guided_steps.is_empty() {
         provider.close();
         write_guided_enrollment_status(
-            &output_dir,
+            output_dir,
             "failed",
             None,
             0,
@@ -815,7 +815,7 @@ fn run_guided_enroll_with_output_dir(
     let mut partial_enrollment_reasons = Vec::new();
     for (step_index, step) in guided_steps.iter().enumerate() {
         write_guided_enrollment_status(
-            &output_dir,
+            output_dir,
             "waiting_for_pose",
             Some(*step),
             0,
@@ -865,7 +865,7 @@ fn run_guided_enroll_with_output_dir(
                 }
             }
             write_guided_enrollment_status(
-                &output_dir,
+                output_dir,
                 "waiting_for_pose",
                 Some(*step),
                 pose_ready_count,
@@ -901,7 +901,7 @@ fn run_guided_enroll_with_output_dir(
             }
             provider.close();
             write_guided_enrollment_status(
-                &output_dir,
+                output_dir,
                 "failed",
                 Some(*step),
                 pose_ready_count,
@@ -916,7 +916,7 @@ fn run_guided_enroll_with_output_dir(
             step.label()
         );
         write_guided_enrollment_status(
-            &output_dir,
+            output_dir,
             "capturing",
             Some(*step),
             0,
@@ -964,7 +964,7 @@ fn run_guided_enroll_with_output_dir(
                 );
             }
             write_guided_enrollment_status(
-                &output_dir,
+                output_dir,
                 "capturing",
                 Some(*step),
                 accepted_frame_count,
@@ -1000,7 +1000,7 @@ fn run_guided_enroll_with_output_dir(
             }
             provider.close();
             write_guided_enrollment_status(
-                &output_dir,
+                output_dir,
                 "failed",
                 Some(*step),
                 accepted_frame_count,
@@ -1012,7 +1012,7 @@ fn run_guided_enroll_with_output_dir(
     }
 
     provider.close();
-    write_guided_enrollment_status(&output_dir, "finishing", None, 0, None, None)?;
+    write_guided_enrollment_status(output_dir, "finishing", None, 0, None, None)?;
     let template_set = enrollment.finish(
         user_id.clone(),
         enrollment_id,

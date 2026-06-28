@@ -4,7 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    embed_resource::compile("windows_resources.rc", embed_resource::NONE).manifest_optional()?;
+
     println!("cargo:rerun-if-env-changed=WINFACEUNLOCK_SETUP_BUNDLE_ZIP");
 
     let output_path =
@@ -12,7 +15,7 @@ fn main() {
 
     let Some(bundle_zip) = env::var_os("WINFACEUNLOCK_SETUP_BUNDLE_ZIP") else {
         write_empty_bundle(&output_path);
-        return;
+        return Ok(());
     };
 
     let bundle_zip = PathBuf::from(bundle_zip);
@@ -22,6 +25,8 @@ fn main() {
         eprintln!("failed to embed setup bundle: {error}");
         std::process::exit(1);
     }
+
+    Ok(())
 }
 
 fn write_empty_bundle(output_path: &Path) {

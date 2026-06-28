@@ -1,4 +1,4 @@
-import { ScanFace } from 'lucide-react';
+import { ScanFace, ChevronLeft, ChevronRight } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import { type FaceEnrollmentViewModel } from '../bindings/useFaceEnrollment';
 
@@ -8,6 +8,20 @@ interface ActionAreaProps {
 
 export function ActionArea({ enrollment }: ActionAreaProps) {
   const status = enrollment.displayState;
+
+  const handleSwitchCamera = (direction: 'next' | 'prev') => {
+    if (enrollment.cameras.length <= 1) return;
+    const currentIndex = enrollment.cameras.findIndex(
+      (c) => c.camera_id === enrollment.selectedCameraId
+    );
+    let newIndex = currentIndex >= 0 ? currentIndex : 0;
+    if (direction === 'next') {
+      newIndex = (newIndex + 1) % enrollment.cameras.length;
+    } else {
+      newIndex = (newIndex - 1 + enrollment.cameras.length) % enrollment.cameras.length;
+    }
+    enrollment.switchCamera(enrollment.cameras[newIndex].camera_id);
+  };
 
   return (
     <div className="relative z-50 flex flex-1 flex-col items-center justify-center gap-28">
@@ -38,36 +52,62 @@ export function ActionArea({ enrollment }: ActionAreaProps) {
             transition={{ type: 'spring', stiffness: 150, damping: 20 }}
             className="flex flex-col items-center gap-8"
           >
-            <div className="relative flex h-64 w-64 items-center justify-center overflow-hidden rounded-full bg-slate-100 p-1 shadow-xl">
-              <div
-                className="absolute inset-0 animate-spin"
-                style={{
-                  backgroundImage:
-                    'conic-gradient(from 0deg, transparent 0 120deg, #007acc 180deg, transparent 180deg 300deg, #007acc 360deg)',
-                  animationDuration: '4s',
-                  animationTimingFunction: 'linear',
-                }}
-              />
-
-              <div className="relative z-10 flex h-full w-full items-center justify-center overflow-hidden rounded-full bg-black">
-                {enrollment.previewImageSrc ? (
-                  <img
-                    src={enrollment.previewImageSrc}
-                    alt=""
-                    className="h-full w-full scale-x-[-1] object-cover"
-                  />
-                ) : (
-                  <ScanFace
-                    className="h-20 w-20 text-white/35"
-                    strokeWidth={1.5}
-                  />
-                )}
-                <motion.div
-                  animate={{ y: ['-10%', '150%'] }}
-                  transition={{ duration: 2, repeat: Infinity, ease: 'linear' }}
-                  className="absolute top-0 left-0 right-0 h-1/2 border-b-2 border-[#007acc]/80 bg-gradient-to-b from-transparent to-[#007acc]/30"
+            <div className="flex items-center justify-center gap-6">
+              {enrollment.cameras.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => handleSwitchCamera('prev')}
+                  disabled={enrollment.isCommandPending}
+                  className="rounded-full bg-white p-3 text-slate-400 shadow-md transition-all hover:bg-slate-50 hover:text-[#0066b8] active:scale-95 disabled:opacity-50"
+                  aria-label="上一个摄像头"
+                >
+                  <ChevronLeft className="h-6 w-6" />
+                </button>
+              )}
+              
+              <div className="relative flex h-64 w-64 items-center justify-center overflow-hidden rounded-full bg-slate-100 p-1 shadow-xl">
+                <div
+                  className="absolute inset-0 animate-spin"
+                  style={{
+                    backgroundImage:
+                      'conic-gradient(from 0deg, transparent 0 120deg, #007acc 180deg, transparent 180deg 300deg, #007acc 360deg)',
+                    animationDuration: '4s',
+                    animationTimingFunction: 'linear',
+                  }}
                 />
+
+                <div className="relative z-10 flex h-full w-full items-center justify-center overflow-hidden rounded-full bg-black">
+                  {enrollment.previewImageSrc ? (
+                    <img
+                      src={enrollment.previewImageSrc}
+                      alt=""
+                      className="h-full w-full scale-x-[-1] object-cover"
+                    />
+                  ) : (
+                    <ScanFace
+                      className="h-20 w-20 text-white/35"
+                      strokeWidth={1.5}
+                    />
+                  )}
+                  <motion.div
+                    animate={{ y: ['-10%', '150%'] }}
+                    transition={{ duration: 2, repeat: Infinity, ease: 'linear' }}
+                    className="absolute top-0 left-0 right-0 h-1/2 border-b-2 border-[#007acc]/80 bg-gradient-to-b from-transparent to-[#007acc]/30"
+                  />
+                </div>
               </div>
+
+              {enrollment.cameras.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => handleSwitchCamera('next')}
+                  disabled={enrollment.isCommandPending}
+                  className="rounded-full bg-white p-3 text-slate-400 shadow-md transition-all hover:bg-slate-50 hover:text-[#0066b8] active:scale-95 disabled:opacity-50"
+                  aria-label="下一个摄像头"
+                >
+                  <ChevronRight className="h-6 w-6" />
+                </button>
+              )}
             </div>
 
             <div className="flex h-8 items-center justify-center gap-3">
@@ -160,27 +200,7 @@ export function ActionArea({ enrollment }: ActionAreaProps) {
             exit={{ opacity: 0, y: 20 }}
             className="flex flex-col items-center gap-3"
           >
-            <select
-              value={enrollment.selectedCameraId}
-              onFocus={enrollment.loadCameraList}
-              onPointerDown={enrollment.loadCameraList}
-              onChange={(event) => enrollment.setSelectedCameraId(event.target.value)}
-              disabled={enrollment.isCommandPending}
-              className="h-9 min-w-64 rounded-full border border-slate-200 bg-white px-4 text-sm font-medium text-slate-600 shadow-sm outline-none transition focus:border-[#0066b8]"
-              aria-label="选择摄像头"
-            >
-              {enrollment.cameras.length === 0 ? (
-                <option value={enrollment.selectedCameraId}>
-                  {enrollment.isCameraListLoading ? '正在读取摄像头' : enrollment.selectedCameraId}
-                </option>
-              ) : (
-                enrollment.cameras.map((camera) => (
-                  <option key={camera.camera_id} value={camera.camera_id}>
-                    {camera.display_name || camera.camera_id}
-                  </option>
-                ))
-              )}
-            </select>
+
             <motion.button
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.97 }}

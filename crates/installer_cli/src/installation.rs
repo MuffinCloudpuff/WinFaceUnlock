@@ -3,6 +3,7 @@ use crate::{
     resource_directory::ResourceDirectoryPlan,
     service_manager::{InstallerError, ServiceInstallPlan, ServiceManagerFacade},
     service_registry::{ServiceAuthRegistry, ServiceAuthRegistryConfig},
+    user_startup::{UserStartupPlan, UserStartupRegistry},
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -11,6 +12,7 @@ pub struct FullInstallPlan {
     pub provider_plan: ProviderInstallPlan,
     pub resource_plan: ResourceDirectoryPlan,
     pub auth_config: Option<ServiceAuthRegistryConfig>,
+    pub user_startup_plan: UserStartupPlan,
     pub start_service: bool,
 }
 
@@ -19,6 +21,7 @@ pub struct FullUninstallPlan {
     pub resource_plan: ResourceDirectoryPlan,
     pub stop_service_first: bool,
     pub delete_data: bool,
+    pub remove_user_startup: bool,
 }
 
 pub struct InstallerOrchestrator;
@@ -46,6 +49,9 @@ impl InstallerOrchestrator {
 
         log_step("install-provider");
         ProviderRegistry::install_provider(&plan.provider_plan)?;
+
+        log_step("install-user-tray-startup");
+        UserStartupRegistry::install_tray_startup(&plan.user_startup_plan)?;
         Ok(())
     }
 
@@ -69,10 +75,20 @@ impl InstallerOrchestrator {
 
         log_step("repair-provider");
         ProviderRegistry::install_provider(&plan.provider_plan)?;
+
+        log_step("repair-user-tray-startup");
+        UserStartupRegistry::install_tray_startup(&plan.user_startup_plan)?;
         Ok(())
     }
 
     pub fn uninstall(plan: &FullUninstallPlan) -> Result<(), InstallerError> {
+        if plan.remove_user_startup {
+            log_step("uninstall-user-tray-startup");
+            UserStartupRegistry::uninstall_tray_startup()?;
+        } else {
+            eprintln!("installer_step_skipped: uninstall-user-tray-startup");
+        }
+
         log_step("uninstall-provider");
         ProviderRegistry::uninstall_provider()?;
 
@@ -112,6 +128,7 @@ mod tests {
             resource_plan: ResourceDirectoryPlan::from_root_dir(PathBuf::from(r"C:\WinFaceUnlock")),
             stop_service_first: true,
             delete_data: true,
+            remove_user_startup: true,
         };
 
         assert!(plan.stop_service_first);
@@ -129,6 +146,9 @@ mod tests {
             )),
             resource_plan: ResourceDirectoryPlan::from_root_dir(PathBuf::from(r"C:\WinFaceUnlock")),
             auth_config: None,
+            user_startup_plan: UserStartupPlan::new(PathBuf::from(
+                r"C:\WinFaceUnlock\control_tray.exe",
+            )),
             start_service: true,
         };
 
@@ -141,5 +161,9 @@ mod tests {
             PathBuf::from(r"C:\WinFaceUnlock\windows_provider.dll")
         );
         assert!(plan.start_service);
+        assert_eq!(
+            plan.user_startup_plan.tray_binary_path,
+            PathBuf::from(r"C:\WinFaceUnlock\control_tray.exe")
+        );
     }
 }

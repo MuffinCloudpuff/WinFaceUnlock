@@ -304,6 +304,8 @@ pub struct InstallSystemComponentsPayload {
     pub configure_local_camera_auth: bool,
     #[serde(default = "default_service_binary_relative_path")]
     pub service_binary_relative_path: PathBuf,
+    #[serde(default = "default_control_tray_relative_path")]
+    pub control_tray_relative_path: PathBuf,
     #[serde(default = "default_provider_binary_relative_path")]
     pub provider_binary_relative_path: PathBuf,
     #[serde(default = "default_face_template_relative_path")]
@@ -337,6 +339,7 @@ impl Default for InstallSystemComponentsPayload {
             start_service: default_start_service(),
             configure_local_camera_auth: false,
             service_binary_relative_path: default_service_binary_relative_path(),
+            control_tray_relative_path: default_control_tray_relative_path(),
             provider_binary_relative_path: default_provider_binary_relative_path(),
             face_template_relative_path: default_face_template_relative_path(),
             yunet_model_relative_path: default_yunet_model_relative_path(),
@@ -477,6 +480,10 @@ fn default_tile_visibility() -> String {
 
 fn default_service_binary_relative_path() -> PathBuf {
     PathBuf::from("win_service.exe")
+}
+
+fn default_control_tray_relative_path() -> PathBuf {
+    PathBuf::from("control_tray.exe")
 }
 
 fn default_provider_binary_relative_path() -> PathBuf {
@@ -739,6 +746,10 @@ mod tests {
         assert_eq!(
             payload.service_binary_relative_path,
             PathBuf::from("win_service.exe")
+        );
+        assert_eq!(
+            payload.control_tray_relative_path,
+            PathBuf::from("control_tray.exe")
         );
         assert_eq!(
             payload.provider_binary_relative_path,

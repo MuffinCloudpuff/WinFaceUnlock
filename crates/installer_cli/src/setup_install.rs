@@ -12,7 +12,7 @@ use windows_provider::{
 use crate::{
     installation::FullInstallPlan, provider_registry::ProviderInstallPlan,
     resource_directory::ResourceDirectoryPlan, service_manager::ServiceInstallPlan,
-    service_registry::ServiceAuthRegistryConfig,
+    service_registry::ServiceAuthRegistryConfig, user_startup::UserStartupPlan,
 };
 
 pub fn build_install_plan(
@@ -24,8 +24,11 @@ pub fn build_install_plan(
         install_path(&payload.install_dir, &payload.service_binary_relative_path)?;
     let provider_binary_path =
         install_path(&payload.install_dir, &payload.provider_binary_relative_path)?;
+    let control_tray_binary_path =
+        install_path(&payload.install_dir, &payload.control_tray_relative_path)?;
     validate_required_file("service_binary", &service_binary_path)?;
     validate_required_file("provider_binary", &provider_binary_path)?;
+    validate_required_file("control_tray_binary", &control_tray_binary_path)?;
 
     let auth_config = if payload.configure_local_camera_auth {
         let face_template_path =
@@ -104,6 +107,7 @@ pub fn build_install_plan(
         provider_plan,
         resource_plan: ResourceDirectoryPlan::from_root_dir(payload.install_dir.clone()),
         auth_config,
+        user_startup_plan: UserStartupPlan::new(control_tray_binary_path),
         start_service: payload.start_service,
     })
 }
@@ -241,6 +245,7 @@ mod tests {
         let root = unique_temp_dir("plan");
         let install_dir = root.join("install");
         create_file(&install_dir.join("win_service.exe"));
+        create_file(&install_dir.join("control_tray.exe"));
         create_file(&install_dir.join(r"provider\windows_provider.dll"));
         create_file(&install_dir.join("selected_templates.json"));
         create_file(&install_dir.join(r"models\face_detection_yunet_2023mar.onnx"));
@@ -255,6 +260,7 @@ mod tests {
                 configure_local_camera_auth: true,
                 start_service: true,
                 service_binary_relative_path: PathBuf::from("win_service.exe"),
+                control_tray_relative_path: PathBuf::from("control_tray.exe"),
                 provider_binary_relative_path: PathBuf::from(r"provider\windows_provider.dll"),
                 face_template_relative_path: PathBuf::from("selected_templates.json"),
                 yunet_model_relative_path: PathBuf::from(
@@ -282,6 +288,10 @@ mod tests {
         assert_eq!(
             plan.service_plan.service_binary_path,
             install_dir.join("win_service.exe")
+        );
+        assert_eq!(
+            plan.user_startup_plan.tray_binary_path,
+            install_dir.join("control_tray.exe")
         );
         assert_eq!(
             plan.auth_config
@@ -331,6 +341,7 @@ mod tests {
         let root = unique_temp_dir("components-only");
         let install_dir = root.join("install");
         create_file(&install_dir.join("win_service.exe"));
+        create_file(&install_dir.join("control_tray.exe"));
         create_file(&install_dir.join(r"provider\windows_provider.dll"));
 
         let plan = build_install_plan(&InstallSystemComponentsPayload {

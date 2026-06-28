@@ -10,7 +10,7 @@ use common_protocol::SERVICE_NAME;
 
 use crate::{
     provider_registry::ProviderRegistryError, resource_directory::ResourceDirectoryError,
-    service_registry::ServiceRegistryError,
+    service_registry::ServiceRegistryError, user_startup::UserStartupError,
 };
 use windows_service::{
     service::{
@@ -309,6 +309,7 @@ pub enum InstallerError {
     ServiceRegistry(ServiceRegistryError),
     Service(windows_service::Error),
     TimedOut(String),
+    UserStartup(UserStartupError),
 }
 
 impl fmt::Display for InstallerError {
@@ -324,6 +325,7 @@ impl fmt::Display for InstallerError {
             }
             Self::Service(error) => write!(formatter, "windows service error: {error}"),
             Self::TimedOut(message) => write!(formatter, "timed out: {message}"),
+            Self::UserStartup(error) => write!(formatter, "user startup error: {error}"),
         }
     }
 }
@@ -357,6 +359,12 @@ impl From<ResourceDirectoryError> for InstallerError {
 impl From<ServiceRegistryError> for InstallerError {
     fn from(error: ServiceRegistryError) -> Self {
         Self::ServiceRegistry(error)
+    }
+}
+
+impl From<UserStartupError> for InstallerError {
+    fn from(error: UserStartupError) -> Self {
+        Self::UserStartup(error)
     }
 }
 

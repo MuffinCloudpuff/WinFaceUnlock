@@ -432,20 +432,31 @@ fn copy_then_rename(
     temporary_path: &Path,
 ) -> Result<(), StagePayloadError> {
     {
-        let mut source_file = fs::File::open(source_path)?;
+        let mut source_file = fs::File::open(source_path)
+            .map_err(|error| StagePayloadError::io_context("open source", source_path, error))?;
         let mut temporary_file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(temporary_path)?;
-        std::io::copy(&mut source_file, &mut temporary_file)?;
-        temporary_file.flush()?;
-        temporary_file.sync_all()?;
+            .open(temporary_path)
+            .map_err(|error| {
+                StagePayloadError::io_context("create temporary", temporary_path, error)
+            })?;
+        std::io::copy(&mut source_file, &mut temporary_file)
+            .map_err(|error| StagePayloadError::io_context("copy", target_path, error))?;
+        temporary_file
+            .flush()
+            .map_err(|error| StagePayloadError::io_context("flush", temporary_path, error))?;
+        temporary_file
+            .sync_all()
+            .map_err(|error| StagePayloadError::io_context("sync", temporary_path, error))?;
     }
 
     if target_path.exists() {
-        fs::remove_file(target_path)?;
+        fs::remove_file(target_path)
+            .map_err(|error| StagePayloadError::io_context("remove target", target_path, error))?;
     }
-    fs::rename(temporary_path, target_path)?;
+    fs::rename(temporary_path, target_path)
+        .map_err(|error| StagePayloadError::io_context("replace target", target_path, error))?;
     Ok(())
 }
 
@@ -467,17 +478,32 @@ pub enum StagePayloadError {
     UnsupportedManifestVersion(u32),
     NoPayloadFiles,
     InvalidFileId,
-    SourceRelativePathRequiresPayloadRoot { source_path: PathBuf },
+    SourceRelativePathRequiresPayloadRoot {
+        source_path: PathBuf,
+    },
     InvalidSourceRelativePath(PathBuf),
     MissingSourceFile(PathBuf),
     InvalidTargetPath(PathBuf),
     TargetPathIsDirectory(PathBuf),
     TargetExistsDifferent(PathBuf),
     ProviderDllInPlaceOverwriteBlocked(PathBuf),
+    IoWithPath {
+        operation: &'static str,
+        path: PathBuf,
+        error: std::io::Error,
+    },
     Io(std::io::Error),
 }
 
 impl StagePayloadError {
+    fn io_context(operation: &'static str, path: &Path, error: std::io::Error) -> Self {
+        Self::IoWithPath {
+            operation,
+            path: path.to_path_buf(),
+            error,
+        }
+    }
+
     pub fn is_provider_dll_in_place_overwrite_blocked(&self) -> bool {
         matches!(self, Self::ProviderDllInPlaceOverwriteBlocked(_))
     }
@@ -584,6 +610,15 @@ impl fmt::Display for StagePayloadError {
             Self::ProviderDllInPlaceOverwriteBlocked(path) => write!(
                 formatter,
                 "provider DLL in-place overwrite is blocked: {}",
+                path.display()
+            ),
+            Self::IoWithPath {
+                operation,
+                path,
+                error,
+            } => write!(
+                formatter,
+                "payload staging {operation} failed for {}: {error}",
                 path.display()
             ),
             Self::Io(error) => write!(formatter, "payload staging io error: {error}"),
@@ -693,6 +728,19 @@ mod tests {
         ));
         remove_temp_dir(&root);
         Ok(())
+    }
+
+    #[test]
+    fn io_error_message_names_target_path() {
+        let error = StagePayloadError::io_context(
+            "replace target",
+            Path::new(r"D:\Apps\WinFaceUnlock\desktop_input_agent.exe"),
+            std::io::Error::from_raw_os_error(5),
+        );
+
+        let message = error.to_string();
+        assert!(message.contains("replace target"));
+        assert!(message.contains(r"D:\Apps\WinFaceUnlock\desktop_input_agent.exe"));
     }
 
     #[test]

@@ -54,7 +54,7 @@ impl WindowsCredentialEnrollmentStore for WindowsCredentialEnrollmentAdapter {
 
         Ok(WindowsCredentialEnrollmentOutcome {
             windows_account_username: username,
-            display_name: Some(default_control_display_name()),
+            display_name: None,
             user_id: payload.user_id.clone(),
             user_sid: payload.user_sid.clone(),
             account_type: payload.account_type,
@@ -111,7 +111,6 @@ impl ControlRuntimeState {
 }
 
 const DEFAULT_CONTROL_USER_ID: &str = "dev-user";
-const DEFAULT_CONTROL_DISPLAY_NAME: &str = "用户1";
 #[cfg(not(windows))]
 const DEFAULT_CONTROL_USER_SID: &str = "S-1-5-21-winfaceunlock-pending";
 const ARG_CONTROL_DIAGNOSTICS_CLI: &str = "--winfaceunlock-control-diagnostics-cli";
@@ -208,17 +207,13 @@ fn current_windows_credential_account(
 
     Ok(WindowsCredentialAccountProfile {
         windows_account_username: username,
-        display_name: Some(default_control_display_name()),
+        display_name: None,
         user_id: user_id.clone(),
         user_sid,
         account_type: WindowsCredentialAccountType::Local,
         credential_ref,
         credential_secret_state,
     })
-}
-
-fn default_control_display_name() -> String {
-    DEFAULT_CONTROL_DISPLAY_NAME.to_owned()
 }
 
 fn current_windows_account_username() -> Result<String, ControlBackendError> {

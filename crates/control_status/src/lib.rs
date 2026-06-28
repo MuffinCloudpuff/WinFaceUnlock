@@ -19,9 +19,11 @@ use control_protocol::{
 };
 use serde::Deserialize;
 use windows_provider::{
-    COM_INPROC_SERVER_REGISTRY_PATH, LOGON_WAKE_MODE_BACKGROUND_POLICY, LOGON_WAKE_MODE_HYBRID,
-    LOGON_WAKE_MODE_INPUT_TRIGGERED, PROVIDER_CLSID_REGISTRY_PATH, PROVIDER_ROOT_REGISTRY_PATH,
-    REG_VALUE_AUTO_WAKE_ON_ADVISE, REG_VALUE_LOGON_WAKE_MODE,
+    COM_INPROC_SERVER_REGISTRY_PATH, LOGON_WAKE_MODE_BACKGROUND_POLICY,
+    LOGON_WAKE_MODE_BACKGROUND_SILENT_RECOGNITION, LOGON_WAKE_MODE_HYBRID,
+    LOGON_WAKE_MODE_INPUT_TRIGGERED, LOGON_WAKE_MODE_TRIGGERED_RECOGNITION,
+    PROVIDER_CLSID_REGISTRY_PATH, PROVIDER_ROOT_REGISTRY_PATH, REG_VALUE_AUTO_WAKE_ON_ADVISE,
+    REG_VALUE_LOGON_WAKE_MODE,
 };
 use windows_service::{
     service::{ServiceAccess, ServiceState, ServiceStatus},
@@ -626,19 +628,22 @@ fn bool_registry_value(value: bool) -> &'static str {
 
 fn logon_wake_mode_registry_value(mode: LogonWakeMode) -> &'static str {
     match mode {
-        LogonWakeMode::InputTriggered => LOGON_WAKE_MODE_INPUT_TRIGGERED,
-        LogonWakeMode::BackgroundPolicy => LOGON_WAKE_MODE_BACKGROUND_POLICY,
-        LogonWakeMode::Hybrid => LOGON_WAKE_MODE_HYBRID,
+        LogonWakeMode::TriggeredRecognition => LOGON_WAKE_MODE_TRIGGERED_RECOGNITION,
+        LogonWakeMode::BackgroundSilentRecognition => LOGON_WAKE_MODE_BACKGROUND_SILENT_RECOGNITION,
     }
 }
 
 fn parse_logon_wake_mode(value: &str) -> Option<LogonWakeMode> {
     match value.trim() {
-        LOGON_WAKE_MODE_INPUT_TRIGGERED | "input_triggered" => Some(LogonWakeMode::InputTriggered),
-        LOGON_WAKE_MODE_BACKGROUND_POLICY | "background_policy" => {
-            Some(LogonWakeMode::BackgroundPolicy)
-        }
-        LOGON_WAKE_MODE_HYBRID => Some(LogonWakeMode::Hybrid),
+        LOGON_WAKE_MODE_TRIGGERED_RECOGNITION
+        | "triggered_recognition"
+        | LOGON_WAKE_MODE_INPUT_TRIGGERED
+        | "input_triggered" => Some(LogonWakeMode::TriggeredRecognition),
+        LOGON_WAKE_MODE_BACKGROUND_SILENT_RECOGNITION
+        | "background_silent_recognition"
+        | LOGON_WAKE_MODE_BACKGROUND_POLICY
+        | "background_policy"
+        | LOGON_WAKE_MODE_HYBRID => Some(LogonWakeMode::BackgroundSilentRecognition),
         _ => None,
     }
 }
@@ -647,7 +652,7 @@ fn legacy_logon_wake_mode(auto_wake_on_advise: Option<String>) -> Option<LogonWa
     auto_wake_on_advise
         .as_deref()
         .and_then(parse_registry_bool)
-        .and_then(|enabled| enabled.then_some(LogonWakeMode::InputTriggered))
+        .and_then(|enabled| enabled.then_some(LogonWakeMode::TriggeredRecognition))
 }
 
 fn parse_logon_face_match_threshold(value: &str) -> Option<f32> {
@@ -748,7 +753,7 @@ impl SettingsSource for WindowsSettingsSource {
         registry::write_string_value(
             PROVIDER_ROOT_REGISTRY_PATH,
             REG_VALUE_AUTO_WAKE_ON_ADVISE,
-            bool_registry_value(!matches!(mode, LogonWakeMode::BackgroundPolicy)),
+            bool_registry_value(true),
         )
         .map_err(settings_write_error)
     }
@@ -1455,9 +1460,8 @@ mod tests {
         fn write_logon_wake_mode(&self, mode: LogonWakeMode) -> Result<(), ControlStatusError> {
             self.logon_wake_mode
                 .replace(Some(logon_wake_mode_registry_value(mode).to_owned()));
-            self.auto_wake_on_advise.replace(Some(
-                bool_registry_value(!matches!(mode, LogonWakeMode::BackgroundPolicy)).to_owned(),
-            ));
+            self.auto_wake_on_advise
+                .replace(Some(bool_registry_value(true).to_owned()));
             Ok(())
         }
 
@@ -1800,9 +1804,9 @@ mod tests {
     }
 
     #[test]
-    fn settings_reads_input_triggered_logon_wake_mode() -> Result<(), ControlStatusError> {
+    fn settings_reads_triggered_recognition_logon_wake_mode() -> Result<(), ControlStatusError> {
         let source = FakeSettingsSource {
-            logon_wake_mode: RefCell::new(Some(LOGON_WAKE_MODE_INPUT_TRIGGERED.to_owned())),
+            logon_wake_mode: RefCell::new(Some(LOGON_WAKE_MODE_TRIGGERED_RECOGNITION.to_owned())),
             ..FakeSettingsSource::default()
         };
 
@@ -1810,13 +1814,14 @@ mod tests {
 
         assert_eq!(
             settings.logon_wake_mode,
-            Some(LogonWakeMode::InputTriggered)
+            Some(LogonWakeMode::TriggeredRecognition)
         );
         Ok(())
     }
 
     #[test]
-    fn settings_reads_hybrid_logon_wake_mode() -> Result<(), ControlStatusError> {
+    fn settings_maps_legacy_hybrid_to_background_silent_recognition()
+    -> Result<(), ControlStatusError> {
         let source = FakeSettingsSource {
             logon_wake_mode: RefCell::new(Some(LOGON_WAKE_MODE_HYBRID.to_owned())),
             ..FakeSettingsSource::default()
@@ -1824,7 +1829,10 @@ mod tests {
 
         let settings = load_control_settings(&source)?;
 
-        assert_eq!(settings.logon_wake_mode, Some(LogonWakeMode::Hybrid));
+        assert_eq!(
+            settings.logon_wake_mode,
+            Some(LogonWakeMode::BackgroundSilentRecognition)
+        );
         Ok(())
     }
 
@@ -1839,7 +1847,7 @@ mod tests {
 
         assert_eq!(
             settings.logon_wake_mode,
-            Some(LogonWakeMode::InputTriggered)
+            Some(LogonWakeMode::TriggeredRecognition)
         );
         Ok(())
     }
@@ -1853,18 +1861,18 @@ mod tests {
             &source,
             &ControlSettingsPatch {
                 presence_lock_enabled: None,
-                logon_wake_mode: Some(LogonWakeMode::InputTriggered),
+                logon_wake_mode: Some(LogonWakeMode::TriggeredRecognition),
                 logon_face_match_threshold: None,
             },
         )?;
 
         assert_eq!(
             settings.logon_wake_mode,
-            Some(LogonWakeMode::InputTriggered)
+            Some(LogonWakeMode::TriggeredRecognition)
         );
         assert_eq!(
             source.logon_wake_mode.borrow().as_deref(),
-            Some(LOGON_WAKE_MODE_INPUT_TRIGGERED)
+            Some(LOGON_WAKE_MODE_TRIGGERED_RECOGNITION)
         );
         assert_eq!(source.auto_wake_on_advise.borrow().as_deref(), Some("true"));
         Ok(())

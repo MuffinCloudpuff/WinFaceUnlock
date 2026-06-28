@@ -215,39 +215,55 @@ impl LocalCameraAuthGrantIssuer {
         source: AuthSource,
         _request_started_at_unix_ms: i64,
     ) -> Result<AuthGrant, AuthFailureReason> {
+        self.issue_auth_grant_blocking_with_observer(
+            session_id,
+            source,
+            _request_started_at_unix_ms,
+            &mut |_| {},
+        )
+    }
+
+    fn issue_auth_grant_blocking_with_observer(
+        &mut self,
+        session_id: &SessionId,
+        source: AuthSource,
+        _request_started_at_unix_ms: i64,
+        on_grant_issued: &mut dyn FnMut(&AuthGrant),
+    ) -> Result<AuthGrant, AuthFailureReason> {
         write_service_event_detail(
             "LocalCameraAuth.Started",
             format!("session_id={} camera_id={}", session_id.0, self.camera_id.0),
         );
-        let outcome = self.authenticate_from_camera()?;
         let grant_sequence = self.next_grant_sequence;
         self.next_grant_sequence = self.next_grant_sequence.saturating_add(1);
-        let issued_at_unix_ms = current_time_unix_ms();
+        let mut issued_grant = None;
+        self.authenticate_from_camera(&mut |outcome| {
+            let grant = build_auth_grant(session_id, source, grant_sequence, outcome);
+            write_service_event_detail(
+                "LocalCameraAuth.AuthorizationIssued",
+                format!(
+                    "session_id={} match_score={} liveness_score={}",
+                    session_id.0, outcome.face_authentication.match_score, outcome.liveness_score
+                ),
+            );
+            on_grant_issued(&grant);
+            issued_grant = Some(grant);
+        })?;
+
+        let Some(grant) = issued_grant else {
+            return Err(AuthFailureReason::InternalError);
+        };
         write_service_event_detail(
             "LocalCameraAuth.Succeeded",
-            format!(
-                "session_id={} match_score={} liveness_score={}",
-                session_id.0, outcome.face_authentication.match_score, outcome.liveness_score
-            ),
+            format!("session_id={}", session_id.0),
         );
 
-        Ok(AuthGrant {
-            grant_id: GrantId(format!("camera-grant-{grant_sequence}")),
-            nonce: Nonce(format!("camera-nonce-{grant_sequence}")),
-            session_id: session_id.clone(),
-            user_id: outcome.face_authentication.matched_user_id,
-            source,
-            score: AuthScore {
-                match_score: outcome.face_authentication.match_score,
-                liveness_score: Some(outcome.liveness_score),
-            },
-            issued_at_unix_ms,
-            expires_at_unix_ms: issued_at_unix_ms + DEFAULT_GRANT_TTL.as_millis() as i64,
-        })
+        Ok(grant)
     }
 
     fn authenticate_from_camera(
         &mut self,
+        on_authorization_accepted: &mut dyn FnMut(&LocalCameraAuthenticationOutcome),
     ) -> Result<LocalCameraAuthenticationOutcome, AuthFailureReason> {
         write_service_event("LocalCameraAuth.LoadModelsStarted");
         self.authenticator
@@ -259,10 +275,12 @@ impl LocalCameraAuthGrantIssuer {
             return Err(AuthFailureReason::InternalError);
         }
 
-        let auth_result = self.authenticate_from_camera_with_loaded_runtime();
+        let auth_result =
+            self.authenticate_from_camera_with_loaded_runtime(on_authorization_accepted);
 
         self.liveness_provider.unload_model();
         self.authenticator.unload_models();
+        write_service_event("LocalCameraAuth.ModelsUnloaded");
         if let Err(reason) = &auth_result {
             write_service_event_detail("LocalCameraAuth.Failed", format!("reason={reason:?}"));
         }
@@ -272,6 +290,7 @@ impl LocalCameraAuthGrantIssuer {
 
     fn authenticate_from_camera_with_loaded_runtime(
         &mut self,
+        on_authorization_accepted: &mut dyn FnMut(&LocalCameraAuthenticationOutcome),
     ) -> Result<LocalCameraAuthenticationOutcome, AuthFailureReason> {
         let _camera_lease = acquire_camera_lease_until(
             CameraLeaseKind::LogonAuthentication,
@@ -366,10 +385,12 @@ impl LocalCameraAuthGrantIssuer {
                                         face_authentication.match_score
                                     ),
                                 );
-                                return Ok(LocalCameraAuthenticationOutcome {
+                                let outcome = LocalCameraAuthenticationOutcome {
                                     face_authentication,
                                     liveness_score,
-                                });
+                                };
+                                on_authorization_accepted(&outcome);
+                                return Ok(outcome);
                             }
                             Err(reason) => {
                                 last_rejection = reason;
@@ -393,7 +414,9 @@ impl LocalCameraAuthGrantIssuer {
 
             Err(last_rejection)
         })();
+        write_service_event("LocalCameraAuth.CloseCameraStarted");
         camera_provider.close();
+        write_service_event("LocalCameraAuth.CloseCameraFinished");
         auth_result
     }
 }
@@ -407,6 +430,25 @@ impl AuthGrantIssuer for LocalCameraAuthGrantIssuer {
         issued_at_unix_ms: i64,
     ) -> AuthGrantIssueResult {
         match self.issue_auth_grant_blocking(session_id, source, issued_at_unix_ms) {
+            Ok(grant) => AuthGrantIssueResult::Issued(grant),
+            Err(reason) => AuthGrantIssueResult::Failed(reason),
+        }
+    }
+
+    fn issue_auth_grant_with_observer(
+        &mut self,
+        session_id: &SessionId,
+        source: AuthSource,
+        _trigger_source: AuthTriggerSource,
+        issued_at_unix_ms: i64,
+        on_grant_issued: &mut dyn FnMut(&AuthGrant),
+    ) -> AuthGrantIssueResult {
+        match self.issue_auth_grant_blocking_with_observer(
+            session_id,
+            source,
+            issued_at_unix_ms,
+            on_grant_issued,
+        ) {
             Ok(grant) => AuthGrantIssueResult::Issued(grant),
             Err(reason) => AuthGrantIssueResult::Failed(reason),
         }
@@ -528,6 +570,28 @@ fn handle_auth_transient_frame_failure(
     }
 }
 
+fn build_auth_grant(
+    session_id: &SessionId,
+    source: AuthSource,
+    grant_sequence: u64,
+    outcome: &LocalCameraAuthenticationOutcome,
+) -> AuthGrant {
+    let issued_at_unix_ms = current_time_unix_ms();
+    AuthGrant {
+        grant_id: GrantId(format!("camera-grant-{grant_sequence}")),
+        nonce: Nonce(format!("camera-nonce-{grant_sequence}")),
+        session_id: session_id.clone(),
+        user_id: outcome.face_authentication.matched_user_id.clone(),
+        source,
+        score: AuthScore {
+            match_score: outcome.face_authentication.match_score,
+            liveness_score: Some(outcome.liveness_score),
+        },
+        issued_at_unix_ms,
+        expires_at_unix_ms: issued_at_unix_ms + DEFAULT_GRANT_TTL.as_millis() as i64,
+    }
+}
+
 fn current_time_unix_ms() -> i64 {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -538,8 +602,8 @@ fn current_time_unix_ms() -> i64 {
 
 fn auth_trigger_source_name(trigger_source: AuthTriggerSource) -> &'static str {
     match trigger_source {
-        AuthTriggerSource::InputTriggered => "input-triggered",
-        AuthTriggerSource::BackgroundPolicy => "background-policy",
+        AuthTriggerSource::CredentialScreenEntered => "credential-screen-entered",
+        AuthTriggerSource::BackgroundSilentMonitor => "background-silent-monitor",
     }
 }
 

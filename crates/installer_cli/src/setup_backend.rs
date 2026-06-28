@@ -1,3 +1,5 @@
+#[cfg(all(windows, not(test)))]
+use std::time::Duration;
 use std::{
     fs,
     io::{Read, Write},
@@ -443,20 +445,240 @@ fn stage_payload(request: &SetupRequestEnvelope) -> SetupResponseEnvelope {
     }
 }
 
-fn stop_existing_service_before_payload_staging(install_dir: &Path) -> Result<(), InstallerError> {
-    if !install_dir.join("win_service.exe").is_file() {
-        return Ok(());
-    }
-
+fn stop_existing_service_before_payload_staging(_install_dir: &Path) -> Result<(), InstallerError> {
     #[cfg(all(windows, not(test)))]
     {
-        ServiceManagerFacade::connect().and_then(|manager| manager.stop_service_if_exists())
+        if _install_dir.join("win_service.exe").is_file() {
+            ServiceManagerFacade::connect().and_then(|manager| manager.stop_service_if_exists())?;
+        }
+        terminate_install_dir_processes(_install_dir)?;
+        Ok(())
     }
 
     #[cfg(any(not(windows), test))]
     {
         Ok(())
     }
+}
+
+#[cfg(all(windows, not(test)))]
+fn terminate_install_dir_processes(install_dir: &Path) -> Result<(), InstallerError> {
+    let install_dir =
+        std::fs::canonicalize(install_dir).unwrap_or_else(|_| install_dir.to_path_buf());
+    let candidates = process_cleanup::install_dir_processes(&install_dir).map_err(|error| {
+        InstallerError::InvalidArguments(format!("process cleanup failed: {error}"))
+    })?;
+
+    for process in candidates {
+        eprintln!(
+            "installer_step: terminate-install-process pid={} image={}",
+            process.process_id,
+            process.image_path.display()
+        );
+        process_cleanup::terminate_process(process.process_id, Duration::from_secs(5)).map_err(
+            |error| {
+                InstallerError::InvalidArguments(format!(
+                    "terminate installed process failed: {error}"
+                ))
+            },
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(all(windows, not(test)))]
+mod process_cleanup {
+    use std::{
+        fmt,
+        path::{Path, PathBuf},
+        time::Duration,
+    };
+
+    use windows_sys::Win32::{
+        Foundation::{
+            CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        },
+        System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+                TH32CS_SNAPPROCESS,
+            },
+            Threading::{
+                OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+                PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess,
+                WaitForSingleObject,
+            },
+        },
+    };
+
+    const INSTALLED_PROCESS_NAMES: &[&str] = &[
+        "WinFaceUnlock.exe",
+        "control_tray.exe",
+        "desktop_input_agent.exe",
+        "diagnostics_cli.exe",
+        "installer_cli.exe",
+    ];
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct InstalledProcess {
+        pub process_id: u32,
+        pub image_path: PathBuf,
+    }
+
+    pub fn install_dir_processes(
+        install_dir: &Path,
+    ) -> Result<Vec<InstalledProcess>, ProcessCleanupError> {
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(ProcessCleanupError::win32("CreateToolhelp32Snapshot"));
+        }
+        let snapshot = OwnedHandle::new(snapshot);
+        let mut entry = PROCESSENTRY32W {
+            dwSize: size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut found = Vec::new();
+        let mut has_entry = unsafe { Process32FirstW(snapshot.raw, &mut entry) } != 0;
+        while has_entry {
+            if let Some(process) = process_from_entry(&entry, install_dir) {
+                found.push(process);
+            }
+            has_entry = unsafe { Process32NextW(snapshot.raw, &mut entry) } != 0;
+        }
+        Ok(found)
+    }
+
+    pub fn terminate_process(
+        process_id: u32,
+        timeout: Duration,
+    ) -> Result<(), ProcessCleanupError> {
+        if process_id == std::process::id() {
+            return Ok(());
+        }
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, process_id) };
+        if handle.is_null() {
+            return Err(ProcessCleanupError::win32("OpenProcess(terminate)"));
+        }
+        let handle = OwnedHandle::new(handle);
+        if unsafe { TerminateProcess(handle.raw, 0) } == 0 {
+            return Err(ProcessCleanupError::win32("TerminateProcess"));
+        }
+        match unsafe {
+            WaitForSingleObject(handle.raw, timeout.as_millis().min(u32::MAX as u128) as u32)
+        } {
+            WAIT_OBJECT_0 => Ok(()),
+            WAIT_TIMEOUT => Err(ProcessCleanupError::TimedOut(process_id)),
+            _ => Err(ProcessCleanupError::win32("WaitForSingleObject")),
+        }
+    }
+
+    fn process_from_entry(entry: &PROCESSENTRY32W, install_dir: &Path) -> Option<InstalledProcess> {
+        let exe_name = wide_array_to_string(&entry.szExeFile)?;
+        if !INSTALLED_PROCESS_NAMES
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&exe_name))
+        {
+            return None;
+        }
+        let image_path = query_process_image_path(entry.th32ProcessID)?;
+        if path_is_under(&image_path, install_dir) {
+            Some(InstalledProcess {
+                process_id: entry.th32ProcessID,
+                image_path,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn query_process_image_path(process_id: u32) -> Option<PathBuf> {
+        if process_id == std::process::id() {
+            return std::env::current_exe().ok();
+        }
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+        if handle.is_null() {
+            return None;
+        }
+        let handle = OwnedHandle::new(handle);
+        let mut buffer = vec![0_u16; 32768];
+        let mut len = buffer.len() as u32;
+        let ok =
+            unsafe { QueryFullProcessImageNameW(handle.raw, 0, buffer.as_mut_ptr(), &mut len) };
+        if ok == 0 || len == 0 {
+            return None;
+        }
+        buffer.truncate(len as usize);
+        Some(PathBuf::from(String::from_utf16_lossy(&buffer)))
+    }
+
+    fn path_is_under(path: &Path, root: &Path) -> bool {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        path.starts_with(root)
+    }
+
+    fn wide_array_to_string(buffer: &[u16]) -> Option<String> {
+        let end = buffer
+            .iter()
+            .position(|value| *value == 0)
+            .unwrap_or(buffer.len());
+        if end == 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buffer[..end]))
+    }
+
+    struct OwnedHandle {
+        raw: HANDLE,
+    }
+
+    impl OwnedHandle {
+        fn new(raw: HANDLE) -> Self {
+            Self { raw }
+        }
+    }
+
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            if !self.raw.is_null() && self.raw != INVALID_HANDLE_VALUE {
+                unsafe {
+                    let _ = CloseHandle(self.raw);
+                }
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    pub enum ProcessCleanupError {
+        TimedOut(u32),
+        Win32 { operation: &'static str, code: u32 },
+    }
+
+    impl ProcessCleanupError {
+        fn win32(operation: &'static str) -> Self {
+            Self::Win32 {
+                operation,
+                code: unsafe { GetLastError() },
+            }
+        }
+    }
+
+    impl fmt::Display for ProcessCleanupError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::TimedOut(process_id) => {
+                    write!(
+                        formatter,
+                        "process {process_id} did not exit before timeout"
+                    )
+                }
+                Self::Win32 { operation, code } => {
+                    write!(formatter, "{operation} failed with Windows error {code}")
+                }
+            }
+        }
+    }
+
+    impl std::error::Error for ProcessCleanupError {}
 }
 
 fn setup_preflight_failed_response(
@@ -595,6 +817,7 @@ fn install_plan_safe_details(
     json!({
         "install_dir": payload.install_dir,
         "service_binary_path": plan.service_plan.service_binary_path,
+        "control_tray_binary_path": plan.user_startup_plan.tray_binary_path,
         "provider_binary_path": plan.provider_plan.provider_binary_path,
         "face_template_path": plan.auth_config.as_ref().map(|config| &config.face_template_path),
         "yunet_model_path": plan.auth_config.as_ref().map(|config| &config.yunet_model_path),
@@ -605,6 +828,7 @@ fn install_plan_safe_details(
             "wake_auth_source": plan.provider_plan.wake_auth_source,
             "tile_visibility": plan.provider_plan.tile_visibility,
             "auto_wake_on_advise": plan.provider_plan.auto_wake_on_advise,
+            "logon_wake_mode": plan.provider_plan.logon_wake_mode,
         },
     })
 }
@@ -1520,6 +1744,7 @@ fn uninstall(request: &SetupRequestEnvelope) -> SetupResponseEnvelope {
         resource_plan: ResourceDirectoryPlan::from_environment_or_default(),
         stop_service_first: payload.stop_service_first,
         delete_data: !payload.preserve_data,
+        remove_user_startup: true,
     };
 
     match InstallerOrchestrator::uninstall(&plan) {
@@ -1529,6 +1754,7 @@ fn uninstall(request: &SetupRequestEnvelope) -> SetupResponseEnvelope {
             json!({
                 "preserve_data": payload.preserve_data,
                 "stop_service_first": payload.stop_service_first,
+                "remove_user_startup": true,
             }),
         ),
         Err(error) => SetupResponseEnvelope::failed(

@@ -6,6 +6,7 @@
     <RootNamespace>WinFaceUnlock.Control.App</RootNamespace>
     <AssemblyName>WinFaceUnlock</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\icons\WinFaceUnlock.ico</ApplicationIcon>
     <UseWinUI>true</UseWinUI>
     <WindowsPackageType>None</WindowsPackageType>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
