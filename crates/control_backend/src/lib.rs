@@ -3918,7 +3918,6 @@ mod tests {
         let template_path = PathBuf::from(r"C:\ProgramData\WinFaceUnlock\selected.json");
 
         let result = applier.apply_face_enrollment_template(&template_path, "opencv-index:1");
-
         assert!(result.is_ok());
         assert_eq!(
             requests.borrow().as_slice(),

@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     fmt,
     fs::{self, OpenOptions},
     io::Write,
@@ -813,6 +813,7 @@ fn run_guided_enroll_with_output_dir(
         enrollment.pose_provider_capabilities()
     );
     let mut partial_enrollment_reasons = Vec::new();
+    let mut best_avatar: Option<(video_provider::VideoFrame, face_engine::FaceBox, f32)> = None;
     for (step_index, step) in guided_steps.iter().enumerate() {
         write_guided_enrollment_status(
             output_dir,
@@ -941,6 +942,12 @@ fn run_guided_enroll_with_output_dir(
             let last_frame_result =
                 frame_result_for_guided_observation(&observation, pose_ready_min_fit_score);
             if guided_observation_passes_sample_gate(&observation, pose_ready_min_fit_score) {
+                if *step == GuidedEnrollmentStep::FrontalPrimary && observation.detected_faces.len() == 1 {
+                    let score = observation.quality_score;
+                    if best_avatar.as_ref().map_or(true, |(_, _, best_score)| score > *best_score) {
+                        best_avatar = Some((frame.clone(), observation.detected_faces[0].bounds.clone(), score));
+                    }
+                }
                 accepted_frame_count = accepted_frame_count.saturating_add(1);
                 println!(
                     "step={} recording_frame_count={}/{} quality_score={} pose_fit_score={} pose_estimate={:?}",
@@ -1009,6 +1016,10 @@ fn run_guided_enroll_with_output_dir(
             )?;
             return Err(incomplete_step);
         }
+    }
+
+    if let Some((best_frame, best_box, _)) = best_avatar {
+        let _ = emit_guided_enrollment_avatar_frame(&enrollment_id, &best_frame, &best_box);
     }
 
     provider.close();
@@ -1445,6 +1456,94 @@ fn encode_preview_frame_base64(
 
     let mut encoded = Vector::<u8>::new();
     let params = Vector::from_slice(&[imgcodecs::IMWRITE_JPEG_QUALITY, 70]);
+    imgcodecs::imencode(".jpg", &image, &mut encoded, &params)
+        .map_err(|_| DiagnosticError::IoFailed)?
+        .then_some(())
+        .ok_or(DiagnosticError::IoFailed)?;
+    Ok(BASE64_STANDARD.encode(encoded.to_vec()))
+}
+
+fn emit_guided_enrollment_avatar_frame(
+    enrollment_id: &str,
+    frame: &video_provider::VideoFrame,
+    face_box: &face_engine::FaceBox,
+) -> Result<(), DiagnosticError> {
+    let image_base64 = encode_preview_frame_cropped_base64(frame, face_box)?;
+    let event = serde_json::json!({
+        "enrollment_session_id": enrollment_id,
+        "frame_seq": 999999,
+        "updated_at_unix_ms": current_time_unix_ms(),
+        "mime_type": "image/jpeg",
+        "image_base64": image_base64,
+    });
+    println!(
+        "{PREVIEW_EVENT_PREFIX}{}",
+        serde_json::to_string(&event).map_err(|_| DiagnosticError::IoFailed)?
+    );
+    Ok(())
+}
+
+fn encode_preview_frame_cropped_base64(
+    frame: &video_provider::VideoFrame,
+    face_box: &face_engine::FaceBox,
+) -> Result<String, DiagnosticError> {
+    let channels = match frame.format {
+        PixelFormat::Bgr8 | PixelFormat::Rgb8 => 3,
+        PixelFormat::Gray8 => 1,
+    };
+    let mat = Mat::from_slice(&frame.data).map_err(|_| DiagnosticError::IoFailed)?;
+    let mat = mat
+        .reshape(channels, frame.height as i32)
+        .map_err(|_| DiagnosticError::IoFailed)?;
+    let mut image = mat.try_clone().map_err(|_| DiagnosticError::IoFailed)?;
+    if frame.format == PixelFormat::Rgb8 {
+        let mut bgr = Mat::default();
+        imgproc::cvt_color(
+            &image,
+            &mut bgr,
+            imgproc::COLOR_RGB2BGR,
+            0,
+            AlgorithmHint::ALGO_HINT_DEFAULT,
+        )
+        .map_err(|_| DiagnosticError::IoFailed)?;
+        image = bgr;
+    }
+
+    let max_dim = face_box.width.max(face_box.height);
+    let padding = max_dim * 0.4;
+    let crop_size = (max_dim + 2.0 * padding) as i32;
+    let cx = face_box.x + face_box.width / 2.0;
+    let cy = face_box.y + face_box.height / 2.0;
+
+    let mut x1 = (cx - crop_size as f32 / 2.0) as i32;
+    let mut y1 = (cy - crop_size as f32 / 2.0) as i32;
+    let mut x2 = x1 + crop_size;
+    let mut y2 = y1 + crop_size;
+
+    x1 = x1.max(0);
+    y1 = y1.max(0);
+    x2 = x2.min(image.cols());
+    y2 = y2.min(image.rows());
+
+    if x2 > x1 && y2 > y1 {
+        let roi = opencv::core::Rect::new(x1, y1, x2 - x1, y2 - y1);
+        let cropped = Mat::roi(&image, roi).map_err(|_| DiagnosticError::IoFailed)?;
+        
+        let mut resized = Mat::default();
+        imgproc::resize(
+            &cropped,
+            &mut resized,
+            opencv::core::Size::new(256, 256),
+            0.0,
+            0.0,
+            imgproc::INTER_AREA,
+        )
+        .map_err(|_| DiagnosticError::IoFailed)?;
+        image = resized;
+    }
+
+    let mut encoded = Vector::<u8>::new();
+    let params = Vector::from_slice(&[imgcodecs::IMWRITE_JPEG_QUALITY, 85]);
     imgcodecs::imencode(".jpg", &image, &mut encoded, &params)
         .map_err(|_| DiagnosticError::IoFailed)?
         .then_some(())
