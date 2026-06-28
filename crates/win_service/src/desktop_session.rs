@@ -1,4 +1,4 @@
-#![allow(unsafe_code)]
+﻿#![allow(unsafe_code)]
 
 #[cfg(windows)]
 pub fn active_user_session_id() -> Option<u32> {

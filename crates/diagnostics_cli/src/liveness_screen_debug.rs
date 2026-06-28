@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     fmt,
     fs::{self, File},
     io::Write,
@@ -8,8 +8,8 @@ use std::{
 };
 
 use face_engine::{
-    DetectedFace, FaceEngineError, FaceModelProvider, OpenCvFaceModelConfig,
-    OpenCvFaceModelProvider,
+    DetectedFace, FaceEngineError, FaceModelProvider, HybridFaceModelConfig,
+    HybridFaceModelProvider,
 };
 use face_liveness::{
     LivenessDecision, LivenessPolicyDecision, LivenessProviderError, LivenessResult,
@@ -31,7 +31,7 @@ pub struct LivenessScreenDebugConfig {
     pub requested_frame_height: Option<u32>,
     pub frames: u32,
     pub frame_delay_ms: u32,
-    pub model_config: OpenCvFaceModelConfig,
+    pub model_config: HybridFaceModelConfig,
     pub screen_replay_geometry_provider_config: Option<ScreenReplayLivenessProviderConfig>,
     pub minifasnet_provider_config: Option<MiniFasNetLivenessProviderConfig>,
     pub save_debug_images: bool,
@@ -151,7 +151,7 @@ pub fn run_liveness_screen_debug(
     let camera_id = selected_camera_id(config.camera_id, &sources)?;
     camera_provider.open(&camera_id)?;
 
-    let mut model_provider = OpenCvFaceModelProvider::new(config.model_config);
+    let mut model_provider = HybridFaceModelProvider::new(config.model_config);
     model_provider.load_models()?;
     let screen_replay_geometry_provider = config
         .screen_replay_geometry_provider_config

@@ -1,4 +1,4 @@
-#![cfg_attr(feature = "native-bridge", allow(unsafe_code))]
+﻿#![cfg_attr(feature = "native-bridge", allow(unsafe_code))]
 
 use std::path::PathBuf;
 

@@ -1,4 +1,4 @@
-use video_provider::{
+﻿use video_provider::{
     CameraId, OpenCvCameraProvider, OpenCvCameraProviderConfig, VideoFrameProvider,
 };
 

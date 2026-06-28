@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     fs,
     path::PathBuf,
     sync::{
@@ -11,7 +11,7 @@ use std::{
 
 use common_protocol::ProtocolError;
 use face_auth::RecognitionTemplates;
-use face_engine::{FaceTemplate, FaceTemplateCodecError, FaceTemplateSet, OpenCvFaceModelConfig};
+use face_engine::{FaceTemplate, FaceTemplateCodecError, FaceTemplateSet, HybridFaceModelConfig};
 
 use crate::{
     camera_backend_profiles::apply_profile_to_config,
@@ -364,7 +364,7 @@ fn run_face_presence_monitor_for_local_camera(
     let templates = RecognitionTemplates::new(read_face_templates(
         &local_camera_config.face_template_path,
     )?);
-    let model_config = OpenCvFaceModelConfig::new(
+    let model_config = HybridFaceModelConfig::new(
         local_camera_config.yunet_model_path,
         local_camera_config.sface_model_path,
     );

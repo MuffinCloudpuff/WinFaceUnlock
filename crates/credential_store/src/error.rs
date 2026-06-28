@@ -1,4 +1,4 @@
-#[derive(Clone, Debug, Eq, PartialEq)]
+﻿#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CredentialStoreError {
     StoreUnavailable,
     IoFailed,

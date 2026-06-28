@@ -1,4 +1,4 @@
-mod minifasnet;
+﻿mod minifasnet;
 mod opencv_debug;
 mod policy;
 mod preprocessing;

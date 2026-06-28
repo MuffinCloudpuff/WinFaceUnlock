@@ -1,4 +1,4 @@
-use crate::{DatabaseMigration, DatabaseSchemaVersion};
+﻿use crate::{DatabaseMigration, DatabaseSchemaVersion};
 
 pub struct SqlCipherSchema;
 

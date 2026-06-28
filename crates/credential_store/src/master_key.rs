@@ -1,4 +1,4 @@
-use zeroize::Zeroize;
+﻿use zeroize::Zeroize;
 
 pub const MASTER_KEY_LEN: usize = 32;
 

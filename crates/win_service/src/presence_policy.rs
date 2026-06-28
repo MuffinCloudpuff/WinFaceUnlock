@@ -1,4 +1,4 @@
-#[derive(Clone, Debug, PartialEq)]
+﻿#[derive(Clone, Debug, PartialEq)]
 pub struct PresencePolicyConfig {
     pub presence_stable_initial_interval_ms: u64,
     pub presence_stable_second_interval_ms: u64,

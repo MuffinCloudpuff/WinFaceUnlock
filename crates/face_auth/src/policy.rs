@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+﻿#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AttemptPolicyConfig {
     pub required_consecutive_match_count: u32,
     pub failure_limit_before_cooldown: u32,

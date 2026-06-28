@@ -1,4 +1,4 @@
-use crate::{FaceEmbedding, FaceMatch, FaceMatchDecision, FaceModelDescriptor, cosine_similarity};
+﻿use crate::{FaceEmbedding, FaceMatch, FaceMatchDecision, FaceModelDescriptor, cosine_similarity};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct FaceTemplateRef(pub String);

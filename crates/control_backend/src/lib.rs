@@ -1,3 +1,4 @@
+use std::os::windows::process::CommandExt;
 use std::{
     collections::HashMap,
     fs,
@@ -8,7 +9,6 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use std::os::windows::process::CommandExt;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -45,7 +45,7 @@ const ENV_SFACE_MODEL_PATH: &str = "WINFACEUNLOCK_SFACE_MODEL_PATH";
 const DIAGNOSTICS_CLI_FILE_NAME: &str = "diagnostics_cli.exe";
 const FACE_ENROLLMENT_OUTPUT_DIR_NAME: &str = "face-enrollment";
 const DEFAULT_YUNET_MODEL_PATH: &str = "models/face_detection_yunet_2023mar.onnx";
-const DEFAULT_SFACE_MODEL_PATH: &str = "models/face_recognition_sface_2021dec.onnx";
+const DEFAULT_SFACE_MODEL_PATH: &str = "models/ghostfacenet_v1_stride2.onnx";
 const SELECTED_TEMPLATES_FILE_NAME: &str = "selected_templates.json";
 const ENROLLMENT_STATUS_FILE_NAME: &str = "enrollment_status.json";
 const ENROLLMENT_PREVIEW_FRAME_FILE_NAME: &str = "preview_frame.jpg";
@@ -252,9 +252,12 @@ where
         let install_dir = std::env::current_exe()
             .ok()
             .and_then(|path| path.parent().map(Path::to_path_buf))
-            .ok_or_else(|| ControlBackendError::face_enrollment_failed("Failed to determine install directory"))?;
+            .ok_or_else(|| {
+                ControlBackendError::face_enrollment_failed("Failed to determine install directory")
+            })?;
 
-        let template_store = control_status::WindowsFaceTemplateStatusStore::from_environment_or_default();
+        let template_store =
+            control_status::WindowsFaceTemplateStatusStore::from_environment_or_default();
         template_store
             .apply_local_camera_auth_config(template_path, camera_id, &install_dir)
             .map_err(|e| ControlBackendError::face_enrollment_failed(format!("{:?}", e)))?;
@@ -312,7 +315,9 @@ where
         patch: &ControlSettingsPatch,
     ) -> Result<ControlSettingsSnapshot, ControlBackendError> {
         if !patch.has_updates() || !patch.has_valid_values() {
-            return Err(ControlBackendError::settings_persistence_failed("Invalid patch"));
+            return Err(ControlBackendError::settings_persistence_failed(
+                "Invalid patch",
+            ));
         }
 
         let should_reload_auth_config = patch.logon_face_match_threshold.is_some();
@@ -329,10 +334,14 @@ where
 
             match event {
                 ServiceEvent::AuthConfigReloaded => {}
-                ServiceEvent::RequestRejected { reason } => return Err(settings_update_protocol_error(reason)),
-                _ => return Err(ControlBackendError::settings_persistence_failed(
-                    "service returned an invalid auth config reload response",
-                )),
+                ServiceEvent::RequestRejected { reason } => {
+                    return Err(settings_update_protocol_error(reason));
+                }
+                _ => {
+                    return Err(ControlBackendError::settings_persistence_failed(
+                        "service returned an invalid auth config reload response",
+                    ));
+                }
             }
         }
 

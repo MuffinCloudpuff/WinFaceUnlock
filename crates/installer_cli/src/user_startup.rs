@@ -83,7 +83,7 @@ mod registry {
         Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR},
         System::Registry::{
             HKEY, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-            RegOpenKeyExW, RegDeleteValueW, RegSetValueExW,
+            RegDeleteValueW, RegOpenKeyExW, RegSetValueExW,
         },
     };
 
@@ -116,7 +116,10 @@ mod registry {
         Ok(())
     }
 
-    pub fn delete_local_machine_value(path: &str, value_name: &str) -> Result<(), UserStartupError> {
+    pub fn delete_local_machine_value(
+        path: &str,
+        value_name: &str,
+    ) -> Result<(), UserStartupError> {
         let key = open_key(path)?;
         let name = to_wide_null(value_name);
         let status = unsafe { RegDeleteValueW(key.raw, name.as_ptr()) };

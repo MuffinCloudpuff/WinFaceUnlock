@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     fmt,
     fs::{self, File},
     io::Write,
@@ -8,7 +8,7 @@ use std::{
 };
 
 use face_engine::{
-    FaceEngineError, FaceModelProvider, OpenCvFaceModelConfig, OpenCvFaceModelProvider,
+    FaceEngineError, FaceModelProvider, HybridFaceModelConfig, HybridFaceModelProvider,
 };
 use serde_json::json;
 use video_provider::{
@@ -26,7 +26,7 @@ pub struct FaceDebugSnapshotConfig {
     pub requested_frame_height: Option<u32>,
     pub frames: u32,
     pub frame_delay_ms: u32,
-    pub model_config: OpenCvFaceModelConfig,
+    pub model_config: HybridFaceModelConfig,
     pub save_aligned_faces: bool,
 }
 
@@ -112,7 +112,7 @@ pub fn run_face_debug_snapshot(
     let camera_id = selected_camera_id(config.camera_id, &sources)?;
     camera_provider.open(&camera_id)?;
 
-    let mut model_provider = OpenCvFaceModelProvider::new(config.model_config);
+    let mut model_provider = HybridFaceModelProvider::new(config.model_config);
     model_provider.load_models()?;
 
     print_scenario_prompt(&config.scenario, config.start_delay_seconds);
@@ -144,7 +144,7 @@ pub fn run_face_debug_snapshot(
 
         let base_name = format!("{frame_index:05}");
         let annotated_frame_path = frames_dir.join(format!("{base_name}.jpg"));
-        OpenCvFaceModelProvider::write_detection_debug_frame(
+        HybridFaceModelProvider::write_detection_debug_frame(
             &frame,
             &faces,
             &annotated_frame_path,

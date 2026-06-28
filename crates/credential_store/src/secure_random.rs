@@ -1,4 +1,4 @@
-use crate::CredentialStoreError;
+﻿use crate::CredentialStoreError;
 
 pub trait SecureRandom {
     fn fill_cryptographic_bytes(&self, destination: &mut [u8]) -> Result<(), CredentialStoreError>;

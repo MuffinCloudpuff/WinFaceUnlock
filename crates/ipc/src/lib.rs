@@ -1,4 +1,4 @@
-mod codec;
+﻿mod codec;
 mod credential_material;
 mod grant_registry;
 #[cfg(windows)]

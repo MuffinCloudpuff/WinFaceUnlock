@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+﻿use std::{path::PathBuf, time::Duration};
 
 use crate::desktop_input_state::desktop_input_snapshot_path;
 

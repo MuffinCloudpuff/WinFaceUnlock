@@ -1,4 +1,4 @@
-use common_protocol::PROVIDER_NAME;
+﻿use common_protocol::PROVIDER_NAME;
 use windows_core::GUID;
 
 pub const WINDOWS_PROVIDER_NAME: &str = PROVIDER_NAME;

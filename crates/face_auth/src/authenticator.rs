@@ -1,4 +1,4 @@
-use common_protocol::{AuthFailureReason, UserId};
+﻿use common_protocol::{AuthFailureReason, UserId};
 use face_engine::{
     DetectedFace, FaceEngineError, FaceMatchDecision, FaceModelDescriptor, FaceModelProvider,
     FaceTemplate, FaceTemplateMatch, FaceTemplateMatcher,

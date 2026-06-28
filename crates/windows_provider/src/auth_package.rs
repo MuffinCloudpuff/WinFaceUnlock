@@ -1,4 +1,4 @@
-#![allow(unsafe_code)]
+﻿#![allow(unsafe_code)]
 
 use windows::Win32::{
     Foundation::{E_FAIL, HANDLE, STATUS_SUCCESS},

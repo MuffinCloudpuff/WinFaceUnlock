@@ -1,4 +1,4 @@
-pub const USAGE_AUDIT_EVENT_SCHEMA_VERSION: u32 = 1;
+﻿pub const USAGE_AUDIT_EVENT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
 pub struct UsageAuditEvent {

@@ -1,4 +1,4 @@
-mod commands;
+﻿mod commands;
 mod installation;
 mod provider_registry;
 mod resource_directory;

@@ -1,4 +1,4 @@
-#[cfg(all(windows, not(test)))]
+﻿#[cfg(all(windows, not(test)))]
 use std::time::Duration;
 use std::{
     fs,

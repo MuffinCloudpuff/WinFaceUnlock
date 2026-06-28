@@ -1,4 +1,4 @@
-use zeroize::Zeroize;
+﻿use zeroize::Zeroize;
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct CredentialSecret {

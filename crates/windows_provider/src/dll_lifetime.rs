@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicI32, Ordering};
+﻿use std::sync::atomic::{AtomicI32, Ordering};
 
 static ACTIVE_WORKER_COUNT: AtomicI32 = AtomicI32::new(0);
 

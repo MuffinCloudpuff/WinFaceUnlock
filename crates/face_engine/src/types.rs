@@ -1,4 +1,4 @@
-use video_provider::VideoFrame;
+﻿use video_provider::VideoFrame;
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct FaceModelDescriptor {

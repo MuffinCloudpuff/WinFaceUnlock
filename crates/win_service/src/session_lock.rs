@@ -1,4 +1,4 @@
-#[derive(Debug, Eq, PartialEq)]
+﻿#[derive(Debug, Eq, PartialEq)]
 pub enum SessionLockError {
     PlatformUnavailable,
     LockRequestFailed,

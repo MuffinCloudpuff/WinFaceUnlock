@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+﻿use std::path::{Path, PathBuf};
 
 use common_protocol::ProtocolError;
 use face_liveness::MiniFasNetLivenessProviderConfig;
@@ -81,7 +81,7 @@ const REG_PRESENCE_POSE_MIN_LANDMARK_PRESENCE: &str = "PresencePoseMinLandmarkPr
 const AUTH_MODE_MANUAL_TEST: &str = "manual-test";
 const AUTH_MODE_LOCAL_CAMERA: &str = "local-camera";
 const DEFAULT_YUNET_MODEL_PATH: &str = "models/face_detection_yunet_2023mar.onnx";
-const DEFAULT_SFACE_MODEL_PATH: &str = "models/face_recognition_sface_2021dec.onnx";
+const DEFAULT_SFACE_MODEL_PATH: &str = "models/ghostfacenet_v1_stride2.onnx";
 const DEFAULT_MINIFASNET_MODEL_PATH: &str = "models/minifasnet_v2.onnx";
 const DEFAULT_MINIFASNET_CROP_SCALE: f32 = 2.7;
 const DEFAULT_MINIFASNET_MIN_LIVE_SCORE: f32 = 0.80;

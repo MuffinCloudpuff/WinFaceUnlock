@@ -1,4 +1,4 @@
-#[derive(Clone, Debug, Eq, PartialEq)]
+﻿#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HardwareFingerprint {
     pub machine_sid_hash: Option<String>,
     pub firmware_uuid_hash: Option<String>,

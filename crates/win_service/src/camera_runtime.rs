@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     sync::{Mutex, OnceLock},
     thread,
     time::{Duration, Instant},

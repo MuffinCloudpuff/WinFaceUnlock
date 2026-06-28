@@ -234,5 +234,3 @@ impl Drop for OpenCvCameraProvider {
         self.close();
     }
 }
-
-

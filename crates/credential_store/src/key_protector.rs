@@ -1,4 +1,4 @@
-use crate::{CredentialStoreError, MasterKey};
+﻿use crate::{CredentialStoreError, MasterKey};
 
 pub trait KeyProtector {
     fn generate_master_key(&self) -> Result<MasterKey, CredentialStoreError>;

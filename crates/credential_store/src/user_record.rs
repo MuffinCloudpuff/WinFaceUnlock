@@ -1,4 +1,4 @@
-use common_protocol::{AccountType, CredentialRef, UserId};
+﻿use common_protocol::{AccountType, CredentialRef, UserId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UserRecord {

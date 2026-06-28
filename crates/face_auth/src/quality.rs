@@ -1,4 +1,4 @@
-use face_engine::{DetectedFace, FaceSampleRejectReason, FaceTemplateQualityScores};
+﻿use face_engine::{DetectedFace, FaceSampleRejectReason, FaceTemplateQualityScores};
 use face_pose::{FacePoseEstimate, pose_fit_score};
 use video_provider::{PixelFormat, VideoFrame};
 

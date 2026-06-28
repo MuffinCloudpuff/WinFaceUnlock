@@ -1,4 +1,4 @@
-mod authenticator;
+﻿mod authenticator;
 #[cfg(feature = "enrollment")]
 mod enrollment;
 #[cfg(feature = "enrollment")]

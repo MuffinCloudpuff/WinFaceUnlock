@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+﻿#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DatabaseSchemaVersion(pub u32);
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 
 use common_protocol::{CredentialRef, ProtectedCredential, UserId};
 use hardware_binding::HardwareFingerprint;

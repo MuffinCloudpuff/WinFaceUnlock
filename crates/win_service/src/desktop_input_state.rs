@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+﻿use std::{path::PathBuf, time::Duration};
 
 use desktop_input::{
     DesktopInputSnapshot, SNAPSHOT_SCHEMA_VERSION, SNAPSHOT_SOURCE_GET_LAST_INPUT_INFO,

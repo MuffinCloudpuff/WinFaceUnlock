@@ -6,7 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+ndarray = "0.17.2"
 opencv = { version = "0.98.2", default-features = false, features = ["clang-runtime", "calib3d", "objdetect", "imgcodecs", "imgproc"] }
+ort = "2.0.0-rc.12"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 video_provider = { path = "../video_provider" }

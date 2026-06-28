@@ -1,9 +1,12 @@
-mod embedding;
+﻿mod embedding;
+pub mod hybrid_model;
 mod opencv_model;
+pub mod ort_model;
 mod template;
 mod types;
 
 pub use embedding::cosine_similarity;
+pub use hybrid_model::{HybridFaceModelConfig, HybridFaceModelProvider};
 pub use opencv_model::{
     FaceModelPipeline, HotSwappableFaceModelPipeline, OpenCvFaceModelConfig,
     OpenCvFaceModelProvider, OpenCvSFaceRecognitionProvider, OpenCvSFaceRecognizerConfig,

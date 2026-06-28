@@ -30,7 +30,7 @@ impl OpenCvYuNetDetectorConfig {
     pub fn new(model_path: PathBuf) -> Self {
         Self {
             model_path,
-            score_threshold: 0.9,
+            score_threshold: 0.6,
             nms_threshold: 0.3,
             top_k: 5000,
         }

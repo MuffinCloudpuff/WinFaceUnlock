@@ -1,4 +1,4 @@
-#![cfg(windows)]
+﻿#![cfg(windows)]
 #![allow(unsafe_code)]
 
 use crate::{CameraId, CameraInfo, VideoError};

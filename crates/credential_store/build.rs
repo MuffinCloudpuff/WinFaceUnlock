@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+﻿use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=../../vcpkg_installed/x64-windows/lib");

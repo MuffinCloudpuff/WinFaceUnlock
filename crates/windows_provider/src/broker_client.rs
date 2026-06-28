@@ -1,4 +1,4 @@
-use std::{thread, time::Duration};
+﻿use std::{thread, time::Duration};
 
 use common_protocol::{
     AuthFailureReason, AuthSource, AuthTriggerSource, PIPE_NAME, ProtectedCredentialMaterial,

@@ -434,7 +434,9 @@ dependencies = [
 name = "face_engine"
 version = "0.1.0"
 dependencies = [
+ "ndarray",
  "opencv",
+ "ort",
  "serde",
  "serde_json",
  "video_provider",

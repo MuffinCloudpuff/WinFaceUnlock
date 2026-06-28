@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},

@@ -1,4 +1,4 @@
-use crate::CredentialStoreError;
+﻿use crate::CredentialStoreError;
 
 const CREDENTIAL_BLOB_MAGIC: &[u8; 8] = b"WFUCRD01";
 const CREDENTIAL_BLOB_VERSION: u8 = 1;

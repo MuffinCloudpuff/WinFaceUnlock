@@ -1,4 +1,4 @@
-use video_provider::{VideoError, VideoFrame};
+﻿use video_provider::{VideoError, VideoFrame};
 
 pub const DEFAULT_MAX_CONSECUTIVE_TRANSIENT_FRAME_FAILURES: u32 = 5;
 

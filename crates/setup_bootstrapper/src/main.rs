@@ -1,4 +1,4 @@
-#![allow(unsafe_code)]
+﻿#![allow(unsafe_code)]
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::{

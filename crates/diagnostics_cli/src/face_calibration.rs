@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     fmt,
     fs::{self, File},
     io::Write,
@@ -9,8 +9,8 @@ use std::{
 
 use face_auth::RecognitionTemplates;
 use face_engine::{
-    FaceEngineError, FaceModelProvider, FaceTemplateMatcher, OpenCvFaceModelConfig,
-    OpenCvFaceModelProvider,
+    FaceEngineError, FaceModelProvider, FaceTemplateMatcher, HybridFaceModelConfig,
+    HybridFaceModelProvider,
 };
 use serde_json::json;
 use video_provider::{
@@ -28,7 +28,7 @@ pub struct FaceCalibrationConfig {
     pub requested_frame_height: Option<u32>,
     pub frames: u32,
     pub frame_delay_ms: u32,
-    pub model_config: OpenCvFaceModelConfig,
+    pub model_config: HybridFaceModelConfig,
     pub templates: RecognitionTemplates,
     pub threshold_min: f32,
     pub threshold_max: f32,
@@ -128,7 +128,7 @@ pub fn run_face_calibration(config: FaceCalibrationConfig) -> Result<(), FaceCal
     let camera_id = selected_camera_id(config.camera_id, &sources)?;
     camera_provider.open(&camera_id)?;
 
-    let mut model_provider = OpenCvFaceModelProvider::new(config.model_config);
+    let mut model_provider = HybridFaceModelProvider::new(config.model_config);
     model_provider.load_models()?;
     let recognition_model = model_provider.recognition_model().clone();
     let matcher = FaceTemplateMatcher::new(f32::INFINITY);

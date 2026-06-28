@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+﻿use std::path::PathBuf;
 
 use crate::screen_snapshot::{ScreenSnapshotError, capture_primary_screen_to_bmp};
 

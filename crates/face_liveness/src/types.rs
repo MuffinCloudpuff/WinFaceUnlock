@@ -1,4 +1,4 @@
-use face_engine::FaceBox;
+﻿use face_engine::FaceBox;
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct FaceImageRect {

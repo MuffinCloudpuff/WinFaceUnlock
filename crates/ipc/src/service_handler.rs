@@ -1,10 +1,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::GrantRegistry;
 use common_protocol::{
     AuthFailureReason, AuthGrant, AuthSource, AuthTriggerSource, ProtectedCredential,
     ProtectedCredentialMaterial, ProtocolError, ServiceEvent, ServiceRequest, SessionId,
 };
-use crate::GrantRegistry;
 
 pub trait AuthGrantIssuer {
     fn issue_auth_grant(
@@ -96,11 +96,7 @@ where
     R: ProtectedCredentialResolver + ProtectedCredentialMaterialResolver,
     C: UnixTimeMillisClock,
 {
-    pub fn new(
-        grant_issuer: I,
-        credential_resolver: R,
-        clock: C,
-    ) -> Self {
+    pub fn new(grant_issuer: I, credential_resolver: R, clock: C) -> Self {
         Self {
             grant_issuer,
             credential_resolver,
@@ -221,7 +217,6 @@ where
             Err(reason) => Ok(ServiceEvent::AuthFailed { session_id, reason }),
         }
     }
-
 }
 
 #[cfg(test)]

@@ -1,9 +1,9 @@
-use std::path::PathBuf;
+﻿use std::path::PathBuf;
 
 use face_auth::RecognitionTemplates;
 use face_engine::{
-    FaceMatchDecision, FaceModelProvider, FaceTemplateMatcher, OpenCvFaceModelConfig,
-    OpenCvFaceModelProvider,
+    FaceMatchDecision, FaceModelProvider, FaceTemplateMatcher, HybridFaceModelConfig,
+    HybridFaceModelProvider,
 };
 use video_provider::{
     CameraId, OpenCvCameraProvider, OpenCvCameraProviderConfig, VideoFrameProvider,
@@ -18,7 +18,7 @@ use crate::{
 pub struct CameraPresenceObservationConfig {
     pub camera_id: CameraId,
     pub camera_config: OpenCvCameraProviderConfig,
-    pub model_config: OpenCvFaceModelConfig,
+    pub model_config: HybridFaceModelConfig,
     pub templates: RecognitionTemplates,
     pub presence_owner_match_threshold: f32,
     pub pending_unknown_face_crop_path: Option<PathBuf>,
@@ -26,12 +26,12 @@ pub struct CameraPresenceObservationConfig {
 
 pub struct CameraPresenceObservationSource {
     config: CameraPresenceObservationConfig,
-    model_provider: OpenCvFaceModelProvider,
+    model_provider: HybridFaceModelProvider,
 }
 
 impl CameraPresenceObservationSource {
     pub fn new(config: CameraPresenceObservationConfig) -> Result<Self, PresenceMonitorError> {
-        let mut model_provider = OpenCvFaceModelProvider::new(config.model_config.clone());
+        let mut model_provider = HybridFaceModelProvider::new(config.model_config.clone());
         model_provider
             .load_models()
             .map_err(|_| PresenceMonitorError::ObservationFailed)?;

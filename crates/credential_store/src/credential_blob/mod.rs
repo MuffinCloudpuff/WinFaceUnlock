@@ -1,4 +1,4 @@
-mod format;
+﻿mod format;
 mod protector;
 mod secret;
 

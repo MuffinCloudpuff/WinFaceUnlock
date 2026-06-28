@@ -43,7 +43,7 @@ impl ResourceDirectoryPlan {
         fs::create_dir_all(&self.logs_dir)?;
         fs::create_dir_all(&self.credential_store_dir)?;
         fs::create_dir_all(&self.presence_audit_dir)?;
-        apply_restricted_acl(&self.root_dir)?;
+        apply_program_files_acl(&self.root_dir)?;
         apply_user_writable_acl(&self.runtime_dir)?;
         apply_user_writable_acl(&self.logs_dir)?;
         apply_restricted_acl(&self.credential_store_dir)?;
@@ -92,6 +92,27 @@ fn apply_restricted_acl(path: &Path) -> Result<(), ResourceDirectoryError> {
 }
 
 #[cfg(windows)]
+fn apply_program_files_acl(path: &Path) -> Result<(), ResourceDirectoryError> {
+    let status = Command::new("icacls")
+        .arg(path)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg("*S-1-5-18:(OI)(CI)F")
+        .arg("*S-1-5-32-544:(OI)(CI)F")
+        .arg("*S-1-5-32-545:(OI)(CI)RX") // Users: Read & Execute
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(ResourceDirectoryError::AclCommandFailed(
+            status.code().unwrap_or_default(),
+        ))
+    }
+}
+
+#[cfg(windows)]
 fn apply_user_writable_acl(path: &Path) -> Result<(), ResourceDirectoryError> {
     let status = Command::new("icacls")
         .arg(path)
@@ -114,6 +135,11 @@ fn apply_user_writable_acl(path: &Path) -> Result<(), ResourceDirectoryError> {
 
 #[cfg(not(windows))]
 fn apply_restricted_acl(_path: &Path) -> Result<(), ResourceDirectoryError> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn apply_program_files_acl(_path: &Path) -> Result<(), ResourceDirectoryError> {
     Ok(())
 }
 

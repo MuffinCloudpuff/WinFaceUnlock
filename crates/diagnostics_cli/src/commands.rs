@@ -21,7 +21,7 @@ use face_auth::{
 use face_engine::{
     FaceEngineError, FaceMatchDecision, FaceModelProvider, FaceSampleRejectReason, FaceTemplate,
     FaceTemplateCodecError, FaceTemplateMatcher, FaceTemplateRef, FaceTemplateSet,
-    OpenCvFaceModelConfig, OpenCvFaceModelProvider,
+    HybridFaceModelConfig, HybridFaceModelProvider,
 };
 use face_liveness::{MiniFasNetLivenessProviderConfig, ScreenReplayLivenessProviderConfig};
 use face_pose::{FacePoseProvider, LandmarkFacePoseProvider};
@@ -79,7 +79,7 @@ use crate::threshold_preview::{
 };
 
 const DEFAULT_YUNET_MODEL_PATH: &str = "models/face_detection_yunet_2023mar.onnx";
-const DEFAULT_SFACE_MODEL_PATH: &str = "models/face_recognition_sface_2021dec.onnx";
+const DEFAULT_SFACE_MODEL_PATH: &str = "models/ghostfacenet_v1_stride2.onnx";
 const DEFAULT_MINIFASNET_MODEL_PATH: &str = "models/minifasnet_v2.onnx";
 const DEFAULT_PROJECT_FACE_MATCH_THRESHOLD: f32 = 0.75;
 const DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD: f32 = 0.50;
@@ -629,7 +629,7 @@ fn run_camera_open_benchmark(args: &[String]) -> Result<(), DiagnosticError> {
 fn run_test_face(args: &[String]) -> Result<(), DiagnosticError> {
     let image_path = argument_value(args, "--image").ok_or(DiagnosticError::InvalidArgument)?;
     let mut model_provider = build_loaded_model_provider(args)?;
-    let frame = OpenCvFaceModelProvider::read_image_frame(image_path)?;
+    let frame = HybridFaceModelProvider::read_image_frame(image_path)?;
     let faces = model_provider.detect(&frame)?;
     println!("detected_face_count: {}", faces.len());
     if faces.len() == 1 {
@@ -657,7 +657,7 @@ fn run_enroll_face(args: &[String]) -> Result<(), DiagnosticError> {
     );
     let model_provider = build_loaded_model_provider(args)?;
     let mut enrollment = FaceEnrollmentService::new(model_provider);
-    let frame = OpenCvFaceModelProvider::read_image_frame(image_path)?;
+    let frame = HybridFaceModelProvider::read_image_frame(image_path)?;
     let outcome = enrollment.enroll_frame(&frame, user_id, template_ref)?;
 
     fs::write(template_out, outcome.template.to_json_bytes()?)
@@ -1138,7 +1138,7 @@ fn run_face_debug_snapshot_command(args: &[String]) -> Result<(), DiagnosticErro
     let sface_model_path = model_path(args, "--sface-model", DEFAULT_SFACE_MODEL_PATH);
     let threshold =
         optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PROJECT_FACE_MATCH_THRESHOLD);
-    let mut model_config = OpenCvFaceModelConfig::new(yunet_model_path, sface_model_path);
+    let mut model_config = HybridFaceModelConfig::new(yunet_model_path, sface_model_path);
     model_config.recognizer.match_threshold = threshold;
 
     run_face_debug_snapshot(FaceDebugSnapshotConfig {
@@ -1169,7 +1169,7 @@ fn run_face_calibrate_command(args: &[String]) -> Result<(), DiagnosticError> {
     let sface_model_path = model_path(args, "--sface-model", DEFAULT_SFACE_MODEL_PATH);
     let threshold =
         optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PROJECT_FACE_MATCH_THRESHOLD);
-    let mut model_config = OpenCvFaceModelConfig::new(yunet_model_path, sface_model_path);
+    let mut model_config = HybridFaceModelConfig::new(yunet_model_path, sface_model_path);
     model_config.recognizer.match_threshold = threshold;
 
     run_face_calibration(FaceCalibrationConfig {
@@ -1203,7 +1203,7 @@ fn run_liveness_screen_debug_command(args: &[String]) -> Result<(), DiagnosticEr
     let sface_model_path = model_path(args, "--sface-model", DEFAULT_SFACE_MODEL_PATH);
     let threshold =
         optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PROJECT_FACE_MATCH_THRESHOLD);
-    let mut model_config = OpenCvFaceModelConfig::new(yunet_model_path, sface_model_path);
+    let mut model_config = HybridFaceModelConfig::new(yunet_model_path, sface_model_path);
     model_config.recognizer.match_threshold = threshold;
 
     run_liveness_screen_debug(LivenessScreenDebugConfig {
@@ -1321,7 +1321,7 @@ fn build_pose_provider(args: &[String]) -> Result<Box<dyn FacePoseProvider>, Dia
 
 fn save_guided_debug_images(
     enrollment: &mut GuidedFaceEnrollmentService<
-        OpenCvFaceModelProvider,
+        HybridFaceModelProvider,
         Box<dyn FacePoseProvider>,
     >,
     frame: &video_provider::VideoFrame,
@@ -1340,7 +1340,7 @@ fn save_guided_debug_images(
         }
     );
     let debug_frame_path = debug_frames_dir.join(format!("{base_name}.jpg"));
-    OpenCvFaceModelProvider::write_detection_debug_frame(
+    HybridFaceModelProvider::write_detection_debug_frame(
         frame,
         &observation.detected_faces,
         &debug_frame_path,
@@ -1623,7 +1623,7 @@ fn print_presence_observation_and_decision(
 
 fn save_presence_unknown_face_audit(
     args: &[String],
-    model_provider: &mut OpenCvFaceModelProvider,
+    model_provider: &mut HybridFaceModelProvider,
     frame: &video_provider::VideoFrame,
     detected_face: &face_engine::DetectedFace,
     match_score: f32,
@@ -1767,7 +1767,7 @@ fn run_presence_monitor_camera_debug(args: &[String]) -> Result<(), DiagnosticEr
             .unwrap_or("opencv-index:0")
             .to_owned(),
     );
-    let mut model_config = OpenCvFaceModelConfig::new(
+    let mut model_config = HybridFaceModelConfig::new(
         model_path(args, "--yunet-model", DEFAULT_YUNET_MODEL_PATH),
         model_path(args, "--sface-model", DEFAULT_SFACE_MODEL_PATH),
     );
@@ -2394,7 +2394,7 @@ fn run_verify_face(args: &[String]) -> Result<(), DiagnosticError> {
         ..AttemptPolicyConfig::default()
     });
     let mut authenticator = FaceAuthenticator::new(model_provider, matcher, policy);
-    let frame = OpenCvFaceModelProvider::read_image_frame(image_path)?;
+    let frame = HybridFaceModelProvider::read_image_frame(image_path)?;
     let outcome = authenticator
         .authenticate_frame(&frame, &templates, current_time_unix_ms())
         .map_err(DiagnosticError::AuthRejected)?;
@@ -2590,15 +2590,15 @@ fn percentile_sorted_f64(sorted_scores: &[f64], percentile: f64) -> f64 {
 
 fn build_loaded_model_provider(
     args: &[String],
-) -> Result<OpenCvFaceModelProvider, DiagnosticError> {
+) -> Result<HybridFaceModelProvider, DiagnosticError> {
     let yunet_model_path = model_path(args, "--yunet-model", DEFAULT_YUNET_MODEL_PATH);
     let sface_model_path = model_path(args, "--sface-model", DEFAULT_SFACE_MODEL_PATH);
     let threshold =
         optional_f32(args, "--threshold")?.unwrap_or(DEFAULT_PROJECT_FACE_MATCH_THRESHOLD);
 
-    let mut config = OpenCvFaceModelConfig::new(yunet_model_path, sface_model_path);
+    let mut config = HybridFaceModelConfig::new(yunet_model_path, sface_model_path);
     config.recognizer.match_threshold = threshold;
-    let mut model_provider = OpenCvFaceModelProvider::new(config);
+    let mut model_provider = HybridFaceModelProvider::new(config);
     model_provider.load_models()?;
     Ok(model_provider)
 }
@@ -2606,13 +2606,13 @@ fn build_loaded_model_provider(
 fn build_loaded_model_provider_with_threshold(
     args: &[String],
     threshold: f32,
-) -> Result<OpenCvFaceModelProvider, DiagnosticError> {
+) -> Result<HybridFaceModelProvider, DiagnosticError> {
     let yunet_model_path = model_path(args, "--yunet-model", DEFAULT_YUNET_MODEL_PATH);
     let sface_model_path = model_path(args, "--sface-model", DEFAULT_SFACE_MODEL_PATH);
 
-    let mut config = OpenCvFaceModelConfig::new(yunet_model_path, sface_model_path);
+    let mut config = HybridFaceModelConfig::new(yunet_model_path, sface_model_path);
     config.recognizer.match_threshold = threshold;
-    let mut model_provider = OpenCvFaceModelProvider::new(config);
+    let mut model_provider = HybridFaceModelProvider::new(config);
     model_provider.load_models()?;
     Ok(model_provider)
 }

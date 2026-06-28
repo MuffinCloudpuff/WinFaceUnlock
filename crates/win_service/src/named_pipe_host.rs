@@ -1,12 +1,12 @@
 use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    };
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 
 use common_protocol::{ProtocolError, ServiceEvent, ServiceRequest, UserId};
 use ipc::{
-    IpcClient, IpcServer, NamedPipeClient, NamedPipeServer, PipeSecurity,
-    ServiceRequestHandler, SystemUnixTimeMillisClock,
+    IpcClient, IpcServer, NamedPipeClient, NamedPipeServer, PipeSecurity, ServiceRequestHandler,
+    SystemUnixTimeMillisClock,
 };
 
 use crate::{

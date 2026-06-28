@@ -1,4 +1,4 @@
-#![allow(unsafe_code)]
+﻿#![allow(unsafe_code)]
 
 mod auth_package;
 mod broker_client;

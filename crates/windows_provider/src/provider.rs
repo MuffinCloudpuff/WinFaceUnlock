@@ -1,4 +1,4 @@
-#![allow(unsafe_code)]
+﻿#![allow(unsafe_code)]
 
 use std::{
     sync::{Arc, Mutex},

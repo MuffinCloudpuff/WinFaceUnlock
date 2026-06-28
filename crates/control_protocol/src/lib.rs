@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+﻿use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const CONTROL_PROTOCOL_VERSION: u32 = 1;

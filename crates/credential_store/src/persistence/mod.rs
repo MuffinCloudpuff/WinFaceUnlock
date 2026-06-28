@@ -1,4 +1,4 @@
-mod migration;
+﻿mod migration;
 mod records;
 mod repository;
 mod schema;

@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     fs,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -10,7 +10,7 @@ use common_protocol::{
 use face_auth::{AttemptPolicy, AttemptPolicyConfig, FaceAuthenticator, RecognitionTemplates};
 use face_engine::{
     FaceTemplate, FaceTemplateCodecError, FaceTemplateMatcher, FaceTemplateSet,
-    OpenCvFaceModelConfig, OpenCvFaceModelProvider,
+    HybridFaceModelConfig, HybridFaceModelProvider,
 };
 use face_liveness::{
     LivenessDecision, LivenessProviderError, LivenessResult, MiniFasNetLivenessProvider,
@@ -163,7 +163,7 @@ struct LocalCameraAuthGrantIssuer {
     camera_config: OpenCvCameraProviderConfig,
     max_auth_frames: u32,
     templates: RecognitionTemplates,
-    authenticator: FaceAuthenticator<OpenCvFaceModelProvider>,
+    authenticator: FaceAuthenticator<HybridFaceModelProvider>,
     liveness_provider: MiniFasNetLivenessProvider,
     max_spoof_frame_ratio: f32,
     next_grant_sequence: u64,
@@ -181,10 +181,10 @@ impl LocalCameraAuthGrantIssuer {
         apply_profile_to_config(&config.camera_id, &mut camera_config);
 
         let mut model_config =
-            OpenCvFaceModelConfig::new(config.yunet_model_path, config.sface_model_path);
+            HybridFaceModelConfig::new(config.yunet_model_path, config.sface_model_path);
         model_config.recognizer.match_threshold = config.match_threshold;
 
-        let model_provider = OpenCvFaceModelProvider::new(model_config);
+        let model_provider = HybridFaceModelProvider::new(model_config);
         let matcher = FaceTemplateMatcher::new(config.match_threshold);
         let attempt_policy = AttemptPolicy::new(AttemptPolicyConfig {
             required_consecutive_match_count: config.required_consecutive_match_count,

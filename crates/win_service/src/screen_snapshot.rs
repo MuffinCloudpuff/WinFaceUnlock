@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+﻿use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScreenSnapshot {

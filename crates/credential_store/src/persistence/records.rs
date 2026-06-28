@@ -1,4 +1,4 @@
-use common_protocol::{AccountType, CredentialRef, UserId};
+﻿use common_protocol::{AccountType, CredentialRef, UserId};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct UnixTimeMillis(pub i64);

@@ -1,4 +1,4 @@
-use std::{fmt, thread, time::Duration};
+﻿use std::{fmt, thread, time::Duration};
 
 use face_liveness::{ScreenReplayPreprocessConfig, build_screen_replay_binary_mask_frame};
 use minifb::{Key, Window, WindowOptions};
