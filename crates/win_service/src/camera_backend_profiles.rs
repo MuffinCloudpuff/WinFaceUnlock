@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     fs,
     path::PathBuf,
     thread,
@@ -45,10 +45,15 @@ pub struct CameraBackendProfileStore {
 
 impl CameraBackendProfileStore {
     pub fn load() -> Self {
-        fs::read(profile_path())
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+        let path = profile_path();
+        for _ in 0..5 {
+            match fs::read(&path) {
+                Ok(bytes) => return serde_json::from_slice(&bytes).unwrap_or_default(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+                Err(_) => thread::sleep(Duration::from_millis(100)),
+            }
+        }
+        Self::default()
     }
 
     pub fn save(&self) -> Result<(), ProtocolError> {
@@ -252,30 +257,50 @@ fn merge_profile_candidate(
 
 fn profile_camera(camera_id: &CameraId, display_name: &str) -> Option<CameraBackendProfile> {
     let camera_index = camera_id.camera_index().ok()?;
-    OpenCvCameraBackend::all()
-        .into_iter()
-        .filter_map(|backend| probe_backend(camera_index, backend))
-        .min_by_key(|probe| probe.open_ms)
-        .map(|probe| CameraBackendProfile {
-            camera_id: camera_id.0.clone(),
-            display_name: display_name.to_owned(),
-            preferred_backend: probe.backend,
-            open_ms: probe.open_ms,
-            read_ms: probe.read_ms,
-            frame_width: probe.frame_width,
-            frame_height: probe.frame_height,
-            measured_at_unix_ms: timestamp_unix_ms(),
-            last_probe_status: if probe.open_ms <= MAX_USABLE_BACKEND_OPEN_MS {
-                CameraBackendProbeStatus::Usable
-            } else {
-                CameraBackendProbeStatus::Degraded
-            },
-            last_probe_reason: Some(if probe.open_ms <= MAX_USABLE_BACKEND_OPEN_MS {
-                "fastest-readable-backend".to_owned()
-            } else {
-                "fastest-readable-backend-too-slow".to_owned()
-            }),
-        })
+    let mut best_probe: Option<BackendProbe> = None;
+    let backends = OpenCvCameraBackend::all();
+
+    for (i, backend) in backends.iter().copied().enumerate() {
+        if let Some(probe) = probe_backend(camera_index, backend) {
+            let found_usable = probe.open_ms <= MAX_USABLE_BACKEND_OPEN_MS;
+            
+            match &best_probe {
+                None => best_probe = Some(probe),
+                Some(existing) if probe.open_ms < existing.open_ms => best_probe = Some(probe),
+                _ => {}
+            }
+            
+            if found_usable {
+                break; // Found a fast enough backend, short-circuit to save time!
+            }
+        }
+
+        if i < backends.len() - 1 {
+            // Give camera hardware time to fully release and reset before next probe
+            thread::sleep(Duration::from_millis(1500));
+        }
+    }
+
+    best_probe.map(|probe| CameraBackendProfile {
+        camera_id: camera_id.0.clone(),
+        display_name: display_name.to_owned(),
+        preferred_backend: probe.backend,
+        open_ms: probe.open_ms,
+        read_ms: probe.read_ms,
+        frame_width: probe.frame_width,
+        frame_height: probe.frame_height,
+        measured_at_unix_ms: timestamp_unix_ms(),
+        last_probe_status: if probe.open_ms <= MAX_USABLE_BACKEND_OPEN_MS {
+            CameraBackendProbeStatus::Usable
+        } else {
+            CameraBackendProbeStatus::Degraded
+        },
+        last_probe_reason: Some(if probe.open_ms <= MAX_USABLE_BACKEND_OPEN_MS {
+            "fastest-readable-backend".to_owned()
+        } else {
+            "fastest-readable-backend-too-slow".to_owned()
+        }),
+    })
 }
 
 struct BackendProbe {

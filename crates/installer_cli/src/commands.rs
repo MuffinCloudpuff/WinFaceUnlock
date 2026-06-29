@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     ffi::OsString,
     path::{Path, PathBuf},
 };
@@ -569,7 +569,7 @@ fn parse_service_auth_config(args: &[String]) -> Result<ServiceAuthRegistryConfi
         .unwrap_or_else(|| PathBuf::from(r"models\face_detection_yunet_2023mar.onnx"));
     let sface_model_path = argument_value(args, "--sface-model")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"models\face_recognition_sface_2021dec.onnx"));
+        .unwrap_or_else(|| PathBuf::from(r"models\ghostfacenet_v1_stride2.onnx"));
     let mut config = ServiceAuthRegistryConfig::local_camera(
         face_template_path,
         yunet_model_path,

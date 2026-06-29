@@ -1,4 +1,4 @@
-﻿use common_protocol::{AuthFailureReason, UserId};
+use common_protocol::{AuthFailureReason, UserId};
 use face_engine::{
     DetectedFace, FaceEngineError, FaceMatchDecision, FaceModelDescriptor, FaceModelProvider,
     FaceTemplate, FaceTemplateMatch, FaceTemplateMatcher,
@@ -10,11 +10,21 @@ use crate::{AttemptPolicy, AttemptPolicyDecision};
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecognitionTemplates {
     templates: Vec<FaceTemplate>,
+    average_face_area: Option<u32>,
 }
 
 impl RecognitionTemplates {
     pub fn new(templates: Vec<FaceTemplate>) -> Self {
-        Self { templates }
+        Self { templates, average_face_area: None }
+    }
+
+    pub fn with_average_face_area(mut self, area: u32) -> Self {
+        self.average_face_area = Some(area);
+        self
+    }
+
+    pub fn average_face_area(&self) -> Option<u32> {
+        self.average_face_area
     }
 
     pub fn is_empty(&self) -> bool {
@@ -74,6 +84,7 @@ where
         &mut self,
         frame: &VideoFrame,
         templates: &RecognitionTemplates,
+        trigger_source: common_protocol::AuthTriggerSource,
         current_time_unix_ms: i64,
     ) -> Result<AuthenticationOutcome, AuthFailureReason> {
         self.validate_authentication_preconditions(templates, current_time_unix_ms)?;
@@ -82,6 +93,7 @@ where
             frame,
             &detected_face,
             templates,
+            trigger_source,
             current_time_unix_ms,
         )
     }
@@ -109,6 +121,7 @@ where
         frame: &VideoFrame,
         detected_face: &DetectedFace,
         templates: &RecognitionTemplates,
+        trigger_source: common_protocol::AuthTriggerSource,
         current_time_unix_ms: i64,
     ) -> Result<AuthenticationOutcome, AuthFailureReason> {
         self.validate_authentication_preconditions(templates, current_time_unix_ms)?;
@@ -116,6 +129,7 @@ where
             frame,
             detected_face,
             templates,
+            trigger_source,
             current_time_unix_ms,
         )
     }
@@ -125,6 +139,7 @@ where
         frame: &VideoFrame,
         detected_face: &DetectedFace,
         templates: &RecognitionTemplates,
+        trigger_source: common_protocol::AuthTriggerSource,
         current_time_unix_ms: i64,
     ) -> Result<AuthenticationOutcome, AuthFailureReason> {
         self.validate_authentication_preconditions(templates, current_time_unix_ms)?;
@@ -132,6 +147,7 @@ where
             frame,
             detected_face,
             templates,
+            trigger_source,
             current_time_unix_ms,
             false,
         )
@@ -164,12 +180,14 @@ where
         frame: &VideoFrame,
         detected_face: &DetectedFace,
         templates: &RecognitionTemplates,
+        trigger_source: common_protocol::AuthTriggerSource,
         current_time_unix_ms: i64,
     ) -> Result<AuthenticationOutcome, AuthFailureReason> {
         self.authenticate_detected_face_after_preconditions_with_policy(
             frame,
             detected_face,
             templates,
+            trigger_source,
             current_time_unix_ms,
             true,
         )
@@ -180,6 +198,7 @@ where
         frame: &VideoFrame,
         detected_face: &DetectedFace,
         templates: &RecognitionTemplates,
+        trigger_source: common_protocol::AuthTriggerSource,
         current_time_unix_ms: i64,
         record_failure_for_cooldown: bool,
     ) -> Result<AuthenticationOutcome, AuthFailureReason> {
@@ -200,15 +219,48 @@ where
             return Err(AuthFailureReason::MatchBelowThreshold);
         };
 
+        let mut is_intruder = best_match.score < self.attempt_policy.intruder_similarity_threshold();
+
+        if is_intruder && trigger_source == common_protocol::AuthTriggerSource::BackgroundSilentMonitor {
+            if let Some(avg_area) = templates.average_face_area() {
+                let current_area = (detected_face.bounds.width * detected_face.bounds.height) as u32;
+                if current_area < (avg_area as f32 * 0.8) as u32 {
+                    is_intruder = false;
+                }
+            }
+            if is_intruder {
+                let pose_estimate = face_pose::estimate_pose_from_five_landmarks(detected_face);
+                let quality = crate::quality::score_face_sample(
+                    frame,
+                    detected_face,
+                    crate::enrollment_steps::GuidedEnrollmentStep::FrontalPrimary,
+                    pose_estimate,
+                    None,
+                );
+                let policy = crate::quality::FaceQualityPolicy {
+                    min_pose_fit_score: 0.6,
+                    min_quality_score: 0.5,
+                    ..Default::default()
+                };
+                if crate::quality::reject_reason_for_quality(&quality, &policy).is_some() {
+                    is_intruder = false;
+                }
+            }
+        }
+
         let policy_decision = match best_match.decision {
             FaceMatchDecision::MatchAccepted => self
                 .attempt_policy
-                .record_match_result(true, current_time_unix_ms),
+                .record_match_result(true, false, current_time_unix_ms),
             FaceMatchDecision::MatchRejectedBelowThreshold if record_failure_for_cooldown => self
                 .attempt_policy
-                .record_match_result(false, current_time_unix_ms),
+                .record_match_result(false, is_intruder, current_time_unix_ms),
             FaceMatchDecision::MatchRejectedBelowThreshold => {
-                AttemptPolicyDecision::MatchRejectedBelowThreshold
+                if is_intruder {
+                    AttemptPolicyDecision::IntruderDetected
+                } else {
+                    AttemptPolicyDecision::MatchRejectedBelowThreshold
+                }
             }
         };
 
@@ -224,6 +276,9 @@ where
             }
             AttemptPolicyDecision::MatchRejectedBelowThreshold => {
                 Err(AuthFailureReason::MatchBelowThreshold)
+            }
+            AttemptPolicyDecision::IntruderDetected => {
+                Err(AuthFailureReason::IntruderDetected)
             }
             AttemptPolicyDecision::CooldownActivated => Err(AuthFailureReason::CooldownActive),
         }
@@ -334,7 +389,7 @@ mod tests {
             data: vec![0],
         };
 
-        let result = authenticator.authenticate_frame(&frame, &templates, 1_000);
+        let result = authenticator.authenticate_frame(&frame, &templates, common_protocol::AuthTriggerSource::CredentialScreenEntered, 1_000);
 
         assert_eq!(result, Err(AuthFailureReason::TemplateModelMismatch));
     }
@@ -378,7 +433,7 @@ mod tests {
         for timestamp in 1_000..1_005 {
             assert_eq!(
                 authenticator.authenticate_detected_face_without_failure_cooldown(
-                    &frame, &face, &templates, timestamp
+                    &frame, &face, &templates, common_protocol::AuthTriggerSource::CredentialScreenEntered, timestamp
                 ),
                 Err(AuthFailureReason::MatchBelowThreshold)
             );
@@ -386,7 +441,7 @@ mod tests {
 
         assert_eq!(
             authenticator.authenticate_detected_face_without_failure_cooldown(
-                &frame, &face, &templates, 1_006
+                &frame, &face, &templates, common_protocol::AuthTriggerSource::CredentialScreenEntered, 1_006
             ),
             Err(AuthFailureReason::MatchBelowThreshold)
         );

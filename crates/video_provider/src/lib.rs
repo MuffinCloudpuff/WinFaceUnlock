@@ -1,8 +1,10 @@
-﻿mod frame;
+mod frame;
 #[cfg(windows)]
 mod mf_bindings;
 mod opencv_camera;
 mod provider;
+
+pub mod image_utils;
 
 pub use frame::{PixelFormat, VideoFrame};
 pub use opencv_camera::{OpenCvCameraBackend, OpenCvCameraProvider, OpenCvCameraProviderConfig};

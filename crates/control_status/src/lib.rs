@@ -1,4 +1,4 @@
-﻿#![allow(unsafe_code)]
+#![allow(unsafe_code)]
 
 use std::{
     fmt, fs,
@@ -260,7 +260,7 @@ impl FaceTemplateConfigWriter for WindowsFaceTemplateConfigWriter {
             (
                 REG_SFACE_MODEL_PATH,
                 models_dir
-                    .join("face_recognition_sface_2021dec.onnx")
+                    .join("ghostfacenet_v1_stride2.onnx")
                     .display()
                     .to_string(),
             ),

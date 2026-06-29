@@ -7,12 +7,12 @@ license.workspace = true
 
 [features]
 default = ["enrollment"]
-enrollment = ["dep:face_pose"]
+enrollment = []
 
 [dependencies]
 common_protocol = { path = "../common_protocol" }
 face_engine = { path = "../face_engine" }
-face_pose = { path = "../face_pose", optional = true }
+face_pose = { path = "../face_pose" }
 serde = { version = "1.0.228", features = ["derive"] }
 video_provider = { path = "../video_provider" }
 

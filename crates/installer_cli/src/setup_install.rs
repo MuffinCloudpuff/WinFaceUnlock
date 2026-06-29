@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     fmt,
     path::{Component, Path, PathBuf},
 };
@@ -249,7 +249,7 @@ mod tests {
         create_file(&install_dir.join(r"provider\windows_provider.dll"));
         create_file(&install_dir.join("selected_templates.json"));
         create_file(&install_dir.join(r"models\face_detection_yunet_2023mar.onnx"));
-        create_file(&install_dir.join(r"models\face_recognition_sface_2021dec.onnx"));
+        create_file(&install_dir.join(r"models\ghostfacenet_v1_stride2.onnx"));
         create_file(&install_dir.join(r"models\minifasnet_v2.onnx"));
         create_file(&install_dir.join(r"models\yolov8n.onnx"));
 
@@ -267,7 +267,7 @@ mod tests {
                     r"models\face_detection_yunet_2023mar.onnx",
                 ),
                 sface_model_relative_path: PathBuf::from(
-                    r"models\face_recognition_sface_2021dec.onnx",
+                    r"models\ghostfacenet_v1_stride2.onnx",
                 ),
                 minifasnet_model_relative_path: PathBuf::from(r"models\minifasnet_v2.onnx"),
                 presence_person_model_relative_path: PathBuf::from(r"models\yolov8n.onnx"),

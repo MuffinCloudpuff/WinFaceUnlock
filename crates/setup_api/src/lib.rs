@@ -1,4 +1,4 @@
-﻿use std::path::PathBuf;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -499,7 +499,7 @@ fn default_yunet_model_relative_path() -> PathBuf {
 }
 
 fn default_sface_model_relative_path() -> PathBuf {
-    PathBuf::from(r"models\face_recognition_sface_2021dec.onnx")
+    PathBuf::from(r"models\ghostfacenet_v1_stride2.onnx")
 }
 
 fn default_minifasnet_model_relative_path() -> PathBuf {

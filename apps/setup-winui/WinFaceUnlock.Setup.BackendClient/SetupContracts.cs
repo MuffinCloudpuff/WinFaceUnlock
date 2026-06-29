@@ -221,7 +221,7 @@ public sealed record InstallSystemComponentsPayload
     public string YuNetModelRelativePath { get; init; } = @"models\face_detection_yunet_2023mar.onnx";
 
     [JsonPropertyName("sface_model_relative_path")]
-    public string SFaceModelRelativePath { get; init; } = @"models\face_recognition_sface_2021dec.onnx";
+    public string SFaceModelRelativePath { get; init; } = @"models\ghostfacenet_v1_stride2.onnx";
 
     [JsonPropertyName("minifasnet_model_relative_path")]
     public string MiniFasNetModelRelativePath { get; init; } = @"models\minifasnet_v2.onnx";

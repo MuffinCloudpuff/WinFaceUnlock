@@ -5,5 +5,6 @@ export * from './operations/faceEnrollment';
 export * from './operations/faceTemplates';
 export * from './operations/request';
 export * from './operations/settings';
+export * from './operations/intruders';
 export * from './protocol/types';
 export * from './transport/ControlTransport';

@@ -1,8 +1,9 @@
-﻿#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AttemptPolicyConfig {
     pub required_consecutive_match_count: u32,
     pub failure_limit_before_cooldown: u32,
     pub cooldown_duration_ms: i64,
+    pub intruder_similarity_threshold: f32,
 }
 
 impl Default for AttemptPolicyConfig {
@@ -11,6 +12,7 @@ impl Default for AttemptPolicyConfig {
             required_consecutive_match_count: 2,
             failure_limit_before_cooldown: 3,
             cooldown_duration_ms: 30_000,
+            intruder_similarity_threshold: 0.3,
         }
     }
 }
@@ -43,10 +45,11 @@ pub enum AttemptPolicyDecision {
     AuthenticationAccepted,
     NeedMoreConsecutiveMatches,
     MatchRejectedBelowThreshold,
+    IntruderDetected,
     CooldownActivated,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AttemptPolicy {
     config: AttemptPolicyConfig,
     state: AttemptPolicyState,
@@ -58,6 +61,10 @@ impl AttemptPolicy {
             config,
             state: AttemptPolicyState::new(),
         }
+    }
+
+    pub fn intruder_similarity_threshold(&self) -> f32 {
+        self.config.intruder_similarity_threshold
     }
 
     pub fn cooldown_is_active(&mut self, current_time_unix_ms: i64) -> bool {
@@ -75,10 +82,15 @@ impl AttemptPolicy {
     pub fn record_match_result(
         &mut self,
         match_threshold_passed: bool,
+        is_intruder: bool,
         current_time_unix_ms: i64,
     ) -> AttemptPolicyDecision {
         if !match_threshold_passed {
-            return self.record_failed_attempt(current_time_unix_ms);
+            let decision = self.record_failed_attempt(current_time_unix_ms);
+            if decision != AttemptPolicyDecision::CooldownActivated && is_intruder {
+                return AttemptPolicyDecision::IntruderDetected;
+            }
+            return decision;
         }
 
         self.state.consecutive_failure_count = 0;
@@ -125,10 +137,11 @@ mod tests {
             required_consecutive_match_count: 2,
             failure_limit_before_cooldown: 3,
             cooldown_duration_ms: 30_000,
+            intruder_similarity_threshold: 0.7,
         });
 
-        let first = policy.record_match_result(true, 1_000);
-        let second = policy.record_match_result(true, 1_001);
+        let first = policy.record_match_result(true, false, 1_000);
+        let second = policy.record_match_result(true, false, 1_001);
 
         assert_eq!(first, AttemptPolicyDecision::NeedMoreConsecutiveMatches);
         assert_eq!(second, AttemptPolicyDecision::AuthenticationAccepted);
@@ -140,6 +153,7 @@ mod tests {
             required_consecutive_match_count: 1,
             failure_limit_before_cooldown: 2,
             cooldown_duration_ms: 5_000,
+            intruder_similarity_threshold: 0.7,
         });
 
         assert_eq!(
@@ -160,16 +174,17 @@ mod tests {
             required_consecutive_match_count: 2,
             failure_limit_before_cooldown: 3,
             cooldown_duration_ms: 30_000,
+            intruder_similarity_threshold: 0.7,
         });
 
         assert_eq!(
-            policy.record_match_result(true, 1_000),
+            policy.record_match_result(true, false, 1_000),
             AttemptPolicyDecision::NeedMoreConsecutiveMatches
         );
         policy.reset_consecutive_matches();
 
         assert_eq!(
-            policy.record_match_result(true, 1_001),
+            policy.record_match_result(true, false, 1_001),
             AttemptPolicyDecision::NeedMoreConsecutiveMatches
         );
         assert_eq!(policy.state().consecutive_failure_count, 0);

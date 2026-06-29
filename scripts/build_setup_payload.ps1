@@ -218,7 +218,7 @@ Copy-RequiredDirectoryFiles `
 
 $ModelsDir = Join-Path $RepoRoot "models"
 Copy-RequiredFile -SourcePath (Join-Path $ModelsDir "face_detection_yunet_2023mar.onnx") -TargetRelativePath "models\face_detection_yunet_2023mar.onnx" -ManifestFiles $ManifestFiles
-Copy-RequiredFile -SourcePath (Join-Path $ModelsDir "face_recognition_sface_2021dec.onnx") -TargetRelativePath "models\face_recognition_sface_2021dec.onnx" -ManifestFiles $ManifestFiles
+Copy-RequiredFile -SourcePath (Join-Path $ModelsDir "ghostfacenet_v1_stride2.onnx") -TargetRelativePath "models\ghostfacenet_v1_stride2.onnx" -ManifestFiles $ManifestFiles
 Copy-RequiredFile -SourcePath (Join-Path $ModelsDir "minifasnet_v2.onnx") -TargetRelativePath "models\minifasnet_v2.onnx" -ManifestFiles $ManifestFiles
 Copy-RequiredFile -SourcePath (Join-Path $ModelsDir "yolov8n.onnx") -TargetRelativePath "models\yolov8n.onnx" -FileId "yolov8_person_model" -ManifestFiles $ManifestFiles
 Copy-OptionalFile -SourcePath (Join-Path $ModelsDir "MobileNetSSD_deploy.caffemodel") -TargetRelativePath "models\MobileNetSSD_deploy.caffemodel" -FileId "mobilenet_ssd_person_model" -ManifestFiles $ManifestFiles

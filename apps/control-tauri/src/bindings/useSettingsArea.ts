@@ -5,6 +5,8 @@ import {
   type FaceTemplateSummary,
   type LogonWakeMode,
   updateControlSettings,
+  listIntruderSnapshots,
+  deleteIntruderSnapshot,
 } from '@winfaceunlock/control-client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { controlTransport, isControlRuntimeAvailable } from './controlTransport';
@@ -19,8 +21,10 @@ export interface EnrolledFaceViewModel {
 }
 
 export interface IntruderSnapshotViewModel {
-  id: number;
+  id: string;
   time: string;
+  timestampMs: number;
+  avatarSrc: string;
 }
 
 export interface SettingsAreaViewModel {
@@ -35,6 +39,7 @@ export interface SettingsAreaViewModel {
   changeTriggerMode: (mode: TriggerMode) => void;
   changeLogonFaceMatchThreshold: (threshold: number) => void;
   deleteFace: (faceTemplateRef: string) => void;
+  deleteIntruder: (id: string) => void;
 }
 
 export function useSettingsArea(): SettingsAreaViewModel {
@@ -47,11 +52,7 @@ export function useSettingsArea(): SettingsAreaViewModel {
   const logonFaceMatchThresholdRequestId = useRef(0);
   const faceDeleteRequestId = useRef(0);
   const [enrolledFaces, setEnrolledFaces] = useState<EnrolledFaceViewModel[]>([]);
-
-  const [intruders] = useState<IntruderSnapshotViewModel[]>([
-    { id: 1, time: '今天 10:42' },
-    { id: 2, time: '昨天 15:20' },
-  ]);
+  const [intruders, setIntruders] = useState<IntruderSnapshotViewModel[]>([]);
 
   const loadFaceTemplates = useCallback(() => {
     if (!isControlRuntimeAvailable()) {
@@ -68,6 +69,49 @@ export function useSettingsArea(): SettingsAreaViewModel {
       })
       .catch((error) => {
         console.warn('Failed to load WinFaceUnlock face templates.', error);
+      });
+  }, []);
+
+  const loadIntruders = useCallback(() => {
+    if (!isControlRuntimeAvailable()) {
+      return Promise.resolve();
+    }
+
+    return listIntruderSnapshots(controlTransport)
+      .then((res) => {
+        const now = new Date();
+        const mapped = res.safe_details.snapshots.map((s) => {
+          const date = new Date(s.timestamp_ms);
+          const isToday =
+            date.getDate() === now.getDate() &&
+            date.getMonth() === now.getMonth() &&
+            date.getFullYear() === now.getFullYear();
+          const isYesterday =
+            new Date(now.getTime() - 86400000).getDate() === date.getDate() &&
+            new Date(now.getTime() - 86400000).getMonth() === date.getMonth() &&
+            new Date(now.getTime() - 86400000).getFullYear() === date.getFullYear();
+
+          const timeStr = `${date.getHours().toString().padStart(2, '0')}:${date
+            .getMinutes()
+            .toString()
+            .padStart(2, '0')}`;
+          
+          let displayTime = '';
+          if (isToday) displayTime = `今天 ${timeStr}`;
+          else if (isYesterday) displayTime = `昨天 ${timeStr}`;
+          else displayTime = `${date.getMonth() + 1}-${date.getDate()} ${timeStr}`;
+
+          return {
+            id: s.id,
+            time: displayTime,
+            timestampMs: s.timestamp_ms,
+            avatarSrc: s.avatar_preview_base64,
+          };
+        });
+        setIntruders(mapped);
+      })
+      .catch((err) => {
+        console.error('Failed to load intruders:', err);
       });
   }, []);
 
@@ -98,11 +142,10 @@ export function useSettingsArea(): SettingsAreaViewModel {
       });
 
     loadFaceTemplates();
+    loadIntruders();
+  }, [loadFaceTemplates, loadIntruders]);
 
-    return () => {
-      isMounted = false;
-    };
-  }, [loadFaceTemplates]);
+
 
   useEffect(() => subscribeFaceTemplatesChanged(loadFaceTemplates), [loadFaceTemplates]);
 
@@ -269,6 +312,24 @@ export function useSettingsArea(): SettingsAreaViewModel {
       });
   }, []);
 
+  const changeIntruderSnap = useCallback((enabled: boolean) => {
+    setIntruderSnap(enabled);
+  }, []);
+
+  const deleteIntruder = useCallback((id: string) => {
+    if (!isControlRuntimeAvailable()) {
+      setIntruders((current) => current.filter((i) => i.id !== id));
+      return;
+    }
+    deleteIntruderSnapshot(controlTransport, { id })
+      .then((res) => {
+        if (res.operation_status === 'completed') {
+          setIntruders((current) => current.filter((i) => i.id !== id));
+        }
+      })
+      .catch((err) => console.error(err));
+  }, []);
+
   return {
     autoLock,
     intruderSnap,
@@ -276,11 +337,12 @@ export function useSettingsArea(): SettingsAreaViewModel {
     logonFaceMatchThreshold,
     enrolledFaces,
     intruders,
-    setIntruderSnap,
+    setIntruderSnap: changeIntruderSnap,
     changeAutoLock,
     changeTriggerMode,
     changeLogonFaceMatchThreshold,
     deleteFace,
+    deleteIntruder,
   };
 }
 

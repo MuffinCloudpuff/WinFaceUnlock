@@ -14,7 +14,9 @@ export type ControlOperation =
   | 'get_face_enrollment_preview'
   | 'cancel_face_enrollment'
   | 'finish_face_enrollment'
-  | 'run_face_auth_self_test';
+  | 'run_face_auth_self_test'
+  | 'list_intruder_snapshots'
+  | 'delete_intruder_snapshot';
 
 export type ControlOperationStatus =
   | 'completed'
@@ -228,4 +230,22 @@ export interface FaceAuthSelfTestOutcome {
   pipe_delivery_confirmed: boolean;
   best_match_score?: number;
   matched_face_template_ref?: string;
+}
+
+export interface IntruderSnapshotSummary {
+  id: string;
+  timestamp_ms: number;
+  avatar_preview_base64: string;
+}
+
+export interface ListIntruderSnapshotsResponse {
+  snapshots: IntruderSnapshotSummary[];
+}
+
+export interface DeleteIntruderSnapshotPayload {
+  id: string;
+}
+
+export interface DeleteIntruderSnapshotOutcome {
+  success: boolean;
 }

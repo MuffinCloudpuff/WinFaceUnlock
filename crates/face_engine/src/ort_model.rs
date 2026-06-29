@@ -118,8 +118,9 @@ impl OrtGhostFaceNetProvider {
     }
 
     fn preprocess_mat_to_tensor(&self, mat: &Mat) -> Result<Array4<f32>, FaceEngineError> {
-        // Mat is 112x112x3 RGB
-        let mut tensor = Array::zeros((1, 3, 112, 112));
+        // Mat is 112x112x3 BGR
+        // GhostFaceNet expects NHWC (1, 112, 112, 3) and RGB
+        let mut tensor = Array::zeros((1, 112, 112, 3));
 
         let data = mat
             .data_typed::<core::Vec3b>()
@@ -128,10 +129,13 @@ impl OrtGhostFaceNetProvider {
         for y in 0..112 {
             for x in 0..112 {
                 let pixel = data[y * 112 + x];
+                let b = pixel[0] as f32;
+                let g = pixel[1] as f32;
+                let r = pixel[2] as f32;
                 // Normalization: (x - 127.5) / 127.5
-                tensor[[0, 0, y, x]] = (pixel[0] as f32 - 127.5) / 127.5; // R
-                tensor[[0, 1, y, x]] = (pixel[1] as f32 - 127.5) / 127.5; // G
-                tensor[[0, 2, y, x]] = (pixel[2] as f32 - 127.5) / 127.5; // B
+                tensor[[0, y, x, 0]] = (r - 127.5) / 127.5; // R
+                tensor[[0, y, x, 1]] = (g - 127.5) / 127.5; // G
+                tensor[[0, y, x, 2]] = (b - 127.5) / 127.5; // B
             }
         }
 
@@ -181,14 +185,19 @@ impl FaceRecognitionModelProvider for OrtGhostFaceNetProvider {
             .as_mut()
             .ok_or(FaceEngineError::ModelNotLoaded)?;
 
-        // In ORT v2, positional inputs can be passed via inputs! macro
         let outputs = session
             .run(ort::inputs![tensor])
-            .map_err(|_| FaceEngineError::InferenceFailed)?;
+            .map_err(|e| {
+                eprintln!("session.run failed: {:?}", e);
+                FaceEngineError::InferenceFailed
+            })?;
 
         let (_shape, slice) = outputs[0]
             .try_extract_tensor::<f32>()
-            .map_err(|_| FaceEngineError::InferenceFailed)?;
+            .map_err(|e| {
+                eprintln!("try_extract_tensor failed: {:?}", e);
+                FaceEngineError::InferenceFailed
+            })?;
 
         let values: Vec<f32> = slice.to_vec();
 

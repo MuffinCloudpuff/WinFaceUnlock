@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     fs,
     path::PathBuf,
     sync::{
@@ -361,9 +361,9 @@ fn run_face_presence_monitor_for_local_camera(
 ) -> Result<crate::presence_monitor::PresenceMonitorSummary, ProtocolError> {
     let mut camera_config = local_camera_config.camera_config;
     apply_profile_to_config(&local_camera_config.camera_id, &mut camera_config);
-    let templates = RecognitionTemplates::new(read_face_templates(
+    let templates = read_face_templates(
         &local_camera_config.face_template_path,
-    )?);
+    )?;
     let model_config = HybridFaceModelConfig::new(
         local_camera_config.yunet_model_path,
         local_camera_config.sface_model_path,
@@ -543,15 +543,21 @@ fn presence_detector_interval_ms(fps: f32) -> u64 {
 
 fn read_face_templates(
     template_path: &std::path::Path,
-) -> Result<Vec<FaceTemplate>, ProtocolError> {
+) -> Result<face_auth::RecognitionTemplates, ProtocolError> {
     let bytes = fs::read(template_path).map_err(|_| ProtocolError::InvalidMessage)?;
-    if let Ok(template_set) = FaceTemplateSet::from_json_bytes(&bytes) {
-        return Ok(template_set.selected_templates());
+    if let Ok(template_set) = face_engine::FaceTemplateSet::from_json_bytes(&bytes) {
+        let mut templates = face_auth::RecognitionTemplates::new(template_set.selected_templates());
+        if !template_set.sample_metadata.is_empty() {
+            let total_area: u64 = template_set.sample_metadata.iter().map(|m| (m.face_box.width * m.face_box.height) as u64).sum();
+            let avg_area = (total_area / template_set.sample_metadata.len() as u64) as u32;
+            templates = templates.with_average_face_area(avg_area);
+        }
+        return Ok(templates);
     }
 
-    FaceTemplate::from_json_bytes(&bytes)
-        .map(|template| vec![template])
-        .map_err(template_codec_to_protocol_error)
+    face_engine::FaceTemplate::from_json_bytes(&bytes)
+        .map(|template| face_auth::RecognitionTemplates::new(vec![template]))
+        .map_err(|_| ProtocolError::InvalidMessage)
 }
 
 fn template_codec_to_protocol_error(_error: FaceTemplateCodecError) -> ProtocolError {

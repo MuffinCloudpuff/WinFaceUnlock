@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     fs,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -176,7 +176,7 @@ struct LocalCameraAuthenticationOutcome {
 
 impl LocalCameraAuthGrantIssuer {
     fn from_config(config: LocalCameraAuthConfig) -> Result<Self, ProtocolError> {
-        let templates = RecognitionTemplates::new(read_face_templates(&config.face_template_path)?);
+        let templates = read_face_templates(&config.face_template_path)?;
         let mut camera_config = config.camera_config;
         apply_profile_to_config(&config.camera_id, &mut camera_config);
 
@@ -213,11 +213,13 @@ impl LocalCameraAuthGrantIssuer {
         &mut self,
         session_id: &SessionId,
         source: AuthSource,
+        trigger_source: AuthTriggerSource,
         _request_started_at_unix_ms: i64,
     ) -> Result<AuthGrant, AuthFailureReason> {
         self.issue_auth_grant_blocking_with_observer(
             session_id,
             source,
+            trigger_source,
             _request_started_at_unix_ms,
             &mut |_| {},
         )
@@ -227,6 +229,7 @@ impl LocalCameraAuthGrantIssuer {
         &mut self,
         session_id: &SessionId,
         source: AuthSource,
+        trigger_source: AuthTriggerSource,
         _request_started_at_unix_ms: i64,
         on_grant_issued: &mut dyn FnMut(&AuthGrant),
     ) -> Result<AuthGrant, AuthFailureReason> {
@@ -237,7 +240,7 @@ impl LocalCameraAuthGrantIssuer {
         let grant_sequence = self.next_grant_sequence;
         self.next_grant_sequence = self.next_grant_sequence.saturating_add(1);
         let mut issued_grant = None;
-        self.authenticate_from_camera(&mut |outcome| {
+        self.authenticate_from_camera(trigger_source, &mut |outcome| {
             let grant = build_auth_grant(session_id, source, grant_sequence, outcome);
             write_service_event_detail(
                 "LocalCameraAuth.AuthorizationIssued",
@@ -263,6 +266,7 @@ impl LocalCameraAuthGrantIssuer {
 
     fn authenticate_from_camera(
         &mut self,
+        trigger_source: AuthTriggerSource,
         on_authorization_accepted: &mut dyn FnMut(&LocalCameraAuthenticationOutcome),
     ) -> Result<LocalCameraAuthenticationOutcome, AuthFailureReason> {
         write_service_event("LocalCameraAuth.LoadModelsStarted");
@@ -276,7 +280,7 @@ impl LocalCameraAuthGrantIssuer {
         }
 
         let auth_result =
-            self.authenticate_from_camera_with_loaded_runtime(on_authorization_accepted);
+            self.authenticate_from_camera_with_loaded_runtime(trigger_source, on_authorization_accepted);
 
         self.liveness_provider.unload_model();
         self.authenticator.unload_models();
@@ -290,6 +294,7 @@ impl LocalCameraAuthGrantIssuer {
 
     fn authenticate_from_camera_with_loaded_runtime(
         &mut self,
+        trigger_source: AuthTriggerSource,
         on_authorization_accepted: &mut dyn FnMut(&LocalCameraAuthenticationOutcome),
     ) -> Result<LocalCameraAuthenticationOutcome, AuthFailureReason> {
         let _camera_lease = acquire_camera_lease_until(
@@ -373,6 +378,7 @@ impl LocalCameraAuthGrantIssuer {
                                 &frame,
                                 &detected_face,
                                 &self.templates,
+                                trigger_source,
                                 current_time_unix_ms(),
                             ) {
                             Ok(face_authentication) => {
@@ -393,7 +399,12 @@ impl LocalCameraAuthGrantIssuer {
                                 return Ok(outcome);
                             }
                             Err(reason) => {
-                                last_rejection = reason;
+                                last_rejection = reason.clone();
+                                if matches!(reason, AuthFailureReason::IntruderDetected) {
+                                    if let Err(e) = save_intruder_snapshot(&frame, &detected_face) {
+                                        write_service_event_detail("LocalCameraAuth.SaveIntruderSnapshotFailed", format!("error={e:?}"));
+                                    }
+                                }
                                 write_service_event_detail(
                                     "LocalCameraAuth.FrameRejected",
                                     format!("frame_index={frame_index} reason={reason:?}"),
@@ -426,10 +437,10 @@ impl AuthGrantIssuer for LocalCameraAuthGrantIssuer {
         &mut self,
         session_id: &SessionId,
         source: AuthSource,
-        _trigger_source: AuthTriggerSource,
+        trigger_source: AuthTriggerSource,
         issued_at_unix_ms: i64,
     ) -> AuthGrantIssueResult {
-        match self.issue_auth_grant_blocking(session_id, source, issued_at_unix_ms) {
+        match self.issue_auth_grant_blocking(session_id, source, trigger_source, issued_at_unix_ms) {
             Ok(grant) => AuthGrantIssueResult::Issued(grant),
             Err(reason) => AuthGrantIssueResult::Failed(reason),
         }
@@ -439,13 +450,14 @@ impl AuthGrantIssuer for LocalCameraAuthGrantIssuer {
         &mut self,
         session_id: &SessionId,
         source: AuthSource,
-        _trigger_source: AuthTriggerSource,
+        trigger_source: AuthTriggerSource,
         issued_at_unix_ms: i64,
         on_grant_issued: &mut dyn FnMut(&AuthGrant),
     ) -> AuthGrantIssueResult {
         match self.issue_auth_grant_blocking_with_observer(
             session_id,
             source,
+            trigger_source,
             issued_at_unix_ms,
             on_grant_issued,
         ) {
@@ -504,20 +516,57 @@ impl MiniFasNetWindowEvidence {
     }
 }
 
+fn save_intruder_snapshot(
+    frame: &video_provider::VideoFrame,
+    detected_face: &face_engine::DetectedFace,
+) -> std::io::Result<()> {
+    let install_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Program Files\WinFaceUnlock"));
+    
+    let intruders_dir = install_dir.join("Intruders");
+    if !intruders_dir.exists() {
+        std::fs::create_dir_all(&intruders_dir)?;
+    }
+
+    let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    let snapshot_path = intruders_dir.join(format!("intruder_{timestamp}.jpg"));
+
+    let crop_rect = video_provider::image_utils::FaceCropRect {
+        x: detected_face.bounds.x,
+        y: detected_face.bounds.y,
+        width: detected_face.bounds.width,
+        height: detected_face.bounds.height,
+    };
+    
+    if let Ok(jpeg_bytes) = video_provider::image_utils::crop_and_encode_face_to_jpeg(frame, &crop_rect) {
+        std::fs::write(&snapshot_path, jpeg_bytes)?;
+    }
+    
+    Ok(())
+}
+
 fn liveness_error_to_auth_failure(_error: LivenessProviderError) -> AuthFailureReason {
     AuthFailureReason::InternalError
 }
 
 fn read_face_templates(
     template_path: &std::path::Path,
-) -> Result<Vec<FaceTemplate>, ProtocolError> {
+) -> Result<face_auth::RecognitionTemplates, ProtocolError> {
     let bytes = fs::read(template_path).map_err(|_| ProtocolError::InvalidMessage)?;
     if let Ok(template_set) = FaceTemplateSet::from_json_bytes(&bytes) {
-        return Ok(template_set.selected_templates());
+        let mut templates = face_auth::RecognitionTemplates::new(template_set.selected_templates());
+        if !template_set.sample_metadata.is_empty() {
+            let total_area: u64 = template_set.sample_metadata.iter().map(|m| (m.face_box.width * m.face_box.height) as u64).sum();
+            let avg_area = (total_area / template_set.sample_metadata.len() as u64) as u32;
+            templates = templates.with_average_face_area(avg_area);
+        }
+        return Ok(templates);
     }
 
     FaceTemplate::from_json_bytes(&bytes)
-        .map(|template| vec![template])
+        .map(|template| face_auth::RecognitionTemplates::new(vec![template]))
         .map_err(template_codec_to_protocol_error)
 }
 

@@ -15,6 +15,7 @@ export function SettingsArea() {
     changeTriggerMode: handleTriggerModeChange,
     changeLogonFaceMatchThreshold: handleLogonFaceMatchThresholdChange,
     deleteFace: handleFaceDelete,
+    deleteIntruder,
   } = useSettingsArea();
 
   return (
@@ -69,10 +70,24 @@ export function SettingsArea() {
                 >
                   <div className="flex gap-4 overflow-x-auto pb-2 scrollbar-hide">
                     {intruders.map(intruder => (
-                      <div key={intruder.id} className="flex flex-col items-center gap-2">
+                      <div key={intruder.id} className="relative flex flex-col items-center gap-2 group px-1 pt-1">
                         <div className="relative h-12 w-12 rounded-full border-2 border-red-100 bg-red-50 flex items-center justify-center overflow-hidden">
-                          <User className="h-5 w-5 text-red-400" />
+                          {intruder.avatarSrc ? (
+                            <img
+                              src={intruder.avatarSrc}
+                              alt=""
+                              className="h-full w-full object-cover"
+                            />
+                          ) : (
+                            <User className="h-5 w-5 text-red-400" />
+                          )}
                         </div>
+                        <button 
+                          onClick={() => deleteIntruder(intruder.id)}
+                          className="absolute top-0 right-0 bg-white rounded-full p-0.5 shadow-sm border border-red-200 text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors z-10 opacity-0 group-hover:opacity-100"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
                         <span className="text-[10px] text-slate-400 font-medium">{intruder.time}</span>
                       </div>
                     ))}
@@ -197,9 +212,6 @@ export function SettingsArea() {
                  aria-label="登录匹配阈值"
                  onChange={(event) => {
                    let val = Number(event.currentTarget.value);
-                   if (Math.abs(val - 0.75) < 0.03) {
-                     val = 0.75;
-                   }
                    handleLogonFaceMatchThresholdChange(val);
                  }}
                  className="h-2 w-full cursor-pointer accent-[#007acc]"

@@ -1,4 +1,4 @@
-﻿use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const CONTROL_PROTOCOL_VERSION: u32 = 1;
@@ -113,6 +113,8 @@ pub enum ControlOperation {
     CancelFaceEnrollment,
     FinishFaceEnrollment,
     RunFaceAuthSelfTest,
+    ListIntruderSnapshots,
+    DeleteIntruderSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -139,6 +141,7 @@ pub enum ControlErrorCode {
     InvalidFaceTemplateRequest,
     InvalidFaceEnrollmentRequest,
     InvalidAuthSelfTestRequest,
+    InvalidIntruderSnapshotRequest,
     DashboardStatusUnavailable,
     SettingsUnavailable,
     SettingsPersistenceFailed,
@@ -173,6 +176,8 @@ pub enum ControlErrorCode {
     PresenceRuntimeStatusUnavailable,
     ElevationRequired,
     PermissionDenied,
+    IntruderSnapshotUnavailable,
+    IntruderSnapshotDeleteFailed,
 }
 
 pub const DEFAULT_LOGON_FACE_MATCH_THRESHOLD: f32 = 0.75;
@@ -660,6 +665,28 @@ pub enum PresenceMonitorState {
     Disabled,
     Unavailable,
     Unknown(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct IntruderSnapshotSummary {
+    pub id: String,
+    pub timestamp_ms: u128,
+    pub avatar_preview_base64: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct ListIntruderSnapshotsResponse {
+    pub snapshots: Vec<IntruderSnapshotSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct DeleteIntruderSnapshotPayload {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct DeleteIntruderSnapshotOutcome {
+    pub success: bool,
 }
 
 #[cfg(test)]

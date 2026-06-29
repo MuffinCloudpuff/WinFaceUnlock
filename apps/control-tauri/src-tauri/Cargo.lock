@@ -892,6 +892,7 @@ version = "0.1.0"
 dependencies = [
  "common_protocol",
  "face_engine",
+ "face_pose",
  "serde",
  "video_provider",
 ]
@@ -900,7 +901,9 @@ dependencies = [
 name = "face_engine"
 version = "0.1.0"
 dependencies = [
+ "ndarray",
  "opencv",
+ "ort",
  "serde",
  "serde_json",
  "video_provider",
@@ -912,6 +915,15 @@ version = "0.1.0"
 dependencies = [
  "face_engine",
  "opencv",
+ "serde",
+ "video_provider",
+]
+
+[[package]]
+name = "face_pose"
+version = "0.1.0"
+dependencies = [
+ "face_engine",
  "serde",
  "video_provider",
 ]

@@ -1,4 +1,4 @@
-﻿use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use common_protocol::ProtocolError;
 use face_liveness::MiniFasNetLivenessProviderConfig;
