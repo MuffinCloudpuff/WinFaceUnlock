@@ -71,11 +71,6 @@
                     </ListView.ItemTemplate>
                 </ListView>
 
-                <Button
-                    Grid.Row="2"
-                    HorizontalAlignment="Left"
-                    Content="{Binding LanguageToggleText}"
-                    Command="{Binding ToggleLanguageCommand}" />
             </Grid>
 
             <Grid Grid.Column="1" Padding="34">
@@ -167,20 +162,23 @@
         </Grid>
 
         <Grid Grid.Row="1" Background="#FFFFFF" BorderBrush="#DADCE0" BorderThickness="0,1,0,0" Padding="18">
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
-                <Button
-                    Content="{Binding BackButtonText}"
-                    Command="{Binding BackCommand}"
-                    Visibility="{Binding WizardNavigationVisibility}" />
-                <Button
-                    Content="{Binding PrimaryActionText}"
-                    Command="{Binding NextCommand}"
-                    Visibility="{Binding WizardNavigationVisibility}" />
-                <Button
-                    Content="{Binding FinishButtonText}"
-                    Command="{Binding FinishCommand}"
-                    Visibility="{Binding FinishVisibility}" />
-            </StackPanel>
+            <Grid>
+                <Button HorizontalAlignment="Left" Content="{Binding LanguageToggleText}" Command="{Binding ToggleLanguageCommand}" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
+                    <Button
+                        Content="{Binding BackButtonText}"
+                        Command="{Binding BackCommand}"
+                        Visibility="{Binding WizardNavigationVisibility}" />
+                    <Button
+                        Content="{Binding PrimaryActionText}"
+                        Command="{Binding NextCommand}"
+                        Visibility="{Binding WizardNavigationVisibility}" />
+                    <Button
+                        Content="{Binding FinishButtonText}"
+                        Command="{Binding FinishCommand}"
+                        Visibility="{Binding FinishVisibility}" />
+                </StackPanel>
+            </Grid>
         </Grid>
     </Grid>
 </Window>

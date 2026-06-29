@@ -17,7 +17,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Content Include="Assets\logo.png" />
+    <Content Include="Assets\logo.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260508005" />
   </ItemGroup>
 
