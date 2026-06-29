@@ -1,9 +1,9 @@
-﻿#![allow(unsafe_code)]
+#![allow(unsafe_code)]
 
 use std::{
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use common_protocol::{AuthTriggerSource, ProtocolError};
@@ -31,8 +31,7 @@ use crate::{
 pub(crate) const AUTOMATIC_WAKE_ATTEMPT_LIMIT: u32 = 3;
 const BACKGROUND_SILENT_WAKE_ATTEMPT_LIMIT: u32 = u32::MAX;
 const AUTOMATIC_WAKE_RETRY_DELAY_MS: u64 = 600;
-const ADVISE_INPUT_WAIT_TIMEOUT_MS: u64 = 10 * 60 * 1_000;
-const ADVISE_INPUT_POLL_INTERVAL_MS: u64 = 250;
+const ADVISE_INPUT_POLL_INTERVAL_MS: u64 = 100;
 const TRANSPORT_WAKE_ATTEMPT_LIMIT: u32 = 20;
 const TRANSPORT_WAKE_RETRY_DELAY_MS: u64 = 1_000;
 
@@ -324,8 +323,7 @@ fn wait_for_user_input_after_advise(state: &ProviderState) -> bool {
         "Provider.LockScreenInputWaiting",
         format!("baseline_tick={}", baseline.last_input_tick_ms),
     );
-    let deadline = Instant::now() + Duration::from_millis(ADVISE_INPUT_WAIT_TIMEOUT_MS);
-    while Instant::now() < deadline {
+    loop {
         if !state.has_events_sink() {
             return false;
         }
@@ -344,8 +342,6 @@ fn wait_for_user_input_after_advise(state: &ProviderState) -> bool {
             return true;
         }
     }
-
-    false
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
