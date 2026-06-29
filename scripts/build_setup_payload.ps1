@@ -238,6 +238,10 @@ Get-ChildItem -LiteralPath $RuntimeDllDir -Filter "*.dll" | Sort-Object Name | F
     Copy-RequiredFile -SourcePath $_.FullName -TargetRelativePath $runtimeFileName -ManifestFiles $ManifestFiles
 }
 
+Copy-OptionalFile -SourcePath "C:\Windows\System32\vcruntime140.dll" -TargetRelativePath "vcruntime140.dll" -FileId "msvc_vcruntime140" -ManifestFiles $ManifestFiles
+Copy-OptionalFile -SourcePath "C:\Windows\System32\vcruntime140_1.dll" -TargetRelativePath "vcruntime140_1.dll" -FileId "msvc_vcruntime140_1" -ManifestFiles $ManifestFiles
+Copy-OptionalFile -SourcePath "C:\Windows\System32\msvcp140.dll" -TargetRelativePath "msvcp140.dll" -FileId "msvc_msvcp140" -ManifestFiles $ManifestFiles
+
 Write-RecoveryScript -TargetRelativePath "recovery\emergency-disable.cmd" -ManifestFiles $ManifestFiles -Lines @(
     "@echo off",
     "set ROOT=%~dp0..",
