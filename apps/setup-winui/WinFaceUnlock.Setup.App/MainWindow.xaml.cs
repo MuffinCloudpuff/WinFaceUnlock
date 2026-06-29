@@ -10,25 +10,12 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-
-        SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop();
-        ExtendsContentIntoTitleBar = true;
-
         ViewModel = new MainViewModel(this, Close);
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         Title = ViewModel.AppTitle;
-
         if (Content is FrameworkElement root)
         {
             root.DataContext = ViewModel;
-            root.Loaded += (s, e) =>
-            {
-                var titleBar = (UIElement)root.FindName("AppTitleBar");
-                if (titleBar != null)
-                {
-                    SetTitleBar(titleBar);
-                }
-            };
         }
     }
 

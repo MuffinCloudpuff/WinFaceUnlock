@@ -4,160 +4,183 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="WinFaceUnlock Setup">
 
-    <Grid Background="Transparent" MinWidth="800" MinHeight="560">
+    <Grid Background="#F6F7F9" MinWidth="760" MinHeight="520">
         <Grid.RowDefinitions>
-            <RowDefinition Height="48" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- Custom Title Bar -->
-        <Grid x:Name="AppTitleBar" Background="Transparent" Grid.Row="0">
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0" Spacing="12">
-                <Image Source="ms-appx:///Assets/logo.png" Width="16" Height="16" />
-                <TextBlock Text="{Binding ProductName}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
-            </StackPanel>
-        </Grid>
-
-        <!-- Main Content Area with 2 Columns -->
-        <Grid Grid.Row="1">
+        <Grid ColumnSpacing="0">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="280" />
+                <ColumnDefinition Width="260" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
 
-            <!-- Left Pane: Branding -->
-            <Border BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0" Background="{ThemeResource LayerFillColorDefaultBrush}">
-                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="24" Margin="24">
-                    <Image Source="ms-appx:///Assets/logo.png" Width="128" Height="128" />
-                    <StackPanel Spacing="4">
-                        <TextBlock Text="{Binding ProductName}" FontSize="24" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" HorizontalAlignment="Center" />
-                        <TextBlock Text="{Binding CurrentStepName}" FontSize="14" Foreground="{ThemeResource SystemControlForegroundAccentBrush}" HorizontalAlignment="Center" FontWeight="Medium" />
-                    </StackPanel>
+            <Grid Background="#FFFFFF" Padding="24">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <StackPanel Spacing="6">
+                    <Image Source="ms-appx:///Assets/logo.png" Width="64" Height="64" HorizontalAlignment="Left" Margin="0,0,0,8" />
+                    <TextBlock Text="{Binding ProductName}" FontSize="24" FontWeight="SemiBold" Foreground="#202124" />
+                    <TextBlock Text="{Binding CurrentStepName}" FontSize="13" Foreground="#5F6368" />
                 </StackPanel>
-            </Border>
 
-            <!-- Right Pane: Content -->
-            <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
-                <Grid Padding="48,32,48,48">
-                    <Grid.ChildrenTransitions>
-                        <TransitionCollection>
-                            <EntranceThemeTransition FromVerticalOffset="20" IsStaggeringEnabled="True"/>
-                        </TransitionCollection>
-                    </Grid.ChildrenTransitions>
+                <ListView
+                    Grid.Row="1"
+                    Margin="0,28,0,0"
+                    ItemsSource="{Binding Steps}"
+                    SelectionMode="None"
+                    IsItemClickEnabled="False"
+                    IsHitTestVisible="False"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    Padding="0">
+                    <ListView.ItemContainerStyle>
+                        <Style TargetType="ListViewItem">
+                            <Setter Property="MinHeight" Value="40" />
+                            <Setter Property="Padding" Value="0" />
+                            <Setter Property="Margin" Value="0,2" />
+                        </Style>
+                    </ListView.ItemContainerStyle>
+                    <ListView.ItemTemplate>
+                        <DataTemplate>
+                            <Grid ColumnSpacing="10" MinHeight="36">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="24" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock
+                                    Text="{Binding Glyph}"
+                                    FontFamily="Segoe MDL2 Assets"
+                                    Width="24"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Foreground="#2563EB" />
+                                <TextBlock
+                                    Grid.Column="1"
+                                    Text="{Binding Title}"
+                                    VerticalAlignment="Center"
+                                    TextTrimming="CharacterEllipsis"
+                                    Foreground="#202124" />
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
 
-                    <!-- Welcome Page -->
-                    <StackPanel Visibility="{Binding WelcomeVisibility}" Spacing="24">
-                        <TextBlock Text="{Binding WelcomeTitle}" FontSize="28" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" Margin="0,0,0,8" />
+                <Button
+                    Grid.Row="2"
+                    HorizontalAlignment="Left"
+                    Content="{Binding LanguageToggleText}"
+                    Command="{Binding ToggleLanguageCommand}" />
+            </Grid>
 
-                        <StackPanel Spacing="20">
+            <Grid Grid.Column="1" Padding="34">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Grid>
+                    <StackPanel Visibility="{Binding WelcomeVisibility}" Spacing="24" MaxWidth="620">
+                        <TextBlock Text="{Binding WelcomeTitle}" FontSize="34" FontWeight="SemiBold" Foreground="#202124" />
+                        
+                        <StackPanel Spacing="16">
                             <!-- Feature 1 -->
-                            <StackPanel Orientation="Horizontal" Spacing="16">
-                                <Border Background="{ThemeResource SystemControlBackgroundAccentBrush}" Width="40" Height="40" CornerRadius="8" VerticalAlignment="Top">
-                                    <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xEA18;" FontSize="20" Foreground="White" />
-                                </Border>
-                                <StackPanel Spacing="4">
-                                    <TextBlock Text="{Binding Feature1Title}" FontSize="16" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                                    <TextBlock Text="{Binding Feature1Body}" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                                </StackPanel>
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="{Binding Feature1Title}" FontSize="18" FontWeight="SemiBold" Foreground="#374151" />
+                                <TextBlock Text="{Binding Feature1Body}" FontSize="14" Foreground="#4B5563" TextWrapping="Wrap" />
                             </StackPanel>
 
                             <!-- Feature 2 -->
-                            <StackPanel Orientation="Horizontal" Spacing="16">
-                                <Border Background="{ThemeResource SystemControlBackgroundAccentBrush}" Width="40" Height="40" CornerRadius="8" VerticalAlignment="Top">
-                                    <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE945;" FontSize="20" Foreground="White" />
-                                </Border>
-                                <StackPanel Spacing="4">
-                                    <TextBlock Text="{Binding Feature2Title}" FontSize="16" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                                    <TextBlock Text="{Binding Feature2Body}" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                                </StackPanel>
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="{Binding Feature2Title}" FontSize="18" FontWeight="SemiBold" Foreground="#374151" />
+                                <TextBlock Text="{Binding Feature2Body}" FontSize="14" Foreground="#4B5563" TextWrapping="Wrap" />
                             </StackPanel>
 
                             <!-- Feature 3 -->
-                            <StackPanel Orientation="Horizontal" Spacing="16">
-                                <Border Background="{ThemeResource SystemControlBackgroundAccentBrush}" Width="40" Height="40" CornerRadius="8" VerticalAlignment="Top">
-                                    <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE8A5;" FontSize="20" Foreground="White" />
-                                </Border>
-                                <StackPanel Spacing="4">
-                                    <TextBlock Text="{Binding Feature3Title}" FontSize="16" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                                    <TextBlock Text="{Binding Feature3Body}" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                                </StackPanel>
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="{Binding Feature3Title}" FontSize="18" FontWeight="SemiBold" Foreground="#374151" />
+                                <TextBlock Text="{Binding Feature3Body}" FontSize="14" Foreground="#4B5563" TextWrapping="Wrap" />
                             </StackPanel>
                         </StackPanel>
                     </StackPanel>
 
-                    <!-- Disclaimer Page -->
-                    <StackPanel Visibility="{Binding DisclaimerVisibility}" Spacing="24">
-                        <TextBlock Text="{Binding DisclaimerTitle}" FontSize="28" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                        <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="20">
-                            <TextBlock Text="{Binding DisclaimerBody}" FontSize="13" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" LineHeight="22" />
-                        </Border>
-                        <CheckBox Content="{Binding AcceptDisclaimerText}" IsChecked="{Binding DisclaimerAccepted, Mode=TwoWay}" FontSize="14" FontWeight="Medium" />
+                    <StackPanel Visibility="{Binding DisclaimerVisibility}" Spacing="18" MaxWidth="660">
+                        <TextBlock Text="{Binding DisclaimerTitle}" FontSize="28" FontWeight="SemiBold" Foreground="#202124" />
+                        <TextBlock Text="{Binding DisclaimerBody}" FontSize="14" Foreground="#374151" TextWrapping="Wrap" />
+                        <CheckBox
+                            Content="{Binding AcceptDisclaimerText}"
+                            IsChecked="{Binding DisclaimerAccepted, Mode=TwoWay}" />
                     </StackPanel>
 
-                    <!-- Install Location Page -->
-                    <StackPanel Visibility="{Binding InstallLocationVisibility}" Spacing="24">
-                        <TextBlock Text="{Binding InstallLocationTitle}" FontSize="28" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                        <TextBlock Text="{Binding InstallLocationBody}" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                        
-                        <StackPanel Spacing="8" Margin="0,8,0,0">
-                            <TextBlock Text="{Binding InstallDirectoryLabel}" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                            <Grid ColumnSpacing="12">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <TextBox Text="{Binding InstallDir, Mode=TwoWay}" PlaceholderText="{Binding InstallDirPlaceholder}" VerticalAlignment="Center" />
-                                <Button Grid.Column="1" Content="{Binding BrowseButtonText}" Command="{Binding BrowseInstallDirCommand}" VerticalAlignment="Center" />
-                            </Grid>
-                        </StackPanel>
+                    <StackPanel Visibility="{Binding InstallLocationVisibility}" Spacing="16" MaxWidth="660">
+                        <TextBlock Text="{Binding InstallLocationTitle}" FontSize="28" FontWeight="SemiBold" Foreground="#202124" />
+                        <TextBlock Text="{Binding InstallLocationBody}" FontSize="14" Foreground="#4B5563" TextWrapping="Wrap" />
+                        <Grid ColumnSpacing="10" RowSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="120" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding InstallDirectoryLabel}" VerticalAlignment="Center" Foreground="#374151" />
+                            <TextBox Grid.Column="1" Text="{Binding InstallDir, Mode=TwoWay}" PlaceholderText="{Binding InstallDirPlaceholder}" />
+                            <Button Grid.Column="2" Content="{Binding BrowseButtonText}" Command="{Binding BrowseInstallDirCommand}" />
+                        </Grid>
                     </StackPanel>
 
-                    <!-- Installing Page -->
-                    <StackPanel Visibility="{Binding InstallingVisibility}" Spacing="24">
-                        <TextBlock Text="{Binding InstallingTitle}" FontSize="28" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                        <TextBlock Text="{Binding InstallingBody}" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                        
-                        <StackPanel Spacing="12" Margin="0,16,0,0">
-                            <ProgressBar Height="4" Minimum="0" Maximum="100" Value="{Binding InstallProgress}" IsIndeterminate="{Binding InstallProgressIsIndeterminate}" CornerRadius="2" />
-                            <TextBlock Text="{Binding StatusMessage}" FontSize="13" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" HorizontalAlignment="Right" />
-                        </StackPanel>
+                    <StackPanel Visibility="{Binding InstallingVisibility}" Spacing="18" MaxWidth="660">
+                        <TextBlock Text="{Binding InstallingTitle}" FontSize="28" FontWeight="SemiBold" Foreground="#202124" />
+                        <TextBlock Text="{Binding InstallingBody}" FontSize="14" Foreground="#4B5563" TextWrapping="Wrap" />
+                        <ProgressBar
+                            Height="8"
+                            Minimum="0"
+                            Maximum="100"
+                            Value="{Binding InstallProgress}"
+                            IsIndeterminate="{Binding InstallProgressIsIndeterminate}" />
+                        <TextBlock Text="{Binding StatusMessage}" FontSize="13" Foreground="#374151" TextWrapping="Wrap" />
                     </StackPanel>
 
-                    <!-- Complete Page -->
-                    <StackPanel Visibility="{Binding CompleteVisibility}" Spacing="24">
-                        <StackPanel Spacing="12">
-                            <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE73E;" FontSize="40" Foreground="{ThemeResource SystemControlForegroundAccentBrush}" HorizontalAlignment="Left" />
-                            <TextBlock Text="{Binding CompleteTitle}" FontSize="28" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                        </StackPanel>
-                        
-                        <TextBlock Text="{Binding CompleteBody}" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                        
-                        <Border Visibility="{Binding ErrorVisibility}" Background="{ThemeResource SystemFillColorCriticalBackgroundBrush}" BorderBrush="{ThemeResource SystemFillColorCriticalBrush}" BorderThickness="1" CornerRadius="8" Padding="16" Margin="0,12,0,0">
+                    <StackPanel Visibility="{Binding CompleteVisibility}" Spacing="18" MaxWidth="660">
+                        <TextBlock Text="{Binding CompleteTitle}" FontSize="28" FontWeight="SemiBold" Foreground="#202124" />
+                        <TextBlock Text="{Binding CompleteBody}" FontSize="14" Foreground="#4B5563" TextWrapping="Wrap" />
+                        <Border
+                            Visibility="{Binding ErrorVisibility}"
+                            Background="#FEF2F2"
+                            BorderBrush="#DC2626"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="14">
                             <StackPanel Spacing="8">
-                                <TextBlock Text="{Binding ErrorTitle}" FontSize="14" FontWeight="SemiBold" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
-                                <TextBlock Text="{Binding ErrorMessage}" FontSize="13" Foreground="{ThemeResource TextFillColorPrimaryBrush}" TextWrapping="Wrap" />
-                                <TextBlock Text="{Binding ErrorDetails}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" FontFamily="Consolas" />
+                                <TextBlock Text="{Binding ErrorTitle}" FontSize="14" FontWeight="SemiBold" Foreground="#991B1B" />
+                                <TextBlock Text="{Binding ErrorMessage}" FontSize="13" Foreground="#7F1D1D" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding ErrorDetails}" FontSize="12" Foreground="#7F1D1D" TextWrapping="Wrap" />
                             </StackPanel>
                         </Border>
-                        <TextBlock Text="{Binding StatusMessage}" FontSize="13" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding StatusMessage}" FontSize="13" Foreground="#374151" TextWrapping="Wrap" />
                     </StackPanel>
-
                 </Grid>
-            </ScrollViewer>
+            </Grid>
         </Grid>
 
-        <!-- Bottom Action Bar -->
-        <Border Grid.Row="2" Background="{ThemeResource LayerFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,1,0,0" Padding="24,16">
-            <Grid>
-                <Button HorizontalAlignment="Left" Content="{Binding LanguageToggleText}" Command="{Binding ToggleLanguageCommand}" Style="{ThemeResource SubtleButtonStyle}" />
-                
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="12">
-                    <Button Content="{Binding BackButtonText}" Command="{Binding BackCommand}" Visibility="{Binding WizardNavigationVisibility}" />
-                    <Button Content="{Binding PrimaryActionText}" Command="{Binding NextCommand}" Visibility="{Binding WizardNavigationVisibility}" Style="{ThemeResource AccentButtonStyle}" MinWidth="80" />
-                    <Button Content="{Binding FinishButtonText}" Command="{Binding FinishCommand}" Visibility="{Binding FinishVisibility}" Style="{ThemeResource AccentButtonStyle}" MinWidth="80" />
-                </StackPanel>
-            </Grid>
-        </Border>
+        <Grid Grid.Row="1" Background="#FFFFFF" BorderBrush="#DADCE0" BorderThickness="0,1,0,0" Padding="18">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
+                <Button
+                    Content="{Binding BackButtonText}"
+                    Command="{Binding BackCommand}"
+                    Visibility="{Binding WizardNavigationVisibility}" />
+                <Button
+                    Content="{Binding PrimaryActionText}"
+                    Command="{Binding NextCommand}"
+                    Visibility="{Binding WizardNavigationVisibility}" />
+                <Button
+                    Content="{Binding FinishButtonText}"
+                    Command="{Binding FinishCommand}"
+                    Visibility="{Binding FinishVisibility}" />
+            </StackPanel>
+        </Grid>
     </Grid>
 </Window>
