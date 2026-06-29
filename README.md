@@ -1,89 +1,60 @@
-# WinFaceUnlock
+<div align="center">
 
-WinFaceUnlock 是一个面向 Windows 的本地人脸解锁产品，专注于人脸录入、锁屏解锁、离座自动锁屏、非活体防护和本地凭据保护。
+[English](./README_EN.md) | [中文](./README.md)
 
-WinFaceUnlock is a local face unlock product for Windows, focused on face enrollment, lock-screen sign-in, automatic locking when the user leaves, basic anti-spoofing, and local credential protection.
+# 🪪 WinFaceUnlock
 
-它的目标很直接：让 Windows 登录更方便，同时尽量把安全边界收紧在本机，不依赖云端，不把密码当普通数据到处传。
+**Windows 本地人脸解锁与离座锁屏工具**
 
-Its goal is simple: make Windows sign-in more convenient while keeping the security boundary on the local machine, without cloud dependency or treating passwords like ordinary transferable data.
+[![OS](https://img.shields.io/badge/OS-Windows_10_|_11-blue?logo=windows)](#)
+[![Rust](https://img.shields.io/badge/Built_with-Rust-orange?logo=rust)](#)
+[![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](#)
 
-## 我们实现了什么 / What We Built
+</div>
 
-- 人脸录入与本地模板管理
-- Windows 锁屏/登录场景的人脸解锁
-- 本地摄像头识别
-- 离座自动锁屏
-- 基础非活体防护
-- 本地控制面板与设置管理
-- 安装、诊断、调试工具链
+**WinFaceUnlock** 是一个基于 Rust 开发的 Windows 原生人脸解锁解决方案。它的目标很直接：**让 Windows 登录更方便，同时把安全边界严格收紧在本机**。所有密码、人脸特征和推理过程均在本地高权限服务中闭环，不依赖云端，不将密码作为普通数据暴露。
 
-- Face enrollment and local template management
-- Face unlock for Windows lock-screen and sign-in scenarios
-- Local camera recognition
-- Automatic locking when the user leaves
-- Basic anti-spoofing protection
-- Local control panel and settings management
-- Installation, diagnostics, and debugging tools
+---
 
-## 安全特性 / Security Highlights
+## ✨ 核心特性
 
-- 基于 Windows 原生凭据链路完成最终登录交接
-- 密码不明文落盘
-- 密码不走普通明文接口
-- 明文只在受控的本地内存/短时通道中短暂存在
-- 非活体检测是增强能力，不是绝对保证
+- ⚡ **无感人脸解锁**：在 Windows 锁屏/登录界面自动调用摄像头进行精准的人脸识别与解锁。
+- 🚶 **离座自动锁屏**：后台持续检测，当检测到用户离开屏幕前一定时间后，自动锁定电脑保护隐私。
+- 🛡️ **本地安全隔离**：基于 Windows 原生 Credential Provider 链路完成登录交接。密码加密落盘，明文只在受控的本地内存/短时 IPC 通道中短暂存在。
+- 🧑‍💻 **基础防伪活体检测**：内置轻量级非活体防护，提升安全性（注：非活体检测是增强能力，非绝对保证）。
+- 🎨 **现代化控制面板**：基于 Tauri 构建的轻量级前端，提供流畅的人脸录入和策略配置体验。
 
-- Final sign-in handoff is based on the native Windows credential flow
-- Passwords are not stored on disk in plaintext
-- Passwords are not sent through ordinary plaintext interfaces
-- Plaintext only exists briefly in controlled local memory or short-lived local channels
-- Anti-spoofing is a risk-reduction feature, not an absolute security guarantee
+## 🏗️ 架构概览
 
-## 适合谁用 / Who It Is For
+本项目由三个核心部分组成，确保权限隔离与系统稳定：
 
-- 想在 Windows 上体验本地人脸登录/解锁的人
-- 想要离座后自动锁屏的人
-- 想让人脸模板和登录凭据尽量留在本机的人
-- 想在虚拟机里验证 Windows 登录链路的人
+1. **WinFaceUnlockService (Rust)**：作为 `SYSTEM` 权限的 Windows 后台服务运行。负责拉起摄像头、运行 ONNX 模型（YOLOv8 + GhostFaceNet）进行人脸识别，并安全存储比对凭据。
+2. **Credential Provider (C++)**：以动态链接库形式嵌入 Windows `LogonUI`。在锁屏界面与后台服务进行 IPC 通信，安全完成登录凭据的握手。
+3. **Control App (Tauri/React)**：以普通用户权限运行的图形界面。通过安全的命名管道与服务通信，完成人脸录入、阈值调节和开关设置。
 
-- People who want local face sign-in/unlock on Windows
-- People who want their PC to lock automatically when they leave
-- People who want face templates and login credentials to stay on the local machine
-- Developers who want to validate Windows sign-in flows in a virtual machine
+## 🚀 安装与使用
 
-## 免责声明 / Disclaimer
+1. **下载安装包**：获取最新编译的 `WinFaceUnlockSetup.exe`。
+2. **执行安装**：双击运行，安装程序将自动注册 Windows 凭据提供程序并启动后台服务。
+3. **录入人脸**：在桌面右下角托盘找到 WinFaceUnlock 图标，打开主面板，点击“录入人脸”。
+4. **体验解锁**：按下 `Win + L` 锁屏，面对摄像头即可体验秒级解锁！
 
-本项目涉及 Windows 登录、锁屏、Credential Provider 和本地系统服务等敏感系统行为。在使用或二次开发前，请务必了解：
+---
 
-This project touches sensitive Windows behaviors such as sign-in, lock screen integration, Credential Provider, and local system services. Before using or modifying it, please understand:
+## ⚠️ 免责声明
 
-1. 错误的安装、配置、卸载或二次开发操作可能导致系统无法正常登录。
-2. 强烈建议先在 VMware、Hyper-V 等虚拟机环境中调试和验证。
-3. 请保留可用的 Windows PIN、密码、管理员账号或系统恢复手段。
-4. 请勿在生产环境、重要工作电脑或保存关键数据的机器上直接实验未经验证的版本。
-5. 作者不对因使用、修改、分发或二次开发本软件导致的任何数据丢失、系统崩溃、无法登录、安全漏洞或其他损失承担责任。
+本项目涉及 Windows 登录、锁屏、Credential Provider 和本地系统服务等极其敏感的系统行为。在使用或二次开发前，请务必了解：
 
-1. Incorrect installation, configuration, uninstallation, or modification may prevent the system from signing in normally.
-2. Debugging and validation in VMware, Hyper-V, or another virtual machine environment is strongly recommended.
-3. Keep a working Windows PIN, password, administrator account, or system recovery method available.
-4. Do not test unverified builds directly on production machines, important work computers, or devices storing critical data.
-5. The author is not responsible for any data loss, system crash, sign-in failure, security issue, or other damage caused by using, modifying, distributing, or developing this software.
+1. **高风险操作**：错误的安装、配置或二次开发可能导致系统**无法正常登录**。
+2. **测试建议**：强烈建议先在 VMware、Hyper-V 等虚拟机环境中调试和验证。
+3. **保留后路**：请务必保留可用的 Windows PIN、密码、管理员账号或其他系统恢复手段。
+4. **环境警告**：请勿在生产环境、重要工作电脑或保存关键数据的机器上直接实验未经验证的版本。
+5. **免责条款**：作者不对因使用、修改、分发或二次开发本软件导致的任何数据丢失、系统崩溃、无法登录、安全漏洞或其他损失承担责任。
 
-## 开源协议 / License
+## 📜 开源协议与致谢
 
 本仓库根目录当前采用 [Apache License 2.0](LICENSE) 开源。
 
-The repository root is currently licensed under the [Apache License 2.0](LICENSE).
-
-仓库中保留的参考项目 `FaceWinUnlock-Tauri-main/` 使用其自身的 AGPL-3.0 许可证；如果复制、修改或分发该参考项目代码，需要遵守该目录内的许可证要求。
-
-The retained reference project under `FaceWinUnlock-Tauri-main/` uses its own AGPL-3.0 license. If you copy, modify, or distribute code from that directory, you must follow the license terms inside that directory.
-
-## 参考项目 / Reference Project
-
-- [FaceWinUnlock-Tauri](https://github.com/zs1083339604/FaceWinUnlock-Tauri)
-
-该项目对 Windows Credential Provider、命名管道、OpenCV 人脸识别链路有参考价值。本项目围绕更明确的本地凭据边界、认证授权语义、离座锁屏和虚拟机验证流程进行了重新设计与实现。
-
-This project is a useful reference for Windows Credential Provider, named pipes, and OpenCV-based face recognition flows. WinFaceUnlock redesigns and reimplements the product around clearer local credential boundaries, explicit authentication semantics, automatic presence locking, and virtual machine validation.
+**致谢与参考项目**：  
+本项目在早期探索阶段参考了 [FaceWinUnlock-Tauri](https://github.com/zs1083339604/FaceWinUnlock-Tauri)。我们在此基础上，围绕更明确的本地凭据边界、IPC 授权语义、离座锁屏及系统服务化进行了重新设计与彻底的 Rust 重构。
+*(注：仓库中保留的参考项目 `FaceWinUnlock-Tauri-main/` 使用其自身的 AGPL-3.0 许可证。)*
