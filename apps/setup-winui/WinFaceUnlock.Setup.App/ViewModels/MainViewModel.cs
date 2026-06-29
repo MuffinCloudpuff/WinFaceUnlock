@@ -185,13 +185,13 @@ public sealed class MainViewModel : NotifyObject
         _ => ""
     };
 
-    public string WelcomeTitle => Text("WinFaceUnlock", "WinFaceUnlock");
-    public string WelcomeSubtitle => Text(
-        "安装 Windows 本地人脸解锁组件。",
-        "Install the local Windows face unlock components.");
-    public string WelcomeBody => Text(
-        "安装程序会复制必要文件，注册 Windows 服务和 Credential Provider。人脸录入、账号绑定和摄像头设置将在安装完成后由正式配置面板处理。",
-        "Setup will copy required files and register the Windows Service and Credential Provider. Face enrollment, account binding, and camera settings are handled later in the main configuration panel.");
+    public string WelcomeTitle => Text("欢迎使用 WinFaceUnlock", "Welcome to WinFaceUnlock");
+    public string Feature1Title => Text("绝对的本地安全", "Absolute Local Security");
+    public string Feature1Body => Text("密码和人脸数据不上云，严格的本地闭环验证，确保你的隐私不受侵犯。", "Passwords and face features never leave your device. Strict local loop validation ensures your privacy.");
+    public string Feature2Title => Text("无感秒级解锁", "Seamless Fast Unlock");
+    public string Feature2Body => Text("坐在屏幕前即可瞬间点亮并解锁你的电脑，告别繁琐的密码输入。", "Sit in front of your screen to instantly wake and unlock your PC. Say goodbye to passwords.");
+    public string Feature3Title => Text("离座自动锁屏", "Auto-Lock on Away");
+    public string Feature3Body => Text("持续的后台活体检测，当你离开视线时自动锁定屏幕，保护数据安全。", "Continuous background presence monitoring automatically locks your screen when you leave.");
 
     public string DisclaimerTitle => Text("免责声明", "Disclaimer");
     public string DisclaimerBody => Text(
@@ -725,8 +725,12 @@ public sealed class MainViewModel : NotifyObject
         nameof(LanguageToggleText),
         nameof(CurrentStepName),
         nameof(WelcomeTitle),
-        nameof(WelcomeSubtitle),
-        nameof(WelcomeBody),
+        nameof(Feature1Title),
+        nameof(Feature1Body),
+        nameof(Feature2Title),
+        nameof(Feature2Body),
+        nameof(Feature3Title),
+        nameof(Feature3Body),
         nameof(DisclaimerTitle),
         nameof(DisclaimerBody),
         nameof(AcceptDisclaimerText),
