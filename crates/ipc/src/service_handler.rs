@@ -43,6 +43,22 @@ pub trait AuthGrantIssuer {
     fn reload_auth_config(&mut self) -> Result<(), ProtocolError> {
         Ok(())
     }
+
+    fn apply_local_camera_auth_config(
+        &mut self,
+        _template_path: &str,
+        _camera_id: &str,
+        _install_dir: &str,
+    ) -> Result<(), ProtocolError> {
+        Err(ProtocolError::Unauthorized)
+    }
+
+    fn update_settings(
+        &mut self,
+        _patch: &control_protocol::ControlSettingsPatch,
+    ) -> Result<(), ProtocolError> {
+        Err(ProtocolError::Unauthorized)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -165,6 +181,22 @@ where
             }
             ServiceRequest::ReloadAuthConfig => {
                 self.grant_issuer.reload_auth_config()?;
+                Ok(ServiceEvent::AuthConfigReloaded)
+            }
+            ServiceRequest::ApplyLocalCameraAuthConfig {
+                template_path,
+                camera_id,
+                install_dir,
+            } => {
+                self.grant_issuer.apply_local_camera_auth_config(
+                    &template_path,
+                    &camera_id,
+                    &install_dir,
+                )?;
+                Ok(ServiceEvent::AuthConfigReloaded)
+            }
+            ServiceRequest::UpdateSettings { patch } => {
+                self.grant_issuer.update_settings(&patch)?;
                 Ok(ServiceEvent::AuthConfigReloaded)
             }
             ServiceRequest::HealthCheck => Ok(ServiceEvent::HealthOk),

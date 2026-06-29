@@ -141,6 +141,45 @@ impl AuthGrantIssuer for DevelopmentAuthGrantIssuer {
     fn reload_auth_config(&mut self) -> Result<(), ProtocolError> {
         self.reload_from_environment()
     }
+
+    fn apply_local_camera_auth_config(
+        &mut self,
+        template_path: &str,
+        camera_id: &str,
+        install_dir: &str,
+    ) -> Result<(), ProtocolError> {
+        use control_status::WindowsFaceTemplateStatusStore;
+        let template_store = WindowsFaceTemplateStatusStore::from_environment_or_default();
+        let install_path = std::path::Path::new(install_dir);
+        let template_path = std::path::Path::new(template_path);
+        
+        template_store
+            .apply_local_camera_auth_config(template_path, camera_id, install_path)
+            .map_err(|e| {
+                write_service_event_detail("AuthIssuer.ApplyLocalCameraAuthConfigFailed", format!("{:?}", e));
+                ProtocolError::InvalidMessage
+            })?;
+        
+        self.reload_from_environment()
+    }
+
+    fn update_settings(
+        &mut self,
+        patch: &control_protocol::ControlSettingsPatch,
+    ) -> Result<(), ProtocolError> {
+        use control_status::WindowsControlSettingsStore;
+        let settings_store = WindowsControlSettingsStore::new();
+        
+        settings_store
+            .update_settings(patch)
+            .map_err(|e| {
+                write_service_event_detail("AuthIssuer.UpdateSettingsFailed", format!("{:?}", e));
+                ProtocolError::InvalidMessage
+            })?;
+            
+        // We only reload if face match threshold changed, but for simplicity we can just reload anyway
+        self.reload_from_environment()
+    }
 }
 
 fn local_camera_issuer_from_config(

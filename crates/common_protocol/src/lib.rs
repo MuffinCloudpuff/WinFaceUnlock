@@ -143,6 +143,14 @@ pub enum ServiceRequest {
     Cancel {
         session_id: SessionId,
     },
+    ApplyLocalCameraAuthConfig {
+        template_path: String,
+        camera_id: String,
+        install_dir: String,
+    },
+    UpdateSettings {
+        patch: control_protocol::ControlSettingsPatch,
+    },
     ReloadAuthConfig,
     HealthCheck,
 }

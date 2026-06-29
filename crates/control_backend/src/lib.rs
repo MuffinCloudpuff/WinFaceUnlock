@@ -256,15 +256,13 @@ where
                 ControlBackendError::face_enrollment_failed("Failed to determine install directory")
             })?;
 
-        let template_store =
-            control_status::WindowsFaceTemplateStatusStore::from_environment_or_default();
-        template_store
-            .apply_local_camera_auth_config(template_path, camera_id, &install_dir)
-            .map_err(|e| ControlBackendError::face_enrollment_failed(format!("{:?}", e)))?;
-
         let event = self
             .service_client
-            .send_service_request(ServiceRequest::ReloadAuthConfig)
+            .send_service_request(ServiceRequest::ApplyLocalCameraAuthConfig {
+                template_path: template_path.display().to_string(),
+                camera_id: camera_id.to_owned(),
+                install_dir: install_dir.display().to_string(),
+            })
             .map_err(face_template_apply_protocol_error)?;
 
         match event {
@@ -320,28 +318,22 @@ where
             ));
         }
 
-        let should_reload_auth_config = patch.logon_face_match_threshold.is_some();
+        let event = self
+            .service_client
+            .send_service_request(ServiceRequest::UpdateSettings {
+                patch: patch.clone(),
+            })
+            .map_err(settings_update_protocol_error)?;
 
-        self.settings_reader
-            .update_settings(patch)
-            .map_err(ControlBackendError::status_reader_error)?;
-
-        if should_reload_auth_config {
-            let event = self
-                .service_client
-                .send_service_request(ServiceRequest::ReloadAuthConfig)
-                .map_err(settings_update_protocol_error)?;
-
-            match event {
-                ServiceEvent::AuthConfigReloaded => {}
-                ServiceEvent::RequestRejected { reason } => {
-                    return Err(settings_update_protocol_error(reason));
-                }
-                _ => {
-                    return Err(ControlBackendError::settings_persistence_failed(
-                        "service returned an invalid auth config reload response",
-                    ));
-                }
+        match event {
+            ServiceEvent::AuthConfigReloaded => {}
+            ServiceEvent::RequestRejected { reason } => {
+                return Err(settings_update_protocol_error(reason));
+            }
+            _ => {
+                return Err(ControlBackendError::settings_persistence_failed(
+                    "service returned an invalid settings update response",
+                ));
             }
         }
 
