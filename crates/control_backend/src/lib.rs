@@ -2666,6 +2666,9 @@ mod tests {
             if let Some(enabled) = patch.presence_lock_enabled {
                 settings.presence_lock_enabled = enabled;
             }
+            if let Some(enabled) = patch.intruder_snap_enabled {
+                settings.intruder_snap_enabled = enabled;
+            }
             if let Some(logon_wake_mode) = patch.logon_wake_mode {
                 settings.logon_wake_mode = Some(logon_wake_mode);
             }
@@ -2680,6 +2683,7 @@ mod tests {
         RecordingSettingsStore {
             current: Rc::new(RefCell::new(Ok(ControlSettingsSnapshot {
                 presence_lock_enabled: true,
+                intruder_snap_enabled: true,
                 logon_wake_mode: Some(LogonWakeMode::TriggeredRecognition),
                 logon_face_match_threshold: 0.75,
             }))),
@@ -3302,6 +3306,7 @@ mod tests {
                 auth_mode: Some("local_camera".to_owned()),
                 face_template_path: None,
                 presence_lock_enabled: Some(true),
+                intruder_snap_enabled: Some(true),
                 presence_detector_kind: Some("person".to_owned()),
                 presence_tracking_mode: Some("owner_face".to_owned()),
             },
@@ -4242,6 +4247,7 @@ mod tests {
 
         let response = handler.handle_request(update_settings_request(json!({
             "presence_lock_enabled": false,
+            "intruder_snap_enabled": false,
         })));
 
         assert_eq!(response.operation_status, ControlOperationStatus::Completed);
@@ -4249,10 +4255,12 @@ mod tests {
         let decoded_settings: ControlSettingsSnapshot =
             serde_json::from_value(response.safe_details)?;
         assert!(!decoded_settings.presence_lock_enabled);
+        assert!(!decoded_settings.intruder_snap_enabled);
         assert_eq!(
             last_patch.borrow().as_ref(),
             Some(&ControlSettingsPatch {
                 presence_lock_enabled: Some(false),
+                intruder_snap_enabled: Some(false),
                 logon_wake_mode: None,
                 logon_face_match_threshold: None,
             })
@@ -4288,6 +4296,7 @@ mod tests {
             last_patch.borrow().as_ref(),
             Some(&ControlSettingsPatch {
                 presence_lock_enabled: None,
+                intruder_snap_enabled: None,
                 logon_wake_mode: Some(LogonWakeMode::TriggeredRecognition),
                 logon_face_match_threshold: None,
             })
@@ -4319,6 +4328,7 @@ mod tests {
             last_patch.borrow().as_ref(),
             Some(&ControlSettingsPatch {
                 presence_lock_enabled: None,
+                intruder_snap_enabled: None,
                 logon_wake_mode: None,
                 logon_face_match_threshold: Some(0.50),
             })
@@ -4366,6 +4376,7 @@ mod tests {
 
         let response = handler.handle_request(update_settings_request(json!({
             "presence_lock_enabled": true,
+            "intruder_snap_enabled": true,
         })));
 
         assert_eq!(

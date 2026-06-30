@@ -22,6 +22,7 @@ use video_provider::{
 
 use crate::{
     auth_orchestrator::CameraAuthOrchestrator,
+    black_frame::BlackFrameFilter,
     camera_backend_profiles::apply_profile_to_config,
     camera_frame_recovery::{
         TransientFrameFailureDecision, TransientFrameFailureKind, TransientFrameFailureTolerance,
@@ -204,7 +205,9 @@ struct LocalCameraAuthGrantIssuer {
     templates: RecognitionTemplates,
     authenticator: FaceAuthenticator<HybridFaceModelProvider>,
     liveness_provider: MiniFasNetLivenessProvider,
+    black_frame_filter: BlackFrameFilter,
     max_spoof_frame_ratio: f32,
+    intruder_snap_enabled: bool,
     next_grant_sequence: u64,
 }
 
@@ -239,7 +242,9 @@ impl LocalCameraAuthGrantIssuer {
             templates,
             authenticator,
             liveness_provider,
+            black_frame_filter: BlackFrameFilter::default(),
             max_spoof_frame_ratio: config.minifasnet_max_spoof_frame_ratio,
+            intruder_snap_enabled: config.intruder_snap_enabled,
             next_grant_sequence: 1,
         })
     }
@@ -393,6 +398,12 @@ impl LocalCameraAuthGrantIssuer {
                         continue;
                     }
                 };
+
+                if self.black_frame_filter.is_black_frame(&frame) {
+                    write_service_event_detail("LocalCameraAuth.FrameSkipped", "reason=BlackFrame");
+                    continue;
+                }
+
                 let detected_face = match self.authenticator.detect_single_face(&frame) {
                     Ok(detected_face) => detected_face,
                     Err(reason) => {
@@ -440,8 +451,10 @@ impl LocalCameraAuthGrantIssuer {
                             Err(reason) => {
                                 last_rejection = reason.clone();
                                 if matches!(reason, AuthFailureReason::IntruderDetected) {
-                                    if let Err(e) = save_intruder_snapshot(&frame, &detected_face) {
-                                        write_service_event_detail("LocalCameraAuth.SaveIntruderSnapshotFailed", format!("error={e:?}"));
+                                    if self.intruder_snap_enabled {
+                                        if let Err(e) = save_intruder_snapshot(&frame, &detected_face) {
+                                            write_service_event_detail("LocalCameraAuth.SaveIntruderSnapshotFailed", format!("error={e:?}"));
+                                        }
                                     }
                                 }
                                 write_service_event_detail(
@@ -567,6 +580,28 @@ fn save_intruder_snapshot(
     let intruders_dir = install_dir.join("Intruders");
     if !intruders_dir.exists() {
         std::fs::create_dir_all(&intruders_dir)?;
+    }
+
+    if let Ok(entries) = std::fs::read_dir(&intruders_dir) {
+        let mut snapshots: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "jpg"))
+            .collect();
+            
+        if snapshots.len() >= 20 {
+            snapshots.sort_by_key(|a| {
+                a.path()
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.strip_prefix("intruder_"))
+                    .and_then(|s| s.parse::<u128>().ok())
+                    .unwrap_or(0)
+            });
+            
+            for old_snapshot in snapshots.iter().take(snapshots.len() - 19) {
+                let _ = std::fs::remove_file(old_snapshot.path());
+            }
+        }
     }
 
     let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();

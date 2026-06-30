@@ -43,6 +43,7 @@ const REG_SFACE_MODEL_PATH: &str = "SFaceModelPath";
 const REG_MINIFASNET_MODEL_PATH: &str = "MiniFasNetModelPath";
 const REG_MATCH_THRESHOLD: &str = "MatchThreshold";
 const REG_PRESENCE_LOCK_ENABLED: &str = "PresenceLockEnabled";
+const REG_INTRUDER_SNAP_ENABLED: &str = "IntruderSnapEnabled";
 const REG_PRESENCE_DETECTOR_KIND: &str = "PresenceDetectorKind";
 const REG_PRESENCE_TRACKING_MODE: &str = "PresenceTrackingMode";
 const AUTH_MODE_LOCAL_CAMERA: &str = "local-camera";
@@ -341,6 +342,7 @@ struct ObservedServiceConfigStatus {
     auth_mode: Option<String>,
     face_template_path: Option<String>,
     presence_lock_enabled: Option<String>,
+    intruder_snap_enabled: Option<String>,
     presence_detector_kind: Option<String>,
     presence_tracking_mode: Option<String>,
 }
@@ -348,6 +350,8 @@ struct ObservedServiceConfigStatus {
 trait SettingsSource {
     fn read_presence_lock_enabled(&self) -> Result<Option<String>, ControlStatusError>;
     fn write_presence_lock_enabled(&self, enabled: bool) -> Result<(), ControlStatusError>;
+    fn read_intruder_snap_enabled(&self) -> Result<Option<String>, ControlStatusError>;
+    fn write_intruder_snap_enabled(&self, enabled: bool) -> Result<(), ControlStatusError>;
     fn read_logon_wake_mode(&self) -> Result<Option<String>, ControlStatusError>;
     fn read_auto_wake_on_advise(&self) -> Result<Option<String>, ControlStatusError>;
     fn write_logon_wake_mode(&self, mode: LogonWakeMode) -> Result<(), ControlStatusError>;
@@ -609,6 +613,10 @@ fn map_service_config(status: ObservedServiceConfigStatus) -> ServiceConfigSumma
             .presence_lock_enabled
             .as_deref()
             .and_then(parse_registry_bool),
+        intruder_snap_enabled: status
+            .intruder_snap_enabled
+            .as_deref()
+            .and_then(parse_registry_bool),
         presence_detector_kind: status.presence_detector_kind,
         presence_tracking_mode: status.presence_tracking_mode,
     }
@@ -678,6 +686,11 @@ fn load_control_settings(
             .as_deref()
             .and_then(parse_registry_bool)
             .unwrap_or(false),
+        intruder_snap_enabled: source
+            .read_intruder_snap_enabled()?
+            .as_deref()
+            .and_then(parse_registry_bool)
+            .unwrap_or(true),
         logon_wake_mode: source
             .read_logon_wake_mode()?
             .as_deref()
@@ -697,6 +710,9 @@ fn update_control_settings(
 ) -> Result<ControlSettingsSnapshot, ControlStatusError> {
     if let Some(enabled) = patch.presence_lock_enabled {
         source.write_presence_lock_enabled(enabled)?;
+    }
+    if let Some(enabled) = patch.intruder_snap_enabled {
+        source.write_intruder_snap_enabled(enabled)?;
     }
     if let Some(mode) = patch.logon_wake_mode {
         source.write_logon_wake_mode(mode)?;
@@ -728,6 +744,20 @@ impl SettingsSource for WindowsSettingsSource {
         registry::write_string_value(
             SERVICE_CONFIG_REGISTRY_PATH,
             REG_PRESENCE_LOCK_ENABLED,
+            bool_registry_value(enabled),
+        )
+        .map_err(settings_write_error)
+    }
+
+    fn read_intruder_snap_enabled(&self) -> Result<Option<String>, ControlStatusError> {
+        registry::read_string_value(SERVICE_CONFIG_REGISTRY_PATH, REG_INTRUDER_SNAP_ENABLED)
+            .map_err(settings_read_error)
+    }
+
+    fn write_intruder_snap_enabled(&self, enabled: bool) -> Result<(), ControlStatusError> {
+        registry::write_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_INTRUDER_SNAP_ENABLED,
             bool_registry_value(enabled),
         )
         .map_err(settings_write_error)
@@ -818,7 +848,14 @@ impl StatusSource for WindowsStatusSource<'_> {
                 SERVICE_CONFIG_REGISTRY_PATH,
                 REG_PRESENCE_LOCK_ENABLED,
             )
-            .map_err(service_config_error)?,
+            .ok()
+            .flatten(),
+            intruder_snap_enabled: registry::read_string_value(
+                SERVICE_CONFIG_REGISTRY_PATH,
+                REG_INTRUDER_SNAP_ENABLED,
+            )
+            .ok()
+            .flatten(),
             presence_detector_kind: registry::read_string_value(
                 SERVICE_CONFIG_REGISTRY_PATH,
                 REG_PRESENCE_DETECTOR_KIND,
@@ -1379,6 +1416,7 @@ mod tests {
                     auth_mode: Some("local-camera".to_owned()),
                     face_template_path: Some(r"C:\ProgramData\WinFaceUnlock\faces.json".to_owned()),
                     presence_lock_enabled: Some("true".to_owned()),
+                    intruder_snap_enabled: Some("true".to_owned()),
                     presence_detector_kind: Some("person".to_owned()),
                     presence_tracking_mode: Some("owner-face".to_owned()),
                 }),
@@ -1433,6 +1471,7 @@ mod tests {
     #[derive(Default)]
     struct FakeSettingsSource {
         presence_lock_enabled: RefCell<Option<String>>,
+        intruder_snap_enabled: RefCell<Option<String>>,
         logon_wake_mode: RefCell<Option<String>>,
         auto_wake_on_advise: RefCell<Option<String>>,
         logon_face_match_threshold: RefCell<Option<String>>,
@@ -1445,6 +1484,16 @@ mod tests {
 
         fn write_presence_lock_enabled(&self, enabled: bool) -> Result<(), ControlStatusError> {
             self.presence_lock_enabled
+                .replace(Some(bool_registry_value(enabled).to_owned()));
+            Ok(())
+        }
+
+        fn read_intruder_snap_enabled(&self) -> Result<Option<String>, ControlStatusError> {
+            Ok(self.intruder_snap_enabled.borrow().clone())
+        }
+
+        fn write_intruder_snap_enabled(&self, enabled: bool) -> Result<(), ControlStatusError> {
+            self.intruder_snap_enabled
                 .replace(Some(bool_registry_value(enabled).to_owned()));
             Ok(())
         }
@@ -1557,6 +1606,7 @@ mod tests {
                 auth_mode: None,
                 face_template_path: None,
                 presence_lock_enabled: None,
+                intruder_snap_enabled: None,
                 presence_detector_kind: None,
                 presence_tracking_mode: None,
             }),
@@ -1655,6 +1705,7 @@ mod tests {
                 auth_mode: Some("local-camera".to_owned()),
                 face_template_path: Some(template_path.display().to_string()),
                 presence_lock_enabled: Some("true".to_owned()),
+                intruder_snap_enabled: Some("true".to_owned()),
                 presence_detector_kind: None,
                 presence_tracking_mode: None,
             }),
@@ -1715,6 +1766,7 @@ mod tests {
                 auth_mode: Some("local-camera".to_owned()),
                 face_template_path: None,
                 presence_lock_enabled: Some("true".to_owned()),
+                intruder_snap_enabled: Some("true".to_owned()),
                 presence_detector_kind: None,
                 presence_tracking_mode: None,
             }),
@@ -1790,6 +1842,7 @@ mod tests {
             &source,
             &ControlSettingsPatch {
                 presence_lock_enabled: Some(false),
+                intruder_snap_enabled: None,
                 logon_wake_mode: None,
                 logon_face_match_threshold: None,
             },
@@ -1861,6 +1914,7 @@ mod tests {
             &source,
             &ControlSettingsPatch {
                 presence_lock_enabled: None,
+                intruder_snap_enabled: None,
                 logon_wake_mode: Some(LogonWakeMode::TriggeredRecognition),
                 logon_face_match_threshold: None,
             },
@@ -1913,6 +1967,7 @@ mod tests {
             &source,
             &ControlSettingsPatch {
                 presence_lock_enabled: None,
+                intruder_snap_enabled: None,
                 logon_wake_mode: None,
                 logon_face_match_threshold: Some(0.50),
             },
@@ -1934,6 +1989,7 @@ mod tests {
             &source,
             &ControlSettingsPatch {
                 presence_lock_enabled: None,
+                intruder_snap_enabled: None,
                 logon_wake_mode: None,
                 logon_face_match_threshold: Some(0.10),
             },

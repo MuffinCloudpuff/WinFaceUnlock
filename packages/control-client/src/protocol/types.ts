@@ -55,12 +55,14 @@ export type LogonWakeMode =
 
 export interface ControlSettingsSnapshot {
   presence_lock_enabled: boolean;
+  intruder_snap_enabled: boolean;
   logon_wake_mode?: LogonWakeMode;
   logon_face_match_threshold: number;
 }
 
 export interface ControlSettingsPatch {
   presence_lock_enabled?: boolean;
+  intruder_snap_enabled?: boolean;
   logon_wake_mode?: LogonWakeMode;
   logon_face_match_threshold?: number;
 }

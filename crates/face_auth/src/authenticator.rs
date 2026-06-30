@@ -435,7 +435,7 @@ mod tests {
                 authenticator.authenticate_detected_face_without_failure_cooldown(
                     &frame, &face, &templates, common_protocol::AuthTriggerSource::CredentialScreenEntered, timestamp
                 ),
-                Err(AuthFailureReason::MatchBelowThreshold)
+                Err(AuthFailureReason::IntruderDetected)
             );
         }
 
@@ -443,7 +443,7 @@ mod tests {
             authenticator.authenticate_detected_face_without_failure_cooldown(
                 &frame, &face, &templates, common_protocol::AuthTriggerSource::CredentialScreenEntered, 1_006
             ),
-            Err(AuthFailureReason::MatchBelowThreshold)
+            Err(AuthFailureReason::IntruderDetected)
         );
     }
 

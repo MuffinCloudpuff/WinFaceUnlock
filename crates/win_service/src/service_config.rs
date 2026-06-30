@@ -20,6 +20,7 @@ const ENV_MAX_AUTH_FRAMES: &str = "WINFACEUNLOCK_MAX_AUTH_FRAMES";
 const ENV_REQUIRED_CONSECUTIVE: &str = "WINFACEUNLOCK_REQUIRED_CONSECUTIVE";
 const ENV_MATCH_THRESHOLD: &str = "WINFACEUNLOCK_MATCH_THRESHOLD";
 const ENV_PRESENCE_LOCK_ENABLED: &str = "WINFACEUNLOCK_PRESENCE_LOCK_ENABLED";
+const ENV_INTRUDER_SNAP_ENABLED: &str = "WINFACEUNLOCK_INTRUDER_SNAP_ENABLED";
 const ENV_PRESENCE_OWNER_MATCH_THRESHOLD: &str = "WINFACEUNLOCK_PRESENCE_OWNER_MATCH_THRESHOLD";
 const ENV_PRESENCE_DETECTOR_KIND: &str = "WINFACEUNLOCK_PRESENCE_DETECTOR_KIND";
 const ENV_PRESENCE_TRACKING_MODE: &str = "WINFACEUNLOCK_PRESENCE_TRACKING_MODE";
@@ -59,6 +60,7 @@ const REG_MAX_AUTH_FRAMES: &str = "MaxAuthFrames";
 const REG_REQUIRED_CONSECUTIVE: &str = "RequiredConsecutiveMatchCount";
 const REG_MATCH_THRESHOLD: &str = "MatchThreshold";
 const REG_PRESENCE_LOCK_ENABLED: &str = "PresenceLockEnabled";
+const REG_INTRUDER_SNAP_ENABLED: &str = "IntruderSnapEnabled";
 const REG_PRESENCE_OWNER_MATCH_THRESHOLD: &str = "PresenceOwnerMatchThreshold";
 const REG_PRESENCE_DETECTOR_KIND: &str = "PresenceDetectorKind";
 const REG_PRESENCE_TRACKING_MODE: &str = "PresenceTrackingMode";
@@ -135,6 +137,7 @@ pub struct LocalCameraAuthConfig {
     pub max_auth_frames: u32,
     pub required_consecutive_match_count: u32,
     pub match_threshold: f32,
+    pub intruder_snap_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -396,6 +399,8 @@ impl ServiceAuthConfig {
                     .unwrap_or(DEFAULT_REQUIRED_CONSECUTIVE_MATCH_COUNT),
                     match_threshold: optional_f32(&mut lookup, ENV_MATCH_THRESHOLD)?
                         .unwrap_or(DEFAULT_SERVICE_FACE_MATCH_THRESHOLD),
+                    intruder_snap_enabled: optional_bool(&mut lookup, ENV_INTRUDER_SNAP_ENABLED)?
+                        .unwrap_or(true),
                 })),
             }),
             _ => Err(ProtocolError::InvalidMessage),
@@ -450,6 +455,7 @@ fn registry_value_name(env_name: &'static str) -> Option<&'static str> {
         ENV_REQUIRED_CONSECUTIVE => Some(REG_REQUIRED_CONSECUTIVE),
         ENV_MATCH_THRESHOLD => Some(REG_MATCH_THRESHOLD),
         ENV_PRESENCE_LOCK_ENABLED => Some(REG_PRESENCE_LOCK_ENABLED),
+        ENV_INTRUDER_SNAP_ENABLED => Some(REG_INTRUDER_SNAP_ENABLED),
         ENV_PRESENCE_OWNER_MATCH_THRESHOLD => Some(REG_PRESENCE_OWNER_MATCH_THRESHOLD),
         ENV_PRESENCE_DETECTOR_KIND => Some(REG_PRESENCE_DETECTOR_KIND),
         ENV_PRESENCE_TRACKING_MODE => Some(REG_PRESENCE_TRACKING_MODE),
@@ -665,6 +671,7 @@ mod tests {
         assert_eq!(local_camera.max_auth_frames, 12);
         assert_eq!(local_camera.required_consecutive_match_count, 3);
         assert_eq!(local_camera.match_threshold, 0.42);
+        assert_eq!(local_camera.intruder_snap_enabled, true);
         assert_eq!(
             local_camera.minifasnet_config.model_path,
             PathBuf::from(r"D:\models\minifasnet.onnx")

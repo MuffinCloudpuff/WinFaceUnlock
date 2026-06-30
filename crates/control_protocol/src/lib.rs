@@ -187,6 +187,7 @@ pub const MAX_LOGON_FACE_MATCH_THRESHOLD: f32 = 0.90;
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct ControlSettingsSnapshot {
     pub presence_lock_enabled: bool,
+    pub intruder_snap_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logon_wake_mode: Option<LogonWakeMode>,
     pub logon_face_match_threshold: f32,
@@ -197,6 +198,8 @@ pub struct ControlSettingsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_lock_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intruder_snap_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logon_wake_mode: Option<LogonWakeMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logon_face_match_threshold: Option<f32>,
@@ -205,6 +208,7 @@ pub struct ControlSettingsPatch {
 impl ControlSettingsPatch {
     pub fn has_updates(&self) -> bool {
         self.presence_lock_enabled.is_some()
+            || self.intruder_snap_enabled.is_some()
             || self.logon_wake_mode.is_some()
             || self.logon_face_match_threshold.is_some()
     }
@@ -616,6 +620,8 @@ pub struct ServiceConfigSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presence_lock_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub intruder_snap_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub presence_detector_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presence_tracking_mode: Option<String>,
@@ -720,6 +726,7 @@ mod tests {
                 auth_mode: Some("local_camera".to_owned()),
                 face_template_path: Some("models\\face-template.json".to_owned()),
                 presence_lock_enabled: Some(true),
+                intruder_snap_enabled: Some(true),
                 presence_detector_kind: Some("person".to_owned()),
                 presence_tracking_mode: Some("owner_face".to_owned()),
             },
@@ -836,6 +843,7 @@ mod tests {
             operation: ControlOperation::UpdateSettings,
             payload: json!(ControlSettingsPatch {
                 presence_lock_enabled: Some(true),
+                intruder_snap_enabled: None,
                 logon_wake_mode: Some(LogonWakeMode::TriggeredRecognition),
                 logon_face_match_threshold: Some(0.55),
             }),
@@ -857,7 +865,8 @@ mod tests {
         assert!(!ControlSettingsPatch::default().has_updates());
         assert!(
             ControlSettingsPatch {
-                presence_lock_enabled: Some(false),
+                presence_lock_enabled: Some(true),
+                intruder_snap_enabled: None,
                 logon_wake_mode: None,
                 logon_face_match_threshold: None,
             }
@@ -866,6 +875,7 @@ mod tests {
         assert!(
             ControlSettingsPatch {
                 presence_lock_enabled: None,
+                intruder_snap_enabled: None,
                 logon_wake_mode: Some(LogonWakeMode::TriggeredRecognition),
                 logon_face_match_threshold: None,
             }
@@ -874,6 +884,7 @@ mod tests {
         assert!(
             ControlSettingsPatch {
                 presence_lock_enabled: None,
+                intruder_snap_enabled: None,
                 logon_wake_mode: None,
                 logon_face_match_threshold: Some(0.50),
             }

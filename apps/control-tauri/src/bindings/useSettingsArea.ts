@@ -46,6 +46,7 @@ export function useSettingsArea(): SettingsAreaViewModel {
   const [autoLock, setAutoLock] = useState(true);
   const autoLockRequestId = useRef(0);
   const [intruderSnap, setIntruderSnap] = useState(true);
+  const intruderSnapRequestId = useRef(0);
   const [triggerMode, setTriggerMode] = useState<TriggerMode>('keyboard');
   const triggerModeRequestId = useRef(0);
   const [logonFaceMatchThreshold, setLogonFaceMatchThreshold] = useState(0.75);
@@ -127,6 +128,9 @@ export function useSettingsArea(): SettingsAreaViewModel {
           return;
         }
         setAutoLock(response.safe_details.presence_lock_enabled);
+        if (response.safe_details.intruder_snap_enabled !== undefined) {
+          setIntruderSnap(response.safe_details.intruder_snap_enabled);
+        }
         const backendTriggerMode = logonWakeModeToTriggerMode(
           response.safe_details.logon_wake_mode,
         );
@@ -312,9 +316,44 @@ export function useSettingsArea(): SettingsAreaViewModel {
       });
   }, []);
 
-  const changeIntruderSnap = useCallback((enabled: boolean) => {
-    setIntruderSnap(enabled);
-  }, []);
+  const changeIntruderSnap = useCallback(
+    (nextChecked: boolean) => {
+      const previousChecked = intruderSnap;
+      setIntruderSnap(nextChecked);
+
+      if (!isControlRuntimeAvailable()) {
+        return;
+      }
+
+      const requestId = intruderSnapRequestId.current + 1;
+      intruderSnapRequestId.current = requestId;
+
+      updateControlSettings(controlTransport, { intruder_snap_enabled: nextChecked })
+        .then((response) => {
+          if (requestId !== intruderSnapRequestId.current) {
+            return;
+          }
+
+          if (response.operation_status === 'completed') {
+            if (response.safe_details.intruder_snap_enabled !== undefined) {
+              setIntruderSnap(response.safe_details.intruder_snap_enabled);
+            }
+            return;
+          }
+
+          setIntruderSnap(previousChecked);
+          console.warn('WinFaceUnlock intruder snap settings update was not completed.', response);
+        })
+        .catch((error) => {
+          if (requestId !== intruderSnapRequestId.current) {
+            return;
+          }
+          setIntruderSnap(previousChecked);
+          console.warn('Failed to update WinFaceUnlock intruder snap settings.', error);
+        });
+    },
+    [intruderSnap],
+  );
 
   const deleteIntruder = useCallback((id: string) => {
     if (!isControlRuntimeAvailable()) {

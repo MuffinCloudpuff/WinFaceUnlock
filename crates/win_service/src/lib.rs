@@ -1,5 +1,6 @@
-﻿pub mod auth_issuer;
+pub mod auth_issuer;
 pub mod auth_orchestrator;
+pub mod black_frame;
 pub mod camera_backend_profiles;
 pub mod camera_frame_recovery;
 pub mod camera_runtime;
