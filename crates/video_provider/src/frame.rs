@@ -1,4 +1,4 @@
-﻿use crate::VideoError;
+use crate::VideoError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PixelFormat {

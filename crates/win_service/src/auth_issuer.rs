@@ -364,7 +364,7 @@ impl LocalCameraAuthGrantIssuer {
 
             for frame_index in 0..self.max_auth_frames {
                 let frame = match camera_provider.read_frame() {
-                    Ok(frame) => match validate_frame_for_camera_stream(&frame) {
+                    Ok(frame) => match validate_frame_for_camera_stream(&frame, frame_failure_tolerance.is_warmed_up()) {
                         Ok(()) => {
                             frame_failure_tolerance.record_valid_frame();
                             frame

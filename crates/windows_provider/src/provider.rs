@@ -187,103 +187,119 @@ pub(crate) fn request_wake_in_background(
         WakeAttemptPolicy::Finite { attempt_limit } => attempt_limit,
         WakeAttemptPolicy::WhileAdvised => BACKGROUND_SILENT_WAKE_ATTEMPT_LIMIT,
     };
-    let session_id = match state.begin_wake_request(configured_attempt_limit) {
-        WakeRequestStart::Started { session_id } => session_id,
-        WakeRequestStart::Blocked { reason } => {
-            write_provider_event_detail("Provider.WakeSkipped", format!("reason={reason:?}"));
-            return;
-        }
-    };
-
-    write_provider_event(trigger_name);
     let worker_state = state.clone();
     let worker_guard = DllWorkerGuard::new();
     let spawn_result = std::thread::Builder::new()
         .name("winfaceunlock-provider-wake".to_owned())
         .spawn(move || {
             let _worker_guard = worker_guard;
-            if !wait_for_wake_start_policy(&worker_state, start_policy) {
-                write_provider_event_detail("Provider.WakeStopped", "reason=user-input-wait-ended");
-                worker_state.apply_wake_transport_error(
-                    ProtocolError::TransportUnavailable,
-                    1,
-                    AUTOMATIC_WAKE_ATTEMPT_LIMIT,
-                );
-                return;
-            }
-
-            let runtime_config = ProviderRuntimeConfig::from_registry_or_default();
-            let broker_client =
-                ProviderBrokerClient::service_default(runtime_config.wake_auth_source);
-            let mut attempt_number = 1;
-            while attempt_number <= configured_attempt_limit && worker_state.has_events_sink() {
-                if attempt_number > 1 {
-                    thread::sleep(Duration::from_millis(AUTOMATIC_WAKE_RETRY_DELAY_MS));
-                    if !worker_state.has_events_sink() {
-                        break;
-                    }
-                    worker_state
-                        .mark_automatic_retry_started(attempt_number, configured_attempt_limit);
+            loop {
+                if !wait_for_wake_start_policy(&worker_state, start_policy) {
+                    write_provider_event_detail("Provider.WakeStopped", "reason=user-input-wait-ended");
+                    worker_state.apply_wake_transport_error(
+                        ProtocolError::TransportUnavailable,
+                        1,
+                        AUTOMATIC_WAKE_ATTEMPT_LIMIT,
+                    );
+                    return;
                 }
 
-                write_provider_event_detail(
-                    "Provider.WakeRequestStarted",
-                    format!(
-                        "attempt={attempt_number}/{} session_id={}",
-                        wake_attempt_limit_label(attempt_policy, configured_attempt_limit),
-                        session_id.0
-                    ),
-                );
-                match wake_and_fetch_with_transport_retry(
-                    &broker_client,
-                    session_id.clone(),
-                    trigger_source,
-                    TRANSPORT_WAKE_ATTEMPT_LIMIT,
-                ) {
-                    Ok(outcome) => {
-                        let automatic_retry_pending =
-                            matches!(&outcome, ProviderWakeOutcome::AuthFailed { .. })
-                                && worker_state.has_events_sink()
-                                && match attempt_policy {
-                                    WakeAttemptPolicy::Finite { attempt_limit } => {
-                                        attempt_number < attempt_limit
-                                    }
-                                    WakeAttemptPolicy::WhileAdvised => true,
-                                };
-                        write_wake_outcome_detail(
-                            "Provider.WakeCompleted",
-                            &outcome,
-                            attempt_number,
-                            configured_attempt_limit,
-                            automatic_retry_pending,
-                        );
-                        worker_state.apply_wake_outcome(
-                            outcome,
-                            attempt_number,
-                            configured_attempt_limit,
-                            automatic_retry_pending,
-                        );
-                        if !automatic_retry_pending {
-                            return;
-                        }
-                    }
-                    Err(error) => {
-                        write_provider_event_detail(
-                            "Provider.WakeTransportFailed",
-                            format!(
-                                "attempt={attempt_number}/{} error={error:?}",
-                                wake_attempt_limit_label(attempt_policy, configured_attempt_limit)
-                            ),
-                        );
-                        worker_state.apply_wake_transport_error(
-                            error,
-                            attempt_number,
-                            configured_attempt_limit,
-                        );
+                let session_id = match worker_state.begin_wake_request(configured_attempt_limit) {
+                    WakeRequestStart::Started { session_id } => session_id,
+                    WakeRequestStart::Blocked { reason } => {
+                        write_provider_event_detail("Provider.WakeSkipped", format!("reason={reason:?}"));
                         return;
                     }
+                };
+
+                write_provider_event(trigger_name);
+
+                let runtime_config = ProviderRuntimeConfig::from_registry_or_default();
+                let broker_client =
+                    ProviderBrokerClient::service_default(runtime_config.wake_auth_source);
+                let mut attempt_number = 1;
+                let mut auth_succeeded = false;
+                
+                while attempt_number <= configured_attempt_limit && worker_state.has_events_sink() {
+                    if attempt_number > 1 {
+                        thread::sleep(Duration::from_millis(AUTOMATIC_WAKE_RETRY_DELAY_MS));
+                        if !worker_state.has_events_sink() {
+                            break;
+                        }
+                        worker_state
+                            .mark_automatic_retry_started(attempt_number, configured_attempt_limit);
+                    }
+
+                    write_provider_event_detail(
+                        "Provider.WakeRequestStarted",
+                        format!(
+                            "attempt={attempt_number}/{} session_id={}",
+                            wake_attempt_limit_label(attempt_policy, configured_attempt_limit),
+                            session_id.0
+                        ),
+                    );
+                    match wake_and_fetch_with_transport_retry(
+                        &broker_client,
+                        session_id.clone(),
+                        trigger_source,
+                        TRANSPORT_WAKE_ATTEMPT_LIMIT,
+                    ) {
+                        Ok(outcome) => {
+                            if matches!(&outcome, ProviderWakeOutcome::CredentialMaterialReady { .. }) {
+                                auth_succeeded = true;
+                            }
+                            let automatic_retry_pending =
+                                matches!(&outcome, ProviderWakeOutcome::AuthFailed { .. })
+                                    && worker_state.has_events_sink()
+                                    && match attempt_policy {
+                                        WakeAttemptPolicy::Finite { attempt_limit } => {
+                                            attempt_number < attempt_limit
+                                        }
+                                        WakeAttemptPolicy::WhileAdvised => true,
+                                    };
+                            write_wake_outcome_detail(
+                                "Provider.WakeCompleted",
+                                &outcome,
+                                attempt_number,
+                                configured_attempt_limit,
+                                automatic_retry_pending,
+                            );
+                            worker_state.apply_wake_outcome(
+                                outcome,
+                                attempt_number,
+                                configured_attempt_limit,
+                                automatic_retry_pending,
+                            );
+                            if !automatic_retry_pending {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            write_provider_event_detail(
+                                "Provider.WakeTransportFailed",
+                                format!(
+                                    "attempt={attempt_number}/{} error={error:?}",
+                                    wake_attempt_limit_label(attempt_policy, configured_attempt_limit)
+                                ),
+                            );
+                            worker_state.apply_wake_transport_error(
+                                error,
+                                attempt_number,
+                                configured_attempt_limit,
+                            );
+                            break;
+                        }
+                    }
+                    attempt_number = attempt_number.saturating_add(1);
                 }
-                attempt_number = attempt_number.saturating_add(1);
+
+                if auth_succeeded || !worker_state.has_events_sink() {
+                    return;
+                }
+
+                if start_policy != WakeStartPolicy::WaitForUserInputAfterAdvise {
+                    return;
+                }
             }
         });
     if spawn_result.is_err() {

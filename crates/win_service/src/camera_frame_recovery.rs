@@ -1,10 +1,11 @@
-﻿use video_provider::{VideoError, VideoFrame};
+use video_provider::{VideoError, VideoFrame};
 
-pub const DEFAULT_MAX_CONSECUTIVE_TRANSIENT_FRAME_FAILURES: u32 = 5;
+pub const DEFAULT_MAX_CONSECUTIVE_TRANSIENT_FRAME_FAILURES: u32 = 60;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransientFrameFailureKind {
     EmptyFrame,
+    BlackFrame,
     ReadFailed,
     InvalidFrame,
 }
@@ -35,6 +36,7 @@ pub enum TransientFrameFailureDecision {
 pub struct TransientFrameFailureTolerance {
     max_consecutive_failures: u32,
     consecutive_failures: u32,
+    is_warmed_up: bool,
 }
 
 impl TransientFrameFailureTolerance {
@@ -42,6 +44,7 @@ impl TransientFrameFailureTolerance {
         Self {
             max_consecutive_failures: max_consecutive_failures.max(1),
             consecutive_failures: 0,
+            is_warmed_up: false,
         }
     }
 
@@ -49,8 +52,13 @@ impl TransientFrameFailureTolerance {
         Self::new(DEFAULT_MAX_CONSECUTIVE_TRANSIENT_FRAME_FAILURES)
     }
 
+    pub fn is_warmed_up(&self) -> bool {
+        self.is_warmed_up
+    }
+
     pub fn record_valid_frame(&mut self) {
         self.consecutive_failures = 0;
+        self.is_warmed_up = true;
     }
 
     pub fn record_transient_failure(
@@ -74,12 +82,19 @@ impl TransientFrameFailureTolerance {
 
 pub fn validate_frame_for_camera_stream(
     frame: &VideoFrame,
+    is_warmed_up: bool,
 ) -> Result<(), TransientFrameFailureKind> {
     frame.validate().map_err(|error| match error {
         VideoError::EmptyFrame => TransientFrameFailureKind::EmptyFrame,
         VideoError::ReadFailed => TransientFrameFailureKind::ReadFailed,
         _ => TransientFrameFailureKind::InvalidFrame,
-    })
+    })?;
+
+    if !is_warmed_up && video_provider::frame_filter::is_black_or_noise(frame) {
+        return Err(TransientFrameFailureKind::BlackFrame);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -155,7 +170,7 @@ mod tests {
         };
 
         assert_eq!(
-            validate_frame_for_camera_stream(&frame),
+            validate_frame_for_camera_stream(&frame, true),
             Err(TransientFrameFailureKind::InvalidFrame)
         );
     }

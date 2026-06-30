@@ -1,4 +1,5 @@
 mod frame;
+pub mod frame_filter;
 #[cfg(windows)]
 mod mf_bindings;
 mod opencv_camera;

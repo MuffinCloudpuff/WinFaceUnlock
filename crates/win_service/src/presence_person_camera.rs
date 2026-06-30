@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -141,8 +141,11 @@ impl PersonCameraPresenceObservationSource {
         let observation = (|| {
             let (frame, detections) = loop {
                 let frame = match self.camera_provider.read_frame() {
-                    Ok(frame) => match validate_frame_for_camera_stream(&frame) {
-                        Ok(()) => frame,
+                    Ok(frame) => match validate_frame_for_camera_stream(&frame, frame_failure_tolerance.is_warmed_up()) {
+                        Ok(()) => {
+                            frame_failure_tolerance.record_valid_frame();
+                            frame
+                        },
                         Err(kind) => {
                             match Self::record_transient_frame_failure(
                                 &mut frame_failure_tolerance,
