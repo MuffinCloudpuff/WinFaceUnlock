@@ -1,9 +1,9 @@
 use crate::{PixelFormat, VideoFrame};
+use opencv::prelude::VectorToVec;
 use opencv::{
     core::{Mat, MatTraitConst, Vector},
     imgcodecs, imgproc,
 };
-use opencv::prelude::VectorToVec;
 
 pub struct FaceCropRect {
     pub x: f32,
@@ -25,7 +25,7 @@ pub fn crop_and_encode_face_to_jpeg(
         .reshape(channels, frame.height as i32)
         .map_err(|e| e.to_string())?;
     let mut image = mat.try_clone().map_err(|e| e.to_string())?;
-    
+
     if frame.format == PixelFormat::Rgb8 {
         let mut bgr = Mat::default();
         imgproc::cvt_color(
@@ -58,7 +58,7 @@ pub fn crop_and_encode_face_to_jpeg(
     if x2 > x1 && y2 > y1 {
         let roi = opencv::core::Rect::new(x1, y1, x2 - x1, y2 - y1);
         let cropped = Mat::roi(&image, roi).map_err(|e| e.to_string())?;
-        
+
         let mut resized = Mat::default();
         imgproc::resize(
             &cropped,
@@ -78,6 +78,6 @@ pub fn crop_and_encode_face_to_jpeg(
         .map_err(|e| e.to_string())?
         .then_some(())
         .ok_or_else(|| "Failed to encode image to jpeg".to_string())?;
-    
+
     Ok(encoded.to_vec())
 }

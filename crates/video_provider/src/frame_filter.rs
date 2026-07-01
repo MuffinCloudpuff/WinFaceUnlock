@@ -30,7 +30,7 @@ pub fn is_black_or_noise(frame: &VideoFrame) -> bool {
         return true;
     }
 
-    // If more than 98% of the sampled pixels are extremely dark, 
+    // If more than 98% of the sampled pixels are extremely dark,
     // it's highly likely a black frame (e.g. IR camera hardware initializing, or lens covered).
     let dark_ratio = dark_count as f32 / total_sampled as f32;
     dark_ratio > 0.98

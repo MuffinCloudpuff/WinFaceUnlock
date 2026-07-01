@@ -185,19 +185,15 @@ impl FaceRecognitionModelProvider for OrtGhostFaceNetProvider {
             .as_mut()
             .ok_or(FaceEngineError::ModelNotLoaded)?;
 
-        let outputs = session
-            .run(ort::inputs![tensor])
-            .map_err(|e| {
-                eprintln!("session.run failed: {:?}", e);
-                FaceEngineError::InferenceFailed
-            })?;
+        let outputs = session.run(ort::inputs![tensor]).map_err(|e| {
+            eprintln!("session.run failed: {:?}", e);
+            FaceEngineError::InferenceFailed
+        })?;
 
-        let (_shape, slice) = outputs[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| {
-                eprintln!("try_extract_tensor failed: {:?}", e);
-                FaceEngineError::InferenceFailed
-            })?;
+        let (_shape, slice) = outputs[0].try_extract_tensor::<f32>().map_err(|e| {
+            eprintln!("try_extract_tensor failed: {:?}", e);
+            FaceEngineError::InferenceFailed
+        })?;
 
         let values: Vec<f32> = slice.to_vec();
 

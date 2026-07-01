@@ -153,14 +153,17 @@ impl AuthGrantIssuer for DevelopmentAuthGrantIssuer {
         let template_store = WindowsFaceTemplateStatusStore::from_environment_or_default();
         let install_path = std::path::Path::new(install_dir);
         let template_path = std::path::Path::new(template_path);
-        
+
         template_store
             .apply_local_camera_auth_config(template_path, camera_id, install_path)
             .map_err(|e| {
-                write_service_event_detail("AuthIssuer.ApplyLocalCameraAuthConfigFailed", format!("{:?}", e));
+                write_service_event_detail(
+                    "AuthIssuer.ApplyLocalCameraAuthConfigFailed",
+                    format!("{:?}", e),
+                );
                 ProtocolError::InvalidMessage
             })?;
-        
+
         self.reload_from_environment()
     }
 
@@ -170,16 +173,59 @@ impl AuthGrantIssuer for DevelopmentAuthGrantIssuer {
     ) -> Result<(), ProtocolError> {
         use control_status::WindowsControlSettingsStore;
         let settings_store = WindowsControlSettingsStore::new();
-        
-        settings_store
-            .update_settings(patch)
-            .map_err(|e| {
-                write_service_event_detail("AuthIssuer.UpdateSettingsFailed", format!("{:?}", e));
-                ProtocolError::InvalidMessage
-            })?;
-            
+
+        settings_store.update_settings(patch).map_err(|e| {
+            write_service_event_detail("AuthIssuer.UpdateSettingsFailed", format!("{:?}", e));
+            ProtocolError::InvalidMessage
+        })?;
+
         // We only reload if face match threshold changed, but for simplicity we can just reload anyway
         self.reload_from_environment()
+    }
+
+    fn check_windows_credential(
+        &mut self,
+        user_id: &common_protocol::UserId,
+        credential_ref: &common_protocol::CredentialRef,
+    ) -> Result<bool, ProtocolError> {
+        use crate::credential_store_config::{
+            ServiceCredentialStorePaths, is_credential_secret_configured,
+        };
+
+        let store_paths = ServiceCredentialStorePaths::from_environment_or_default();
+        is_credential_secret_configured(&store_paths, user_id, credential_ref)
+    }
+
+    fn enroll_windows_credential(
+        &mut self,
+        user_id: &common_protocol::UserId,
+        user_sid: &str,
+        username: &str,
+        account_type: &common_protocol::AccountType,
+        credential_ref: &common_protocol::CredentialRef,
+        password_secret: &str,
+    ) -> Result<(), ProtocolError> {
+        use crate::credential_store_config::{
+            ServiceCredentialStorePaths, WindowsCredentialEnrollment, enroll_windows_credential,
+        };
+
+        let store_paths = ServiceCredentialStorePaths::from_environment_or_default();
+        let enrollment = WindowsCredentialEnrollment {
+            user_id: user_id.clone(),
+            user_sid: user_sid.to_owned(),
+            username: username.to_owned(),
+            account_type: account_type.clone(),
+            credential_ref: credential_ref.clone(),
+            password: password_secret.to_owned(),
+        };
+
+        enroll_windows_credential(&store_paths, enrollment).map_err(|e| {
+            write_service_event_detail(
+                "AuthIssuer.EnrollWindowsCredentialFailed",
+                format!("{:?}", e),
+            );
+            ProtocolError::InvalidMessage
+        })
     }
 }
 
@@ -323,8 +369,10 @@ impl LocalCameraAuthGrantIssuer {
             return Err(AuthFailureReason::InternalError);
         }
 
-        let auth_result =
-            self.authenticate_from_camera_with_loaded_runtime(trigger_source, on_authorization_accepted);
+        let auth_result = self.authenticate_from_camera_with_loaded_runtime(
+            trigger_source,
+            on_authorization_accepted,
+        );
 
         self.liveness_provider.unload_model();
         self.authenticator.unload_models();
@@ -369,7 +417,10 @@ impl LocalCameraAuthGrantIssuer {
 
             for frame_index in 0..self.max_auth_frames {
                 let frame = match camera_provider.read_frame() {
-                    Ok(frame) => match validate_frame_for_camera_stream(&frame, frame_failure_tolerance.is_warmed_up()) {
+                    Ok(frame) => match validate_frame_for_camera_stream(
+                        &frame,
+                        frame_failure_tolerance.is_warmed_up(),
+                    ) {
                         Ok(()) => {
                             frame_failure_tolerance.record_valid_frame();
                             frame
@@ -452,8 +503,13 @@ impl LocalCameraAuthGrantIssuer {
                                 last_rejection = reason.clone();
                                 if matches!(reason, AuthFailureReason::IntruderDetected) {
                                     if self.intruder_snap_enabled {
-                                        if let Err(e) = save_intruder_snapshot(&frame, &detected_face) {
-                                            write_service_event_detail("LocalCameraAuth.SaveIntruderSnapshotFailed", format!("error={e:?}"));
+                                        if let Err(e) =
+                                            save_intruder_snapshot(&frame, &detected_face)
+                                        {
+                                            write_service_event_detail(
+                                                "LocalCameraAuth.SaveIntruderSnapshotFailed",
+                                                format!("error={e:?}"),
+                                            );
                                         }
                                     }
                                 }
@@ -492,7 +548,8 @@ impl AuthGrantIssuer for LocalCameraAuthGrantIssuer {
         trigger_source: AuthTriggerSource,
         issued_at_unix_ms: i64,
     ) -> AuthGrantIssueResult {
-        match self.issue_auth_grant_blocking(session_id, source, trigger_source, issued_at_unix_ms) {
+        match self.issue_auth_grant_blocking(session_id, source, trigger_source, issued_at_unix_ms)
+        {
             Ok(grant) => AuthGrantIssueResult::Issued(grant),
             Err(reason) => AuthGrantIssueResult::Failed(reason),
         }
@@ -576,7 +633,7 @@ fn save_intruder_snapshot(
         .ok()
         .and_then(|path| path.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Program Files\WinFaceUnlock"));
-    
+
     let intruders_dir = install_dir.join("Intruders");
     if !intruders_dir.exists() {
         std::fs::create_dir_all(&intruders_dir)?;
@@ -587,7 +644,7 @@ fn save_intruder_snapshot(
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map_or(false, |ext| ext == "jpg"))
             .collect();
-            
+
         if snapshots.len() >= 20 {
             snapshots.sort_by_key(|a| {
                 a.path()
@@ -597,14 +654,17 @@ fn save_intruder_snapshot(
                     .and_then(|s| s.parse::<u128>().ok())
                     .unwrap_or(0)
             });
-            
+
             for old_snapshot in snapshots.iter().take(snapshots.len() - 19) {
                 let _ = std::fs::remove_file(old_snapshot.path());
             }
         }
     }
 
-    let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     let snapshot_path = intruders_dir.join(format!("intruder_{timestamp}.jpg"));
 
     let crop_rect = video_provider::image_utils::FaceCropRect {
@@ -613,11 +673,13 @@ fn save_intruder_snapshot(
         width: detected_face.bounds.width,
         height: detected_face.bounds.height,
     };
-    
-    if let Ok(jpeg_bytes) = video_provider::image_utils::crop_and_encode_face_to_jpeg(frame, &crop_rect) {
+
+    if let Ok(jpeg_bytes) =
+        video_provider::image_utils::crop_and_encode_face_to_jpeg(frame, &crop_rect)
+    {
         std::fs::write(&snapshot_path, jpeg_bytes)?;
     }
-    
+
     Ok(())
 }
 
@@ -632,7 +694,11 @@ fn read_face_templates(
     if let Ok(template_set) = FaceTemplateSet::from_json_bytes(&bytes) {
         let mut templates = face_auth::RecognitionTemplates::new(template_set.selected_templates());
         if !template_set.sample_metadata.is_empty() {
-            let total_area: u64 = template_set.sample_metadata.iter().map(|m| (m.face_box.width * m.face_box.height) as u64).sum();
+            let total_area: u64 = template_set
+                .sample_metadata
+                .iter()
+                .map(|m| (m.face_box.width * m.face_box.height) as u64)
+                .sum();
             let avg_area = (total_area / template_set.sample_metadata.len() as u64) as u32;
             templates = templates.with_average_face_area(avg_area);
         }

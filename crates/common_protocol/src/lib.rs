@@ -153,6 +153,18 @@ pub enum ServiceRequest {
     },
     ReloadAuthConfig,
     HealthCheck,
+    CheckWindowsCredential {
+        user_id: UserId,
+        credential_ref: CredentialRef,
+    },
+    EnrollWindowsCredential {
+        user_id: UserId,
+        user_sid: String,
+        username: String,
+        account_type: AccountType,
+        credential_ref: CredentialRef,
+        password_secret: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -179,10 +191,14 @@ pub enum ServiceEvent {
         session_id: SessionId,
     },
     AuthConfigReloaded,
+    HealthOk,
+    WindowsCredentialStatus {
+        configured: bool,
+    },
+    WindowsCredentialEnrolled,
     RequestRejected {
         reason: ProtocolError,
     },
-    HealthOk,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

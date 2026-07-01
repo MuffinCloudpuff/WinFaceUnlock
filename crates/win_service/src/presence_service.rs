@@ -361,9 +361,7 @@ fn run_face_presence_monitor_for_local_camera(
 ) -> Result<crate::presence_monitor::PresenceMonitorSummary, ProtocolError> {
     let mut camera_config = local_camera_config.camera_config;
     apply_profile_to_config(&local_camera_config.camera_id, &mut camera_config);
-    let templates = read_face_templates(
-        &local_camera_config.face_template_path,
-    )?;
+    let templates = read_face_templates(&local_camera_config.face_template_path)?;
     let model_config = HybridFaceModelConfig::new(
         local_camera_config.yunet_model_path,
         local_camera_config.sface_model_path,
@@ -548,7 +546,11 @@ fn read_face_templates(
     if let Ok(template_set) = face_engine::FaceTemplateSet::from_json_bytes(&bytes) {
         let mut templates = face_auth::RecognitionTemplates::new(template_set.selected_templates());
         if !template_set.sample_metadata.is_empty() {
-            let total_area: u64 = template_set.sample_metadata.iter().map(|m| (m.face_box.width * m.face_box.height) as u64).sum();
+            let total_area: u64 = template_set
+                .sample_metadata
+                .iter()
+                .map(|m| (m.face_box.width * m.face_box.height) as u64)
+                .sum();
             let avg_area = (total_area / template_set.sample_metadata.len() as u64) as u32;
             templates = templates.with_average_face_area(avg_area);
         }

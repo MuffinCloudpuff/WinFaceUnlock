@@ -942,10 +942,19 @@ fn run_guided_enroll_with_output_dir(
             let last_frame_result =
                 frame_result_for_guided_observation(&observation, pose_ready_min_fit_score);
             if guided_observation_passes_sample_gate(&observation, pose_ready_min_fit_score) {
-                if *step == GuidedEnrollmentStep::FrontalPrimary && observation.detected_faces.len() == 1 {
+                if *step == GuidedEnrollmentStep::FrontalPrimary
+                    && observation.detected_faces.len() == 1
+                {
                     let score = observation.quality_score;
-                    if best_avatar.as_ref().map_or(true, |(_, _, best_score)| score > *best_score) {
-                        best_avatar = Some((frame.clone(), observation.detected_faces[0].bounds.clone(), score));
+                    if best_avatar
+                        .as_ref()
+                        .map_or(true, |(_, _, best_score)| score > *best_score)
+                    {
+                        best_avatar = Some((
+                            frame.clone(),
+                            observation.detected_faces[0].bounds.clone(),
+                            score,
+                        ));
                     }
                 }
                 accepted_frame_count = accepted_frame_count.saturating_add(1);

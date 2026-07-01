@@ -266,9 +266,7 @@ mod tests {
                 yunet_model_relative_path: PathBuf::from(
                     r"models\face_detection_yunet_2023mar.onnx",
                 ),
-                sface_model_relative_path: PathBuf::from(
-                    r"models\ghostfacenet_v1_stride2.onnx",
-                ),
+                sface_model_relative_path: PathBuf::from(r"models\ghostfacenet_v1_stride2.onnx"),
                 minifasnet_model_relative_path: PathBuf::from(r"models\minifasnet_v2.onnx"),
                 presence_person_model_relative_path: PathBuf::from(r"models\yolov8n.onnx"),
                 presence_person_model_config_relative_path: PathBuf::new(),

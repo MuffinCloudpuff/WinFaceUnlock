@@ -15,7 +15,10 @@ pub struct RecognitionTemplates {
 
 impl RecognitionTemplates {
     pub fn new(templates: Vec<FaceTemplate>) -> Self {
-        Self { templates, average_face_area: None }
+        Self {
+            templates,
+            average_face_area: None,
+        }
     }
 
     pub fn with_average_face_area(mut self, area: u32) -> Self {
@@ -219,11 +222,15 @@ where
             return Err(AuthFailureReason::MatchBelowThreshold);
         };
 
-        let mut is_intruder = best_match.score < self.attempt_policy.intruder_similarity_threshold();
+        let mut is_intruder =
+            best_match.score < self.attempt_policy.intruder_similarity_threshold();
 
-        if is_intruder && trigger_source == common_protocol::AuthTriggerSource::BackgroundSilentMonitor {
+        if is_intruder
+            && trigger_source == common_protocol::AuthTriggerSource::BackgroundSilentMonitor
+        {
             if let Some(avg_area) = templates.average_face_area() {
-                let current_area = (detected_face.bounds.width * detected_face.bounds.height) as u32;
+                let current_area =
+                    (detected_face.bounds.width * detected_face.bounds.height) as u32;
                 if current_area < (avg_area as f32 * 0.8) as u32 {
                     is_intruder = false;
                 }
@@ -249,9 +256,10 @@ where
         }
 
         let policy_decision = match best_match.decision {
-            FaceMatchDecision::MatchAccepted => self
-                .attempt_policy
-                .record_match_result(true, false, current_time_unix_ms),
+            FaceMatchDecision::MatchAccepted => {
+                self.attempt_policy
+                    .record_match_result(true, false, current_time_unix_ms)
+            }
             FaceMatchDecision::MatchRejectedBelowThreshold if record_failure_for_cooldown => self
                 .attempt_policy
                 .record_match_result(false, is_intruder, current_time_unix_ms),
@@ -277,9 +285,7 @@ where
             AttemptPolicyDecision::MatchRejectedBelowThreshold => {
                 Err(AuthFailureReason::MatchBelowThreshold)
             }
-            AttemptPolicyDecision::IntruderDetected => {
-                Err(AuthFailureReason::IntruderDetected)
-            }
+            AttemptPolicyDecision::IntruderDetected => Err(AuthFailureReason::IntruderDetected),
             AttemptPolicyDecision::CooldownActivated => Err(AuthFailureReason::CooldownActive),
         }
     }
@@ -389,7 +395,12 @@ mod tests {
             data: vec![0],
         };
 
-        let result = authenticator.authenticate_frame(&frame, &templates, common_protocol::AuthTriggerSource::CredentialScreenEntered, 1_000);
+        let result = authenticator.authenticate_frame(
+            &frame,
+            &templates,
+            common_protocol::AuthTriggerSource::CredentialScreenEntered,
+            1_000,
+        );
 
         assert_eq!(result, Err(AuthFailureReason::TemplateModelMismatch));
     }
@@ -433,7 +444,11 @@ mod tests {
         for timestamp in 1_000..1_005 {
             assert_eq!(
                 authenticator.authenticate_detected_face_without_failure_cooldown(
-                    &frame, &face, &templates, common_protocol::AuthTriggerSource::CredentialScreenEntered, timestamp
+                    &frame,
+                    &face,
+                    &templates,
+                    common_protocol::AuthTriggerSource::CredentialScreenEntered,
+                    timestamp
                 ),
                 Err(AuthFailureReason::IntruderDetected)
             );
@@ -441,7 +456,11 @@ mod tests {
 
         assert_eq!(
             authenticator.authenticate_detected_face_without_failure_cooldown(
-                &frame, &face, &templates, common_protocol::AuthTriggerSource::CredentialScreenEntered, 1_006
+                &frame,
+                &face,
+                &templates,
+                common_protocol::AuthTriggerSource::CredentialScreenEntered,
+                1_006
             ),
             Err(AuthFailureReason::IntruderDetected)
         );

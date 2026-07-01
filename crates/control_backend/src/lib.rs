@@ -341,6 +341,266 @@ where
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct ServiceIpcCredentialEnrollmentStore<C = NamedPipeFaceAuthServiceClient> {
+    service_client: C,
+}
+
+impl ServiceIpcCredentialEnrollmentStore<NamedPipeFaceAuthServiceClient> {
+    pub fn default_named_pipe() -> Self {
+        Self::new(NamedPipeFaceAuthServiceClient::default())
+    }
+}
+
+impl<C> ServiceIpcCredentialEnrollmentStore<C> {
+    pub fn new(service_client: C) -> Self {
+        Self { service_client }
+    }
+}
+
+fn credential_protocol_error_to_control_error(error: ProtocolError) -> ControlBackendError {
+    ControlBackendError::credential_account_unavailable(format!(
+        "Failed to communicate with service: {error:?}"
+    ))
+}
+
+use common_protocol::{CredentialRef, UserId};
+use control_protocol::{WindowsCredentialAccountType, WindowsCredentialSecretState};
+const DEFAULT_CONTROL_USER_ID: &str = "dev-user";
+
+fn resolve_windows_account_username(
+    payload: &WindowsCredentialEnrollmentPayload,
+) -> Result<String, ControlBackendError> {
+    if let Some(username) = payload
+        .windows_account_username
+        .as_deref()
+        .map(str::trim)
+        .filter(|username| !username.is_empty())
+    {
+        return Ok(username.to_owned());
+    }
+
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .map(|username| username.trim().to_owned())
+        .ok()
+        .filter(|username| !username.is_empty())
+        .ok_or_else(|| {
+            ControlBackendError::credential_enrollment_unavailable(
+                "current Windows account username is unavailable",
+            )
+        })
+}
+
+fn current_windows_account_username() -> Result<String, ControlBackendError> {
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .map(|username| username.trim().to_owned())
+        .ok()
+        .filter(|username| !username.is_empty())
+        .ok_or_else(|| {
+            ControlBackendError::credential_account_unavailable(
+                "current Windows account username is unavailable",
+            )
+        })
+}
+
+#[cfg(windows)]
+fn current_windows_user_sid() -> Result<String, String> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE, LocalFree},
+        Security::{
+            Authorization::ConvertSidToStringSidW, GetTokenInformation, TOKEN_QUERY, TOKEN_USER,
+            TokenUser,
+        },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    struct TokenHandle(HANDLE);
+
+    impl Drop for TokenHandle {
+        fn drop(&mut self) {
+            if self.0 != 0 {
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    let mut token_handle: HANDLE = 0;
+    let process = unsafe { GetCurrentProcess() };
+
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token_handle) } == 0 {
+        return Err("OpenProcessToken failed".to_owned());
+    }
+    let _token = TokenHandle(token_handle);
+
+    let mut length: u32 = 0;
+    unsafe {
+        GetTokenInformation(
+            token_handle,
+            TokenUser,
+            std::ptr::null_mut(),
+            0,
+            &mut length,
+        );
+    }
+    if length == 0 {
+        return Err("GetTokenInformation size check failed".to_owned());
+    }
+
+    let mut token_user_buffer = vec![0u8; length as usize];
+    if unsafe {
+        GetTokenInformation(
+            token_handle,
+            TokenUser,
+            token_user_buffer.as_mut_ptr() as *mut _,
+            length,
+            &mut length,
+        )
+    } == 0
+    {
+        return Err("GetTokenInformation failed".to_owned());
+    }
+
+    let token_user = unsafe { &*(token_user_buffer.as_ptr() as *const TOKEN_USER) };
+    let sid = token_user.User.Sid;
+
+    let mut sid_string_ptr = std::ptr::null_mut();
+    if unsafe { ConvertSidToStringSidW(sid, &mut sid_string_ptr) } == 0 {
+        return Err("ConvertSidToStringSidW failed".to_owned());
+    }
+
+    let sid_string = unsafe {
+        let len = (0..)
+            .take_while(|&i| *sid_string_ptr.offset(i) != 0)
+            .count();
+        let slice = std::slice::from_raw_parts(sid_string_ptr, len);
+        String::from_utf16_lossy(slice)
+    };
+
+    unsafe {
+        LocalFree(sid_string_ptr.cast());
+    }
+
+    Ok(sid_string)
+}
+
+#[cfg(not(windows))]
+fn current_windows_user_sid() -> Result<String, String> {
+    Err("Not supported on this platform".to_owned())
+}
+
+fn account_type_from_control(
+    control_type: WindowsCredentialAccountType,
+) -> common_protocol::AccountType {
+    match control_type {
+        WindowsCredentialAccountType::Local => common_protocol::AccountType::Local,
+        WindowsCredentialAccountType::MicrosoftAccount => {
+            common_protocol::AccountType::MicrosoftAccount
+        }
+        WindowsCredentialAccountType::Domain => common_protocol::AccountType::Domain,
+    }
+}
+
+impl<C> WindowsCredentialEnrollmentStore for ServiceIpcCredentialEnrollmentStore<C>
+where
+    C: FaceAuthServiceClient,
+{
+    fn load_windows_credential_account(
+        &self,
+    ) -> Result<WindowsCredentialAccountProfile, ControlBackendError> {
+        let username = current_windows_account_username()?;
+        let user_sid = current_windows_user_sid().map_err(|message| {
+            ControlBackendError::credential_account_unavailable(format!(
+                "current Windows account SID is unavailable: {message}"
+            ))
+        })?;
+        let user_id = DEFAULT_CONTROL_USER_ID.to_owned();
+        let credential_ref = format!("windows-credential-{user_id}");
+
+        let event = self
+            .service_client
+            .send_service_request(ServiceRequest::CheckWindowsCredential {
+                user_id: UserId(user_id.clone()),
+                credential_ref: CredentialRef(credential_ref.clone()),
+            })
+            .map_err(credential_protocol_error_to_control_error)?;
+
+        let configured = match event {
+            ServiceEvent::WindowsCredentialStatus { configured } => configured,
+            ServiceEvent::RequestRejected { reason } => {
+                return Err(credential_protocol_error_to_control_error(reason));
+            }
+            _ => {
+                return Err(ControlBackendError::credential_account_unavailable(
+                    "service returned an invalid credential status response",
+                ));
+            }
+        };
+
+        let credential_secret_state = if configured {
+            WindowsCredentialSecretState::Configured
+        } else {
+            WindowsCredentialSecretState::NotConfigured
+        };
+
+        Ok(WindowsCredentialAccountProfile {
+            windows_account_username: username,
+            display_name: None,
+            user_id,
+            user_sid,
+            account_type: WindowsCredentialAccountType::Local,
+            credential_ref,
+            credential_secret_state,
+        })
+    }
+
+    fn enroll_windows_credential(
+        &self,
+        payload: &WindowsCredentialEnrollmentPayload,
+        password_secret: WindowsCredentialSecret,
+    ) -> Result<WindowsCredentialEnrollmentOutcome, ControlBackendError> {
+        let username = resolve_windows_account_username(payload)?;
+        let credential_ref = payload.resolved_credential_ref();
+
+        let event = self
+            .service_client
+            .send_service_request(ServiceRequest::EnrollWindowsCredential {
+                user_id: UserId(payload.user_id.clone()),
+                user_sid: payload.user_sid.clone(),
+                username: username.clone(),
+                account_type: account_type_from_control(payload.account_type),
+                credential_ref: CredentialRef(credential_ref.clone()),
+                password_secret: password_secret.into_password(),
+            })
+            .map_err(credential_protocol_error_to_control_error)?;
+
+        match event {
+            ServiceEvent::WindowsCredentialEnrolled => {}
+            ServiceEvent::RequestRejected { reason } => {
+                return Err(credential_protocol_error_to_control_error(reason));
+            }
+            _ => {
+                return Err(ControlBackendError::credential_enrollment_failed(
+                    "service returned an invalid credential enrollment response",
+                ));
+            }
+        }
+
+        Ok(WindowsCredentialEnrollmentOutcome {
+            windows_account_username: username,
+            display_name: None,
+            user_id: payload.user_id.clone(),
+            user_sid: payload.user_sid.clone(),
+            account_type: payload.account_type,
+            credential_ref,
+            credential_secret_state: WindowsCredentialSecretState::Configured,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct CommandFaceEnrollmentRuntime<
     P = DiagnosticsCliEnrollmentProcessFactory,
@@ -1689,8 +1949,12 @@ where
             ControlOperation::CancelFaceEnrollment => self.handle_cancel_face_enrollment(&request),
             ControlOperation::FinishFaceEnrollment => self.handle_finish_face_enrollment(&request),
             ControlOperation::RunFaceAuthSelfTest => self.handle_run_face_auth_self_test(&request),
-            ControlOperation::ListIntruderSnapshots => self.handle_list_intruder_snapshots(&request),
-            ControlOperation::DeleteIntruderSnapshot => self.handle_delete_intruder_snapshot(&request),
+            ControlOperation::ListIntruderSnapshots => {
+                self.handle_list_intruder_snapshots(&request)
+            }
+            ControlOperation::DeleteIntruderSnapshot => {
+                self.handle_delete_intruder_snapshot(&request)
+            }
         }
     }
 
@@ -1753,14 +2017,17 @@ where
         }
     }
 
-    fn handle_list_intruder_snapshots(&self, request: &ControlRequestEnvelope) -> ControlResponseEnvelope {
+    fn handle_list_intruder_snapshots(
+        &self,
+        request: &ControlRequestEnvelope,
+    ) -> ControlResponseEnvelope {
         use base64::Engine;
         let install_dir = std::env::current_exe()
             .ok()
             .and_then(|path| path.parent().map(|p| p.to_path_buf()))
             .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Program Files\WinFaceUnlock"));
         let intruders_dir = install_dir.join("Intruders");
-        
+
         let mut snapshots = Vec::new();
         if intruders_dir.exists() {
             if let Ok(entries) = std::fs::read_dir(&intruders_dir) {
@@ -1771,11 +2038,14 @@ where
                             if let Some(timestamp_str) = file_stem.strip_prefix("intruder_") {
                                 if let Ok(timestamp_ms) = timestamp_str.parse::<u128>() {
                                     if let Ok(bytes) = std::fs::read(&path) {
-                                        let base64 = base64::prelude::BASE64_STANDARD.encode(&bytes);
+                                        let base64 =
+                                            base64::prelude::BASE64_STANDARD.encode(&bytes);
                                         snapshots.push(control_protocol::IntruderSnapshotSummary {
                                             id: timestamp_str.to_string(),
                                             timestamp_ms,
-                                            avatar_preview_base64: format!("data:image/jpeg;base64,{base64}"),
+                                            avatar_preview_base64: format!(
+                                                "data:image/jpeg;base64,{base64}"
+                                            ),
                                         });
                                     }
                                 }
@@ -1785,39 +2055,44 @@ where
                 }
             }
         }
-        
+
         snapshots.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
         snapshots.truncate(8);
 
         ControlResponseEnvelope::completed(
             request,
             "Listed intruder snapshots.",
-            serde_json::to_value(control_protocol::ListIntruderSnapshotsResponse { snapshots }).unwrap_or_default(),
+            serde_json::to_value(control_protocol::ListIntruderSnapshotsResponse { snapshots })
+                .unwrap_or_default(),
         )
     }
 
-    fn handle_delete_intruder_snapshot(&self, request: &ControlRequestEnvelope) -> ControlResponseEnvelope {
-        let payload: control_protocol::DeleteIntruderSnapshotPayload = match serde_json::from_value(
-            request.payload.clone(),
-        ) {
-            Ok(p) => p,
-            Err(err) => {
-                return ControlResponseEnvelope::invalid_request(
-                    request,
-                    "Invalid DeleteIntruderSnapshot payload format.",
-                    json!({
-                        "control_error_code": ControlErrorCode::InvalidIntruderSnapshotRequest,
-                        "parse_error": err.to_string(),
-                    }),
-                );
-            }
-        };
+    fn handle_delete_intruder_snapshot(
+        &self,
+        request: &ControlRequestEnvelope,
+    ) -> ControlResponseEnvelope {
+        let payload: control_protocol::DeleteIntruderSnapshotPayload =
+            match serde_json::from_value(request.payload.clone()) {
+                Ok(p) => p,
+                Err(err) => {
+                    return ControlResponseEnvelope::invalid_request(
+                        request,
+                        "Invalid DeleteIntruderSnapshot payload format.",
+                        json!({
+                            "control_error_code": ControlErrorCode::InvalidIntruderSnapshotRequest,
+                            "parse_error": err.to_string(),
+                        }),
+                    );
+                }
+            };
 
         let install_dir = std::env::current_exe()
             .ok()
             .and_then(|path| path.parent().map(|p| p.to_path_buf()))
             .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Program Files\WinFaceUnlock"));
-        let snapshot_path = install_dir.join("Intruders").join(format!("intruder_{}.jpg", payload.id));
+        let snapshot_path = install_dir
+            .join("Intruders")
+            .join(format!("intruder_{}.jpg", payload.id));
 
         if snapshot_path.exists() {
             if let Err(e) = std::fs::remove_file(&snapshot_path) {
@@ -1832,7 +2107,8 @@ where
         ControlResponseEnvelope::completed(
             request,
             "Intruder snapshot deleted successfully.",
-            serde_json::to_value(control_protocol::DeleteIntruderSnapshotOutcome { success: true }).unwrap_or_default(),
+            serde_json::to_value(control_protocol::DeleteIntruderSnapshotOutcome { success: true })
+                .unwrap_or_default(),
         )
     }
 

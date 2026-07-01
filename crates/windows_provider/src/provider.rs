@@ -195,7 +195,10 @@ pub(crate) fn request_wake_in_background(
             let _worker_guard = worker_guard;
             loop {
                 if !wait_for_wake_start_policy(&worker_state, start_policy) {
-                    write_provider_event_detail("Provider.WakeStopped", "reason=user-input-wait-ended");
+                    write_provider_event_detail(
+                        "Provider.WakeStopped",
+                        "reason=user-input-wait-ended",
+                    );
                     worker_state.apply_wake_transport_error(
                         ProtocolError::TransportUnavailable,
                         1,
@@ -207,7 +210,10 @@ pub(crate) fn request_wake_in_background(
                 let session_id = match worker_state.begin_wake_request(configured_attempt_limit) {
                     WakeRequestStart::Started { session_id } => session_id,
                     WakeRequestStart::Blocked { reason } => {
-                        write_provider_event_detail("Provider.WakeSkipped", format!("reason={reason:?}"));
+                        write_provider_event_detail(
+                            "Provider.WakeSkipped",
+                            format!("reason={reason:?}"),
+                        );
                         return;
                     }
                 };
@@ -219,7 +225,7 @@ pub(crate) fn request_wake_in_background(
                     ProviderBrokerClient::service_default(runtime_config.wake_auth_source);
                 let mut attempt_number = 1;
                 let mut auth_succeeded = false;
-                
+
                 while attempt_number <= configured_attempt_limit && worker_state.has_events_sink() {
                     if attempt_number > 1 {
                         thread::sleep(Duration::from_millis(AUTOMATIC_WAKE_RETRY_DELAY_MS));
@@ -245,7 +251,10 @@ pub(crate) fn request_wake_in_background(
                         TRANSPORT_WAKE_ATTEMPT_LIMIT,
                     ) {
                         Ok(outcome) => {
-                            if matches!(&outcome, ProviderWakeOutcome::CredentialMaterialReady { .. }) {
+                            if matches!(
+                                &outcome,
+                                ProviderWakeOutcome::CredentialMaterialReady { .. }
+                            ) {
                                 auth_succeeded = true;
                             }
                             let automatic_retry_pending =
@@ -279,7 +288,10 @@ pub(crate) fn request_wake_in_background(
                                 "Provider.WakeTransportFailed",
                                 format!(
                                     "attempt={attempt_number}/{} error={error:?}",
-                                    wake_attempt_limit_label(attempt_policy, configured_attempt_limit)
+                                    wake_attempt_limit_label(
+                                        attempt_policy,
+                                        configured_attempt_limit
+                                    )
                                 ),
                             );
                             worker_state.apply_wake_transport_error(

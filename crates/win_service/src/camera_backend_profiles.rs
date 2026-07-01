@@ -263,13 +263,13 @@ fn profile_camera(camera_id: &CameraId, display_name: &str) -> Option<CameraBack
     for (i, backend) in backends.iter().copied().enumerate() {
         if let Some(probe) = probe_backend(camera_index, backend) {
             let found_usable = probe.open_ms <= MAX_USABLE_BACKEND_OPEN_MS;
-            
+
             match &best_probe {
                 None => best_probe = Some(probe),
                 Some(existing) if probe.open_ms < existing.open_ms => best_probe = Some(probe),
                 _ => {}
             }
-            
+
             if found_usable {
                 break; // Found a fast enough backend, short-circuit to save time!
             }

@@ -8,7 +8,7 @@ export function AccountArea() {
   const [pin, setPin] = useState('');
   const [isEditingCredential, setIsEditingCredential] = useState(false);
   const [showSuccessAnimation, setShowSuccessAnimation] = useState(false);
-  const { accountProfile, credentialEnrollmentCompletedAt, isSubmitting, submitCredential } =
+  const { accountProfile, credentialEnrollmentCompletedAt, isSubmitting, submitCredential, message } =
     useCredentialEnrollment();
   const credentialConfigured = accountProfile?.credential_secret_state === 'configured';
   const shouldShowCredentialInput = !credentialConfigured || isEditingCredential;
@@ -49,6 +49,7 @@ export function AccountArea() {
 
   return (
     <div className="relative z-50 flex flex-1 flex-col items-center justify-center gap-10">
+      {message && <div className="absolute top-0 text-red-500 font-medium text-sm">{message}</div>}
       <motion.div
         initial={{ y: 20, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
@@ -118,7 +119,8 @@ export function AccountArea() {
                           handleCredentialSubmit();
                         }
                       }}
-                      className="block w-full h-full bg-transparent pl-10 pr-10 text-slate-800 placeholder-slate-400 focus:outline-none transition-all font-mono tracking-[0.3em] text-center relative z-0"
+                      disabled={isControlRuntimeAvailable() && !accountProfile}
+                      className="block w-full h-full bg-transparent pl-10 pr-10 text-slate-800 placeholder-slate-400 focus:outline-none disabled:opacity-50 transition-all font-mono tracking-[0.3em] text-center relative z-0"
                       placeholder="PIN"
                       autoFocus
                     />

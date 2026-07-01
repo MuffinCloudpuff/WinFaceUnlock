@@ -59,6 +59,26 @@ pub trait AuthGrantIssuer {
     ) -> Result<(), ProtocolError> {
         Err(ProtocolError::Unauthorized)
     }
+
+    fn check_windows_credential(
+        &mut self,
+        _user_id: &common_protocol::UserId,
+        _credential_ref: &common_protocol::CredentialRef,
+    ) -> Result<bool, ProtocolError> {
+        Ok(false)
+    }
+
+    fn enroll_windows_credential(
+        &mut self,
+        _user_id: &common_protocol::UserId,
+        _user_sid: &str,
+        _username: &str,
+        _account_type: &common_protocol::AccountType,
+        _credential_ref: &common_protocol::CredentialRef,
+        _password_secret: &str,
+    ) -> Result<(), ProtocolError> {
+        Err(ProtocolError::Unauthorized)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -200,6 +220,33 @@ where
                 Ok(ServiceEvent::AuthConfigReloaded)
             }
             ServiceRequest::HealthCheck => Ok(ServiceEvent::HealthOk),
+            ServiceRequest::CheckWindowsCredential {
+                user_id,
+                credential_ref,
+            } => {
+                let configured = self
+                    .grant_issuer
+                    .check_windows_credential(&user_id, &credential_ref)?;
+                Ok(ServiceEvent::WindowsCredentialStatus { configured })
+            }
+            ServiceRequest::EnrollWindowsCredential {
+                user_id,
+                user_sid,
+                username,
+                account_type,
+                credential_ref,
+                password_secret,
+            } => {
+                self.grant_issuer.enroll_windows_credential(
+                    &user_id,
+                    &user_sid,
+                    &username,
+                    &account_type,
+                    &credential_ref,
+                    &password_secret,
+                )?;
+                Ok(ServiceEvent::WindowsCredentialEnrolled)
+            }
         }
     }
 

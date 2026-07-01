@@ -41,10 +41,10 @@ impl BlackFrameFilter {
 
         let luma_threshold = 5u32;
         let sample_count = 1000usize;
-        
+
         let channels = frame.format.channel_count();
         let total_pixels = (frame.width * frame.height) as usize;
-        
+
         if total_pixels == 0 {
             return true;
         }
@@ -52,18 +52,18 @@ impl BlackFrameFilter {
         let step = (total_pixels / sample_count).max(1);
         let mut sum_luma = 0u64;
         let mut actual_samples = 0;
-        
+
         for i in 0..sample_count {
             let pixel_idx = i * step;
             if pixel_idx >= total_pixels {
                 break;
             }
-            
+
             let byte_idx = pixel_idx * channels;
             if byte_idx >= frame.data.len() {
                 break;
             }
-            
+
             let luma = match frame.format {
                 PixelFormat::Bgr8 => {
                     if byte_idx + 2 < frame.data.len() {
@@ -87,17 +87,17 @@ impl BlackFrameFilter {
                 }
                 PixelFormat::Gray8 => frame.data[byte_idx] as u32,
             };
-            
+
             sum_luma += luma as u64;
             actual_samples += 1;
         }
-        
+
         if actual_samples == 0 {
             return true;
         }
-        
+
         let avg_luma = (sum_luma / actual_samples as u64) as u32;
-        
+
         if avg_luma < luma_threshold {
             true // It is a black frame
         } else {
