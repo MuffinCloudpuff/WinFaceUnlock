@@ -49,7 +49,7 @@ export function AccountArea() {
 
   return (
     <div className="relative z-50 flex flex-1 flex-col items-center justify-center gap-10">
-      {message && <div className="absolute top-0 text-red-500 font-medium text-sm">{message}</div>}
+      {message && <div className="absolute -top-12 text-red-500 font-medium text-sm bg-red-50 px-4 py-2 rounded-xl shadow-sm border border-red-100">{message}</div>}
       <motion.div
         initial={{ y: 20, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}

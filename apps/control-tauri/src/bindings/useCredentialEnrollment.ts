@@ -39,7 +39,7 @@ export function useCredentialEnrollment(): CredentialEnrollmentViewModel {
         }
 
         setAccountProfile(response.safe_details);
-        setMessage(response.message);
+        setMessage(undefined);
       })
       .catch((error) => {
         if (isMounted) {
@@ -80,7 +80,7 @@ export function useCredentialEnrollment(): CredentialEnrollmentViewModel {
 
           setAccountProfile(response.safe_details);
           setCredentialEnrollmentCompletedAt(Date.now());
-          setMessage(response.message);
+          setMessage(undefined);
         })
         .catch((error) => {
           setMessage(error instanceof Error ? error.message : 'Failed to enroll credential.');
