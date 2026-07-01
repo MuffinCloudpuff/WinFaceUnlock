@@ -4,7 +4,7 @@ use control_backend::{
     DiagnosticsCliEnrollmentProcessFactory, FaceEnrollmentPreviewEventSink,
     NamedPipeFaceAuthServiceClient, ServiceFaceAuthSelfTestRunner,
     ServiceIpcControlSettingsStore, ServiceIpcFaceEnrollmentTemplateApplier,
-    WindowsCredentialEnrollmentStore, WindowsCredentialSecret,
+    ServiceIpcCredentialEnrollmentStore, WindowsCredentialSecret,
 };
 use control_protocol::{
     ControlRequestEnvelope, ControlResponseEnvelope, WindowsCredentialAccountProfile,
