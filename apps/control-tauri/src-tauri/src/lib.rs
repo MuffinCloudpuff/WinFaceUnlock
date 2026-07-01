@@ -114,8 +114,6 @@ fn handle_credential_enrollment_request(
     )
 }
 
-}
-
 #[cfg(not(windows))]
 fn current_windows_user_sid() -> Result<String, String> {
     Ok(DEFAULT_CONTROL_USER_SID.to_owned())
