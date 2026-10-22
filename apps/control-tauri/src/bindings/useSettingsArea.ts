@@ -7,6 +7,7 @@ import {
   updateControlSettings,
   listIntruderSnapshots,
   deleteIntruderSnapshot,
+  clearIntruderSnapshots,
 } from '@winfaceunlock/control-client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { controlTransport, isControlRuntimeAvailable } from './controlTransport';
@@ -30,30 +31,40 @@ export interface IntruderSnapshotViewModel {
 export interface SettingsAreaViewModel {
   autoLock: boolean;
   intruderSnap: boolean;
+  intruderSnapSaving: boolean;
   triggerMode: TriggerMode;
   logonFaceMatchThreshold: number;
+  intruderSimilarityThreshold: number;
   enrolledFaces: EnrolledFaceViewModel[];
   intruders: IntruderSnapshotViewModel[];
+  actionError: string | null;
   setIntruderSnap: (enabled: boolean) => void;
   changeAutoLock: (enabled: boolean) => void;
   changeTriggerMode: (mode: TriggerMode) => void;
   changeLogonFaceMatchThreshold: (threshold: number) => void;
+  changeIntruderSimilarityThreshold: (threshold: number) => void;
   deleteFace: (faceTemplateRef: string) => void;
   deleteIntruder: (id: string) => void;
+  clearIntruders: () => void;
 }
 
 export function useSettingsArea(): SettingsAreaViewModel {
   const [autoLock, setAutoLock] = useState(true);
   const autoLockRequestId = useRef(0);
-  const [intruderSnap, setIntruderSnap] = useState(true);
+  const [intruderSnap, setIntruderSnap] = useState(false);
+  const [intruderSnapSaving, setIntruderSnapSaving] = useState(false);
+  const intruderSnapPending = useRef(false);
   const intruderSnapRequestId = useRef(0);
   const [triggerMode, setTriggerMode] = useState<TriggerMode>('keyboard');
   const triggerModeRequestId = useRef(0);
-  const [logonFaceMatchThreshold, setLogonFaceMatchThreshold] = useState(0.75);
+  const [logonFaceMatchThreshold, setLogonFaceMatchThreshold] = useState(0.65);
   const logonFaceMatchThresholdRequestId = useRef(0);
+  const [intruderSimilarityThreshold, setIntruderSimilarityThreshold] = useState(0.3);
+  const intruderSimilarityThresholdRequestId = useRef(0);
   const faceDeleteRequestId = useRef(0);
   const [enrolledFaces, setEnrolledFaces] = useState<EnrolledFaceViewModel[]>([]);
   const [intruders, setIntruders] = useState<IntruderSnapshotViewModel[]>([]);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const loadFaceTemplates = useCallback(() => {
     if (!isControlRuntimeAvailable()) {
@@ -128,7 +139,7 @@ export function useSettingsArea(): SettingsAreaViewModel {
           return;
         }
         setAutoLock(response.safe_details.presence_lock_enabled);
-        if (response.safe_details.intruder_snap_enabled !== undefined) {
+        if (intruderSnapRequestId.current === 0 && response.safe_details.intruder_snap_enabled !== undefined) {
           setIntruderSnap(response.safe_details.intruder_snap_enabled);
         }
         const backendTriggerMode = logonWakeModeToTriggerMode(
@@ -139,6 +150,11 @@ export function useSettingsArea(): SettingsAreaViewModel {
         }
         setLogonFaceMatchThreshold(
           normalizeLogonFaceMatchThreshold(response.safe_details.logon_face_match_threshold),
+        );
+        setIntruderSimilarityThreshold(
+          normalizeIntruderSimilarityThreshold(
+            response.safe_details.intruder_similarity_threshold,
+          ),
         );
       })
       .catch((error) => {
@@ -279,6 +295,51 @@ export function useSettingsArea(): SettingsAreaViewModel {
     [logonFaceMatchThreshold],
   );
 
+  const changeIntruderSimilarityThreshold = useCallback(
+    (nextThreshold: number) => {
+      const normalizedThreshold = normalizeIntruderSimilarityThreshold(nextThreshold);
+      const previousThreshold = intruderSimilarityThreshold;
+      setIntruderSimilarityThreshold(normalizedThreshold);
+      setActionError(null);
+
+      if (!isControlRuntimeAvailable()) {
+        setIntruderSimilarityThreshold(previousThreshold);
+        setActionError('后台服务不可用，抓拍灵敏度未保存。');
+        return;
+      }
+
+      const requestId = intruderSimilarityThresholdRequestId.current + 1;
+      intruderSimilarityThresholdRequestId.current = requestId;
+      updateControlSettings(controlTransport, {
+        intruder_similarity_threshold: normalizedThreshold,
+      })
+        .then((response) => {
+          if (requestId !== intruderSimilarityThresholdRequestId.current) {
+            return;
+          }
+          if (response.operation_status === 'completed') {
+            setIntruderSimilarityThreshold(
+              normalizeIntruderSimilarityThreshold(
+                response.safe_details.intruder_similarity_threshold,
+              ),
+            );
+            return;
+          }
+          setIntruderSimilarityThreshold(previousThreshold);
+          setActionError('抓拍灵敏度未保存，请确认 WinFaceUnlock 服务正在运行。');
+        })
+        .catch((error) => {
+          if (requestId !== intruderSimilarityThresholdRequestId.current) {
+            return;
+          }
+          setIntruderSimilarityThreshold(previousThreshold);
+          setActionError('抓拍灵敏度未保存，请检查 WinFaceUnlock 服务连接。');
+          console.warn('Failed to update intruder similarity threshold.', error);
+        });
+    },
+    [intruderSimilarityThreshold],
+  );
+
   const deleteFace = useCallback((faceTemplateRef: string) => {
     if (!isControlRuntimeAvailable()) {
       setEnrolledFaces((currentFaces) =>
@@ -318,15 +379,20 @@ export function useSettingsArea(): SettingsAreaViewModel {
 
   const changeIntruderSnap = useCallback(
     (nextChecked: boolean) => {
-      const previousChecked = intruderSnap;
-      setIntruderSnap(nextChecked);
+      if (intruderSnapPending.current) {
+        return;
+      }
+      setActionError(null);
 
       if (!isControlRuntimeAvailable()) {
+        setActionError('后台服务不可用，抓拍设置未保存。');
         return;
       }
 
       const requestId = intruderSnapRequestId.current + 1;
       intruderSnapRequestId.current = requestId;
+      intruderSnapPending.current = true;
+      setIntruderSnapSaving(true);
 
       updateControlSettings(controlTransport, { intruder_snap_enabled: nextChecked })
         .then((response) => {
@@ -334,62 +400,105 @@ export function useSettingsArea(): SettingsAreaViewModel {
             return;
           }
 
-          if (response.operation_status === 'completed') {
-            if (response.safe_details.intruder_snap_enabled !== undefined) {
-              setIntruderSnap(response.safe_details.intruder_snap_enabled);
-            }
+          if (response.operation_status === 'completed'
+            && response.safe_details.intruder_snap_enabled === nextChecked) {
+            setIntruderSnap(nextChecked);
             return;
           }
 
-          setIntruderSnap(previousChecked);
+          setActionError('后台未确认抓拍设置生效，请检查服务状态后重试。');
           console.warn('WinFaceUnlock intruder snap settings update was not completed.', response);
         })
         .catch((error) => {
           if (requestId !== intruderSnapRequestId.current) {
             return;
           }
-          setIntruderSnap(previousChecked);
+          setActionError('无法确认抓拍设置是否生效，请检查 WinFaceUnlock 服务连接后重试。');
           console.warn('Failed to update WinFaceUnlock intruder snap settings.', error);
+        })
+        .finally(() => {
+          if (requestId === intruderSnapRequestId.current) {
+            intruderSnapPending.current = false;
+            setIntruderSnapSaving(false);
+          }
         });
     },
-    [intruderSnap],
+    [],
   );
 
   const deleteIntruder = useCallback((id: string) => {
+    setActionError(null);
     if (!isControlRuntimeAvailable()) {
-      setIntruders((current) => current.filter((i) => i.id !== id));
+      setActionError('后台服务不可用，抓拍照片未删除。');
       return;
     }
     deleteIntruderSnapshot(controlTransport, { id })
       .then((res) => {
         if (res.operation_status === 'completed') {
           setIntruders((current) => current.filter((i) => i.id !== id));
+          return;
         }
+        setActionError('抓拍照片未删除，请检查目录访问权限。');
       })
-      .catch((err) => console.error(err));
+      .catch((err) => {
+        setActionError('抓拍照片未删除，请检查目录访问权限。');
+        console.error(err);
+      });
+  }, []);
+
+  const clearIntruders = useCallback(() => {
+    setActionError(null);
+    if (!isControlRuntimeAvailable()) {
+      setActionError('后台服务不可用，抓拍照片未清空。');
+      return;
+    }
+    clearIntruderSnapshots(controlTransport)
+      .then((response) => {
+        if (response.operation_status === 'completed') {
+          setIntruders([]);
+          return;
+        }
+        setActionError('抓拍照片未清空，请检查目录访问权限。');
+      })
+      .catch((error) => {
+        setActionError('抓拍照片未清空，请检查目录访问权限。');
+        console.error(error);
+      });
   }, []);
 
   return {
     autoLock,
     intruderSnap,
+    intruderSnapSaving,
     triggerMode,
     logonFaceMatchThreshold,
+    intruderSimilarityThreshold,
     enrolledFaces,
     intruders,
+    actionError,
     setIntruderSnap: changeIntruderSnap,
     changeAutoLock,
     changeTriggerMode,
     changeLogonFaceMatchThreshold,
+    changeIntruderSimilarityThreshold,
     deleteFace,
     deleteIntruder,
+    clearIntruders,
   };
 }
 
 function normalizeLogonFaceMatchThreshold(threshold: number): number {
   if (!Number.isFinite(threshold)) {
-    return 0.75;
+    return 0.65;
   }
   return Math.min(0.9, Math.max(0.3, Number(threshold.toFixed(2))));
+}
+
+function normalizeIntruderSimilarityThreshold(threshold: number): number {
+  if (!Number.isFinite(threshold)) {
+    return 0.3;
+  }
+  return Math.min(0.6, Math.max(0.1, Number(threshold.toFixed(2))));
 }
 
 function faceTemplateToViewModel(template: FaceTemplateSummary): EnrolledFaceViewModel {

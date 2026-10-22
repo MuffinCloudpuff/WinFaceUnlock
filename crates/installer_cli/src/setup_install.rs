@@ -29,6 +29,10 @@ pub fn build_install_plan(
     validate_required_file("service_binary", &service_binary_path)?;
     validate_required_file("provider_binary", &provider_binary_path)?;
     validate_required_file("control_tray_binary", &control_tray_binary_path)?;
+    validate_required_file(
+        "camera_worker_binary",
+        &service_binary_path.with_file_name("camera_worker.exe"),
+    )?;
 
     let auth_config = if payload.configure_local_camera_auth {
         let face_template_path =
@@ -240,12 +244,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn install_plan_rejects_missing_camera_worker() {
+        let root = unique_temp_dir("missing-worker");
+        create_file(&root.join("win_service.exe"));
+        create_file(&root.join("control_tray.exe"));
+        create_file(&root.join("windows_provider.dll"));
+        let payload = InstallSystemComponentsPayload {
+            install_dir: root.clone(),
+            provider_binary_relative_path: PathBuf::from("windows_provider.dll"),
+            ..Default::default()
+        };
+        assert!(matches!(
+            build_install_plan(&payload),
+            Err(SetupInstallError::MissingRequiredFile {
+                file_id: "camera_worker_binary",
+                ..
+            })
+        ));
+        remove_temp_dir(&root);
+    }
+
+    #[test]
     fn install_plan_resolves_packaged_relative_paths_under_install_dir()
     -> Result<(), SetupInstallError> {
         let root = unique_temp_dir("plan");
         let install_dir = root.join("install");
         create_file(&install_dir.join("win_service.exe"));
         create_file(&install_dir.join("control_tray.exe"));
+        create_file(&install_dir.join("camera_worker.exe"));
         create_file(&install_dir.join(r"provider\windows_provider.dll"));
         create_file(&install_dir.join("selected_templates.json"));
         create_file(&install_dir.join(r"models\face_detection_yunet_2023mar.onnx"));
@@ -340,6 +366,7 @@ mod tests {
         let install_dir = root.join("install");
         create_file(&install_dir.join("win_service.exe"));
         create_file(&install_dir.join("control_tray.exe"));
+        create_file(&install_dir.join("camera_worker.exe"));
         create_file(&install_dir.join(r"provider\windows_provider.dll"));
 
         let plan = build_install_plan(&InstallSystemComponentsPayload {

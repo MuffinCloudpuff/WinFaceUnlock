@@ -33,6 +33,7 @@ try {
     $bootstrapperProcess = Start-Process `
         -FilePath $SetupExe `
         -ArgumentList "--winfaceunlock-bootstrapper-validate" `
+        -WindowStyle Hidden `
         -Wait `
         -PassThru
     if ($bootstrapperProcess.ExitCode -ne 0) {
@@ -95,6 +96,7 @@ $setupAppValidationArgs = @(
 $setupAppValidationProcess = Start-Process `
     -FilePath $appEntrypoint `
     -ArgumentList $setupAppValidationArgs `
+    -WindowStyle Hidden `
     -PassThru
 if (-not $setupAppValidationProcess.WaitForExit(30000)) {
     Stop-Process -Id $setupAppValidationProcess.Id -Force -ErrorAction SilentlyContinue
@@ -182,6 +184,9 @@ if (-not ($stagePayloadFiles | Where-Object { $_.target_relative_path -eq "WinFa
 if (-not ($stagePayloadFiles | Where-Object { $_.target_relative_path -eq "control_tray.exe" })) {
     throw "inspect_payload did not include the tray entrypoint control_tray.exe."
 }
+if (-not ($stagePayloadFiles | Where-Object { $_.target_relative_path -eq "camera_worker.exe" })) {
+    throw "inspect_payload did not include required camera_worker.exe."
+}
 if (-not ($stagePayloadFiles | Where-Object { $_.target_relative_path -eq "desktop_input_agent.exe" })) {
     throw "inspect_payload did not include DesktopInputPresenceAgent desktop_input_agent.exe."
 }
@@ -264,10 +269,6 @@ Assert-SetupSucceeded -Response $stagedPreflightResponse -Operation "run_preflig
 $installedControlApp = Join-Path $StageDir "WinFaceUnlock.exe"
 if (-not (Test-Path $installedControlApp -PathType Leaf)) {
     throw "Staged install is missing the control panel entrypoint: $installedControlApp"
-}
-$installedTauriLibrary = Join-Path $StageDir "winfaceunlock_control_tauri_lib.dll"
-if (-not (Test-Path $installedTauriLibrary -PathType Leaf)) {
-    throw "Staged install is missing the Tauri control library: $installedTauriLibrary"
 }
 $installedControlTray = Join-Path $StageDir "control_tray.exe"
 if (-not (Test-Path $installedControlTray -PathType Leaf)) {

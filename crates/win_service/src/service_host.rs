@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     ffi::OsString,
     sync::{
         Arc,
@@ -20,12 +20,13 @@ use windows_service::{
 };
 
 use crate::{
-    camera_backend_profiles::spawn_camera_backend_profile_refresh,
     camera_runtime::{
         InterfaceRuntimeState, InterfaceRuntimeStateSource, update_interface_runtime_state,
     },
     named_pipe_host::{run_named_pipe_until_shutdown, wake_named_pipe_host},
     presence_service::{PresenceServiceCommand, spawn_presence_service_controller},
+    service_log::write_service_event_detail,
+    service_priority::raise_service_priority,
 };
 
 define_windows_service!(ffi_service_main, service_main);
@@ -46,7 +47,6 @@ fn run_service_main() -> windows_service::Result<()> {
     let pipe_name = PIPE_NAME.to_owned();
     let presence_command_sender = spawn_presence_service_controller();
     let handler_presence_sender = presence_command_sender.clone();
-    spawn_camera_backend_profile_refresh();
 
     let status_handle =
         service_control_handler::register(
@@ -114,6 +114,13 @@ fn run_service_main() -> windows_service::Result<()> {
         1,
         Duration::from_secs(10),
     ))?;
+    match raise_service_priority() {
+        Ok(()) => write_service_event_detail("Service.PriorityConfigured", "class=AboveNormal"),
+        Err(error) => write_service_event_detail(
+            "Service.PriorityConfigurationFailed",
+            format!("error={error}"),
+        ),
+    }
     status_handle.set_service_status(service_status(
         ServiceState::Running,
         ServiceControlAccept::STOP | ServiceControlAccept::SESSION_CHANGE,
@@ -134,17 +141,26 @@ fn run_service_main() -> windows_service::Result<()> {
         1,
         Duration::from_secs(10),
     ))?;
-    status_handle.set_service_status(service_status(
+    if let Err(error) = &service_result {
+        write_service_event_detail("Service.PipeHostFailed", format!("error={error:?}"));
+        eprintln!("{SERVICE_NAME} named pipe loop stopped with error: {error:?}");
+    }
+    status_handle.set_service_status(stopped_service_status(service_result.is_err()))?;
+    Ok(())
+}
+
+fn stopped_service_status(failed: bool) -> ServiceStatus {
+    let mut status = service_status(
         ServiceState::Stopped,
         ServiceControlAccept::empty(),
         0,
         Duration::default(),
-    ))?;
-
-    if let Err(error) = service_result {
-        eprintln!("{SERVICE_NAME} named pipe loop stopped with error: {error:?}");
+    );
+    if failed {
+        // Nonzero status is required for SCM's non-crash recovery actions.
+        status.exit_code = ServiceExitCode::ServiceSpecific(1);
     }
-    Ok(())
+    status
 }
 
 fn service_status(
@@ -161,5 +177,25 @@ fn service_status(
         checkpoint,
         wait_hint,
         process_id: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pipe_host_failure_is_reported_to_scm() {
+        let status = stopped_service_status(true);
+        assert_eq!(status.current_state, ServiceState::Stopped);
+        assert_eq!(status.exit_code, ServiceExitCode::ServiceSpecific(1));
+    }
+
+    #[test]
+    fn intentional_shutdown_does_not_trigger_recovery() {
+        assert_eq!(
+            stopped_service_status(false).exit_code,
+            ServiceExitCode::Win32(0)
+        );
     }
 }

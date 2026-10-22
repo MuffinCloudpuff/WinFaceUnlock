@@ -1,6 +1,6 @@
 use crate::VideoError;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub enum PixelFormat {
     Bgr8,
     Rgb8,

@@ -1,4 +1,4 @@
-﻿use common_protocol::{CredentialRef, ProtectedCredential, UserId};
+use common_protocol::{CredentialRef, ProtectedCredential, UserId};
 use hardware_binding::HardwareFingerprint;
 
 use crate::{
@@ -8,7 +8,7 @@ use crate::{
 };
 
 const DEFAULT_POLICY_ID: &str = "default";
-const DEFAULT_FACE_MATCH_THRESHOLD: f32 = 0.75;
+const DEFAULT_FACE_MATCH_THRESHOLD: f32 = 0.65;
 
 pub struct RepositoryCredentialStore<R: StoreRepository> {
     repository: R,
@@ -17,6 +17,34 @@ pub struct RepositoryCredentialStore<R: StoreRepository> {
 impl<R: StoreRepository> RepositoryCredentialStore<R> {
     pub fn new(repository: R) -> Self {
         Self { repository }
+    }
+
+    pub fn save_credential_enrollment(
+        &mut self,
+        user: UserRecord,
+        credential_blob: CredentialBlob,
+    ) -> Result<(), CredentialStoreError> {
+        let now = UnixTimeMillis(0);
+        let blob = CredentialBlobRecord {
+            credential_ref: user.credential_ref.clone(),
+            encrypted_blob_bytes: credential_blob.serialize()?,
+            key_version: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        self.repository.save_credential_enrollment(
+            StoredUserRecord {
+                user_id: user.user_id,
+                user_sid: user.user_sid,
+                username: user.username,
+                account_type: user.account_type,
+                credential_ref: user.credential_ref,
+                policy_id: PolicyId(DEFAULT_POLICY_ID.to_owned()),
+                created_at: now,
+                updated_at: now,
+            },
+            blob,
+        )
     }
 
     pub fn save_face_template_record(

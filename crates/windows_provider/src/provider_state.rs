@@ -1,10 +1,11 @@
-﻿use std::{
+use std::{
     fmt,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use common_protocol::{ProtocolError, SessionId};
+use logon_safety::{LogonBlock, LogonSubmissionGuard, SubmissionToken, WindowsLogonResult};
 use windows::Win32::UI::Shell::{
     CPUS_INVALID, CREDENTIAL_PROVIDER_NO_DEFAULT, CREDENTIAL_PROVIDER_USAGE_SCENARIO,
     ICredentialProviderEvents,
@@ -33,12 +34,19 @@ pub enum WakeRequestBlockReason {
     CredentialAlreadyReady,
     WakeAlreadyRunning,
     RetryCooldownActive,
+    WindowsSubmissionFinished,
+    AutomaticLogonSuppressed(LogonBlock),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WakeRequestStart {
-    Started { session_id: SessionId },
-    Blocked { reason: WakeRequestBlockReason },
+    Started {
+        session_id: SessionId,
+        request_id: u64,
+    },
+    Blocked {
+        reason: WakeRequestBlockReason,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -62,6 +70,10 @@ pub enum ProviderUnlockPhase {
         attempt_limit: u32,
     },
     CredentialMaterialReady,
+    AwaitingWindowsResult,
+    AutomaticLogonSuppressed {
+        reason: LogonBlock,
+    },
     WakeFailed {
         failure: ProviderWakeFailure,
         attempt_number: u32,
@@ -106,6 +118,7 @@ impl fmt::Debug for CredentialMaterial {
 
 pub struct ProviderState {
     inner: Mutex<ProviderStateInner>,
+    logon_guard: Arc<dyn LogonSubmissionGuard>,
 }
 
 struct ProviderStateInner {
@@ -115,6 +128,9 @@ struct ProviderStateInner {
     advise_context: usize,
     unlock_attempt: UnlockAttemptState,
     wake_retry_allowed_at_unix_ms: i64,
+    wake_request_id: u64,
+    credential_generation: Option<u64>,
+    submission: Option<SubmissionToken>,
 }
 
 impl ProviderState {
@@ -123,6 +139,17 @@ impl ProviderState {
     }
 
     pub fn with_tile_visibility(tile_visibility: ProviderTileVisibility) -> Self {
+        #[cfg(test)]
+        let guard = Arc::new(logon_safety::MemoryLogonGuard::default());
+        #[cfg(not(test))]
+        let guard = Arc::new(logon_safety::PersistentLogonGuard);
+        Self::with_guard(tile_visibility, guard)
+    }
+
+    fn with_guard(
+        tile_visibility: ProviderTileVisibility,
+        logon_guard: Arc<dyn LogonSubmissionGuard>,
+    ) -> Self {
         Self {
             inner: Mutex::new(ProviderStateInner {
                 usage_scenario: CPUS_INVALID,
@@ -131,7 +158,11 @@ impl ProviderState {
                 advise_context: 0,
                 unlock_attempt: UnlockAttemptState::default(),
                 wake_retry_allowed_at_unix_ms: 0,
+                wake_request_id: 0,
+                credential_generation: None,
+                submission: None,
             }),
+            logon_guard,
         }
     }
 
@@ -144,6 +175,29 @@ impl ProviderState {
     pub fn set_events(&self, events: Option<ICredentialProviderEvents>, advise_context: usize) {
         let has_new_events = events.is_some();
         let should_notify_ready_credential = if let Ok(mut inner) = self.inner.lock() {
+            if !has_new_events {
+                // An old worker must not publish into a later Advise lifecycle.
+                inner.wake_request_id = inner.wake_request_id.saturating_add(1);
+                inner.credential_generation = None;
+                inner.unlock_attempt.credential_material = None;
+                if matches!(
+                    inner.unlock_attempt.phase,
+                    ProviderUnlockPhase::WakeRequested { .. }
+                        | ProviderUnlockPhase::WakeFailed { .. }
+                        | ProviderUnlockPhase::CredentialMaterialReady
+                ) {
+                    inner.unlock_attempt.phase = ProviderUnlockPhase::ProviderLoaded;
+                }
+            } else if inner.events.is_none()
+                && matches!(
+                    inner.unlock_attempt.phase,
+                    ProviderUnlockPhase::Completed
+                        | ProviderUnlockPhase::AutomaticLogonSuppressed { .. }
+                )
+                && self.logon_guard.ready_generation().is_ok()
+            {
+                inner.unlock_attempt.phase = ProviderUnlockPhase::ProviderLoaded;
+            }
             inner.events = events
                 .as_ref()
                 .and_then(|event_sink| AgileReference::new(event_sink).ok());
@@ -171,11 +225,34 @@ impl ProviderState {
             .unwrap_or(false)
     }
 
-    pub fn credential_material(&self) -> Option<CredentialMaterial> {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|inner| inner.unlock_attempt.credential_material.clone())
+    pub fn take_credential_for_submission(&self) -> Option<CredentialMaterial> {
+        let mut inner = self.inner.lock().ok()?;
+        if inner.unlock_attempt.phase != ProviderUnlockPhase::CredentialMaterialReady {
+            return None;
+        }
+        let material = inner.unlock_attempt.credential_material.take()?;
+        let generation = inner.credential_generation?;
+        match self.logon_guard.reserve(generation) {
+            Ok(token) => {
+                inner.submission = Some(token);
+                inner.unlock_attempt.phase = ProviderUnlockPhase::AwaitingWindowsResult;
+                Some(material)
+            }
+            Err(reason) => {
+                inner.unlock_attempt.phase =
+                    ProviderUnlockPhase::AutomaticLogonSuppressed { reason };
+                None
+            }
+        }
+    }
+
+    pub fn cancel_unsubmitted_credential(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(token) = inner.submission.take() {
+                let _ = self.logon_guard.cancel_unsubmitted(token);
+            }
+            inner.unlock_attempt.phase = ProviderUnlockPhase::Completed;
+        }
     }
 
     pub fn credential_count_plan(&self) -> CredentialCountPlan {
@@ -227,6 +304,8 @@ impl ProviderState {
                 ProviderUnlockPhase::CredentialMaterialReady => {
                     "Face authentication credential is ready".to_owned()
                 }
+                ProviderUnlockPhase::AwaitingWindowsResult => "Waiting for Windows sign-in result; automatic resubmission is paused".to_owned(),
+                ProviderUnlockPhase::AutomaticLogonSuppressed { .. } => "Automatic face sign-in is paused. Use Windows PIN/password, then save your Windows credential again in WinFaceUnlock".to_owned(),
                 ProviderUnlockPhase::WakeFailed {
                     failure: ProviderWakeFailure::AuthFailed { .. },
                     attempt_number,
@@ -258,6 +337,26 @@ impl ProviderState {
         self.inner
             .lock()
             .map(|mut inner| {
+                if matches!(
+                    inner.unlock_attempt.phase,
+                    ProviderUnlockPhase::AwaitingWindowsResult
+                        | ProviderUnlockPhase::Completed
+                        | ProviderUnlockPhase::AutomaticLogonSuppressed { .. }
+                ) {
+                    return WakeRequestStart::Blocked {
+                        reason: WakeRequestBlockReason::WindowsSubmissionFinished,
+                    };
+                }
+                let generation = match self.logon_guard.ready_generation() {
+                    Ok(generation) => generation,
+                    Err(reason) => {
+                        inner.unlock_attempt.phase =
+                            ProviderUnlockPhase::AutomaticLogonSuppressed { reason };
+                        return WakeRequestStart::Blocked {
+                            reason: WakeRequestBlockReason::AutomaticLogonSuppressed(reason),
+                        };
+                    }
+                };
                 if inner.unlock_attempt.credential_material.is_some() {
                     return WakeRequestStart::Blocked {
                         reason: WakeRequestBlockReason::CredentialAlreadyReady,
@@ -288,8 +387,16 @@ impl ProviderState {
                     attempt_number: 1,
                     attempt_limit,
                 };
+                let Some(request_id) = inner.wake_request_id.checked_add(1) else {
+                    return WakeRequestStart::Blocked {
+                        reason: WakeRequestBlockReason::WindowsSubmissionFinished,
+                    };
+                };
+                inner.wake_request_id = request_id;
+                inner.credential_generation = Some(generation);
                 WakeRequestStart::Started {
                     session_id: Self::session_id_for_current_process(),
+                    request_id,
                 }
             })
             .unwrap_or(WakeRequestStart::Blocked {
@@ -297,21 +404,44 @@ impl ProviderState {
             })
     }
 
-    pub fn mark_automatic_retry_started(&self, attempt_number: u32, attempt_limit: u32) {
+    pub fn mark_automatic_retry_started(
+        &self,
+        request_id: u64,
+        attempt_number: u32,
+        attempt_limit: u32,
+    ) -> bool {
         if let Ok(mut inner) = self.inner.lock() {
+            if !self.can_apply_wake(&inner, request_id) {
+                return false;
+            }
             inner.unlock_attempt.phase = ProviderUnlockPhase::WakeRequested {
                 attempt_number,
                 attempt_limit,
             };
+        } else {
+            return false;
         }
         self.notify_credentials_changed();
+        true
     }
 
-    pub fn mark_credential_material_serialized(&self) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.unlock_attempt.phase = ProviderUnlockPhase::Completed;
-            inner.unlock_attempt.credential_material = None;
-        }
+    fn can_apply_wake(&self, inner: &ProviderStateInner, request_id: u64) -> bool {
+        inner.wake_request_id == request_id
+            && !matches!(
+                inner.unlock_attempt.phase,
+                ProviderUnlockPhase::AwaitingWindowsResult
+                    | ProviderUnlockPhase::Completed
+                    | ProviderUnlockPhase::AutomaticLogonSuppressed { .. }
+            )
+            && inner
+                .credential_generation
+                .is_some_and(|generation| self.logon_guard.ready_generation() == Ok(generation))
+    }
+
+    pub fn is_wake_request_current(&self, request_id: u64) -> bool {
+        self.inner
+            .lock()
+            .is_ok_and(|inner| self.can_apply_wake(&inner, request_id))
     }
 
     fn record_wake_failure_locked(inner: &mut ProviderStateInner) {
@@ -332,24 +462,33 @@ impl ProviderState {
     }
 
     pub fn notify_credentials_changed(&self) {
-        if let Ok(inner) = self.inner.lock()
-            && let Some(events) = &inner.events
+        let notification = self.inner.lock().ok().and_then(|inner| {
+            inner
+                .events
+                .as_ref()
+                .map(|events| (events.clone(), inner.advise_context))
+        });
+        if let Some((events, context)) = notification
             && let Ok(resolved_events) = events.resolve()
         {
             unsafe {
-                let _ = resolved_events.CredentialsChanged(inner.advise_context);
+                let _ = resolved_events.CredentialsChanged(context);
             }
         }
     }
 
     pub fn apply_wake_outcome(
         &self,
+        request_id: u64,
         outcome: ProviderWakeOutcome,
         attempt_number: u32,
         attempt_limit: u32,
         automatic_retry_pending: bool,
     ) {
         if let Ok(mut inner) = self.inner.lock() {
+            if !self.can_apply_wake(&inner, request_id) {
+                return;
+            }
             match outcome {
                 ProviderWakeOutcome::CredentialMaterialReady {
                     credential_material,
@@ -387,11 +526,15 @@ impl ProviderState {
 
     pub fn apply_wake_transport_error(
         &self,
+        request_id: u64,
         protocol_error: ProtocolError,
         attempt_number: u32,
         attempt_limit: u32,
     ) {
         if let Ok(mut inner) = self.inner.lock() {
+            if !self.can_apply_wake(&inner, request_id) {
+                return;
+            }
             inner.unlock_attempt.phase = ProviderUnlockPhase::WakeFailed {
                 failure: ProviderWakeFailure::TransportUnavailable { protocol_error },
                 attempt_number,
@@ -403,18 +546,33 @@ impl ProviderState {
         self.notify_credentials_changed();
     }
 
+    #[cfg(test)]
     pub fn prepare_credential_material(&self, credential_material: CredentialMaterial) {
         if let Ok(mut inner) = self.inner.lock() {
+            let Ok(generation) = self.logon_guard.ready_generation() else {
+                return;
+            };
+            inner.credential_generation = Some(generation);
             Self::record_credential_material_ready_locked(&mut inner, credential_material);
         }
         self.notify_credentials_changed();
     }
 
-    pub fn mark_report_result_received(&self) {
+    pub fn mark_report_result_received(&self, result: WindowsLogonResult) {
         if let Ok(mut inner) = self.inner.lock() {
-            inner.unlock_attempt.phase = ProviderUnlockPhase::Completed;
+            let Some(token) = inner.submission.take() else {
+                return;
+            };
+            let saved = self.logon_guard.complete(token, result);
+            inner.unlock_attempt.phase = match saved {
+                Ok(()) if result.succeeded() => ProviderUnlockPhase::Completed,
+                Ok(()) => ProviderUnlockPhase::AutomaticLogonSuppressed {
+                    reason: LogonBlock::WindowsRejected(result),
+                },
+                Err(reason) => ProviderUnlockPhase::AutomaticLogonSuppressed { reason },
+            };
             inner.unlock_attempt.credential_material = None;
-            inner.wake_retry_allowed_at_unix_ms = 0;
+            inner.credential_generation = None;
         }
     }
 }
@@ -428,231 +586,4 @@ fn current_time_unix_ms() -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use windows::Win32::UI::Shell::CPUS_UNLOCK_WORKSTATION;
-
-    use super::*;
-
-    #[test]
-    fn usage_scenario_defaults_to_invalid_then_updates_explicitly() {
-        let state = ProviderState::new();
-
-        assert_eq!(state.usage_scenario(), CPUS_INVALID);
-        state.set_usage_scenario(CPUS_UNLOCK_WORKSTATION);
-        assert_eq!(state.usage_scenario(), CPUS_UNLOCK_WORKSTATION);
-    }
-
-    #[test]
-    fn visible_mode_shows_one_tile_before_credential_material_exists() {
-        let state = ProviderState::with_tile_visibility(
-            ProviderTileVisibility::VisibleBeforeCredentialReady,
-        );
-
-        let plan = state.credential_count_plan();
-
-        assert_eq!(plan.credential_count, 1);
-        assert_eq!(
-            plan.default_credential_index,
-            CREDENTIAL_PROVIDER_NO_DEFAULT
-        );
-        assert!(!plan.auto_logon_with_default);
-    }
-
-    #[test]
-    fn hidden_mode_hides_tile_before_credential_material_exists() {
-        let state =
-            ProviderState::with_tile_visibility(ProviderTileVisibility::HiddenUntilCredentialReady);
-
-        let plan = state.credential_count_plan();
-
-        assert_eq!(plan.credential_count, 0);
-        assert_eq!(
-            plan.default_credential_index,
-            CREDENTIAL_PROVIDER_NO_DEFAULT
-        );
-        assert!(!plan.auto_logon_with_default);
-    }
-
-    #[test]
-    fn wake_request_can_start_once_until_result_arrives() {
-        let state = ProviderState::new();
-
-        assert!(matches!(
-            state.begin_wake_request(3),
-            WakeRequestStart::Started { .. }
-        ));
-        assert_eq!(
-            state.begin_wake_request(3),
-            WakeRequestStart::Blocked {
-                reason: WakeRequestBlockReason::WakeAlreadyRunning
-            }
-        );
-        assert_eq!(
-            state.credential_status_message(),
-            "Local face authentication is running (1/3)"
-        );
-    }
-
-    #[test]
-    fn hidden_mode_stays_hidden_while_wake_is_running() {
-        let state =
-            ProviderState::with_tile_visibility(ProviderTileVisibility::HiddenUntilCredentialReady);
-
-        assert!(matches!(
-            state.begin_wake_request(3),
-            WakeRequestStart::Started { .. }
-        ));
-        let plan = state.credential_count_plan();
-
-        assert_eq!(plan.credential_count, 0);
-        assert_eq!(
-            plan.default_credential_index,
-            CREDENTIAL_PROVIDER_NO_DEFAULT
-        );
-        assert!(!plan.auto_logon_with_default);
-    }
-
-    #[test]
-    fn wake_session_id_is_stable_across_provider_instances() {
-        assert_eq!(
-            ProviderState::session_id_for_current_process(),
-            SessionId("credential-provider-logon-auto-wake".to_owned())
-        );
-    }
-
-    #[test]
-    fn credential_material_requests_default_auto_logon() {
-        let state =
-            ProviderState::with_tile_visibility(ProviderTileVisibility::HiddenUntilCredentialReady);
-
-        state.prepare_credential_material(CredentialMaterial {
-            domain: ".".to_owned(),
-            username: "leo16".to_owned(),
-            password: "secret".to_owned(),
-        });
-        let plan = state.credential_count_plan();
-
-        assert_eq!(plan.credential_count, 1);
-        assert_eq!(plan.default_credential_index, 0);
-        assert!(plan.auto_logon_with_default);
-    }
-
-    #[test]
-    fn serialized_credential_material_is_consumed_after_use() {
-        let state = ProviderState::new();
-        state.prepare_credential_material(CredentialMaterial {
-            domain: ".".to_owned(),
-            username: "leo16".to_owned(),
-            password: "secret".to_owned(),
-        });
-
-        state.mark_credential_material_serialized();
-        let plan = state.credential_count_plan();
-
-        assert_eq!(plan.credential_count, 1);
-        assert_eq!(
-            plan.default_credential_index,
-            CREDENTIAL_PROVIDER_NO_DEFAULT
-        );
-        assert!(!plan.auto_logon_with_default);
-        assert_eq!(state.credential_material(), None);
-    }
-
-    #[test]
-    fn wake_failure_enforces_retry_cooldown() {
-        let state = ProviderState::new();
-
-        state.apply_wake_transport_error(ProtocolError::TransportUnavailable, 1, 3);
-
-        assert_eq!(
-            state.begin_wake_request(3),
-            WakeRequestStart::Blocked {
-                reason: WakeRequestBlockReason::RetryCooldownActive
-            }
-        );
-    }
-
-    #[test]
-    fn intermediate_auth_failure_reports_automatic_retry() {
-        let state = ProviderState::new();
-
-        state.apply_wake_outcome(
-            ProviderWakeOutcome::AuthFailed {
-                session_id: SessionId("session-1".to_owned()),
-                auth_failure_reason: common_protocol::AuthFailureReason::LivenessFailed,
-            },
-            1,
-            3,
-            true,
-        );
-
-        assert_eq!(
-            state.credential_status_message(),
-            "Face authentication failed. Retrying automatically (1/3)"
-        );
-
-        state.mark_automatic_retry_started(2, 3);
-        assert_eq!(
-            state.credential_status_message(),
-            "Local face authentication is running (2/3)"
-        );
-    }
-
-    #[test]
-    fn final_auth_failure_reports_pin_or_password_fallback() {
-        let state = ProviderState::new();
-
-        state.apply_wake_outcome(
-            ProviderWakeOutcome::AuthFailed {
-                session_id: SessionId("session-1".to_owned()),
-                auth_failure_reason: common_protocol::AuthFailureReason::LivenessFailed,
-            },
-            3,
-            3,
-            false,
-        );
-
-        assert_eq!(
-            state.credential_status_message(),
-            "Face authentication failed. Use PIN or password fallback"
-        );
-    }
-
-    #[test]
-    fn intermediate_auth_failure_keeps_face_tile_visible_during_retry() {
-        let state = ProviderState::new();
-
-        state.apply_wake_outcome(
-            ProviderWakeOutcome::AuthFailed {
-                session_id: SessionId("session-1".to_owned()),
-                auth_failure_reason: common_protocol::AuthFailureReason::MatchBelowThreshold,
-            },
-            1,
-            3,
-            true,
-        );
-
-        let plan = state.credential_count_plan();
-
-        assert_eq!(plan.credential_count, 1);
-        assert_eq!(
-            plan.default_credential_index,
-            CREDENTIAL_PROVIDER_NO_DEFAULT
-        );
-        assert!(!plan.auto_logon_with_default);
-    }
-
-    #[test]
-    fn credential_material_debug_redacts_password() {
-        let material = CredentialMaterial {
-            domain: ".".to_owned(),
-            username: "leo16".to_owned(),
-            password: "secret".to_owned(),
-        };
-
-        let debug = format!("{material:?}");
-
-        assert!(debug.contains("<redacted>"));
-        assert!(!debug.contains("secret"));
-    }
-}
+mod tests;

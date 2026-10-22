@@ -31,21 +31,25 @@ WinFaceUnlock 的核心链路固定为 Rust 主线：
 - 首选 WinRM 命令行：`Invoke-Command -ComputerName 192.168.204.129 -Credential $cred ...`。
 - 不要默认通过 VMware 窗口点击、键盘注入或截图操作 VM；只有 WinRM 不可用且用户明确同意时才走 GUI 兜底。
 
-### Impact Analysis Fallback
+## CodeGraph
 
-修改既有公共符号前，至少检查直接引用：
+- 本项目的 CodeGraph 项目名固定为 `D-study-workspace-Rust_workspace-WinFaceUnlock`。
+- 非小型代码理解、修改、调试、重构和影响面分析必须遵循“先图谱、后文件”：
+  1. `list_projects` 与 `index_status` 确认项目和索引状态；
+  2. `get_architecture` 理解模块结构；
+  3. `search_graph` 定位符号；
+  4. `trace_call_path` 分析调用方、下游依赖和关键链路；
+  5. `get_code_snippet` 获取目标符号局部实现；
+  6. 再读取具体文件并修改；
+  7. 修改后运行 `detect_changes` 验证影响范围。
+- 修改共享函数、类、handler、协议、配置或持久化代码前，必须先说明直接调用方、下游依赖和高风险路径。
+- 仅在搜索字符串字面量、日志、配置、非代码内容，或图谱结果不足时使用 `rg`。
+- 索引异常时必须先通过 `list_projects` 获取真实项目名，再用 `index_status` 检查；仅在未索引、索引损坏、切换大差异分支或大规模目录重构后运行一次 `index_repository`。
+- 当前会话未暴露 CodeGraph MCP 工具时，使用 CLI fallback：
 
 ```powershell
-rg "SymbolName" .
-```
-
-提交或收尾前，至少运行：
-
-```powershell
-cargo fmt --check
-cargo clippy --workspace --all-targets
-cargo test --workspace
-git status --short
+$cg = 'C:\Users\Liu\AppData\Roaming\npm\node_modules\codebase-memory-mcp\bin\codebase-memory-mcp.exe'
+& $cg cli list_projects
 ```
 
 ## Build Checks
@@ -72,105 +76,3 @@ where cmake
 where ninja
 where vcpkg
 ```
-
-<!-- gitnexus:start -->
-# GitNexus — Code Intelligence
-
-This project is indexed by GitNexus as **WinFaceUnlock** (7030 symbols, 15506 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
-
-> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
-
-## Always Do
-
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
-
-## When Debugging
-
-1. `gitnexus_query({query: "<error or symptom>"})` — find execution flows related to the issue
-2. `gitnexus_context({name: "<suspect function>"})` — see all callers, callees, and process participation
-3. `READ gitnexus://repo/WinFaceUnlock/process/{processName}` — trace the full execution flow step by step
-4. For regressions: `gitnexus_detect_changes({scope: "compare", base_ref: "main"})` — see what your branch changed
-
-## When Refactoring
-
-- **Renaming**: MUST use `gitnexus_rename({symbol_name: "old", new_name: "new", dry_run: true})` first. Review the preview — graph edits are safe, text_search edits need manual review. Then run with `dry_run: false`.
-- **Extracting/Splitting**: MUST run `gitnexus_context({name: "target"})` to see all incoming/outgoing refs, then `gitnexus_impact({target: "target", direction: "upstream"})` to find all external callers before moving code.
-- After any refactor: run `gitnexus_detect_changes({scope: "all"})` to verify only expected files changed.
-
-## Never Do
-
-- NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
-- NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
-
-## Tools Quick Reference
-
-| Tool | When to use | Command |
-|------|-------------|---------|
-| `query` | Find code by concept | `gitnexus_query({query: "auth validation"})` |
-| `context` | 360-degree view of one symbol | `gitnexus_context({name: "validateUser"})` |
-| `impact` | Blast radius before editing | `gitnexus_impact({target: "X", direction: "upstream"})` |
-| `detect_changes` | Pre-commit scope check | `gitnexus_detect_changes({scope: "staged"})` |
-| `rename` | Safe multi-file rename | `gitnexus_rename({symbol_name: "old", new_name: "new", dry_run: true})` |
-| `cypher` | Custom graph queries | `gitnexus_cypher({query: "MATCH ..."})` |
-
-## Impact Risk Levels
-
-| Depth | Meaning | Action |
-|-------|---------|--------|
-| d=1 | WILL BREAK — direct callers/importers | MUST update these |
-| d=2 | LIKELY AFFECTED — indirect deps | Should test |
-| d=3 | MAY NEED TESTING — transitive | Test if critical path |
-
-## Resources
-
-| Resource | Use for |
-|----------|---------|
-| `gitnexus://repo/WinFaceUnlock/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/WinFaceUnlock/clusters` | All functional areas |
-| `gitnexus://repo/WinFaceUnlock/processes` | All execution flows |
-| `gitnexus://repo/WinFaceUnlock/process/{name}` | Step-by-step execution trace |
-
-## Self-Check Before Finishing
-
-Before completing any code modification task, verify:
-1. `gitnexus_impact` was run for all modified symbols
-2. No HIGH/CRITICAL risk warnings were ignored
-3. `gitnexus_detect_changes()` confirms changes match expected scope
-4. All d=1 (WILL BREAK) dependents were updated
-
-## Keeping the Index Fresh
-
-After committing code changes, the GitNexus index becomes stale. Re-run analyze to update it:
-
-```bash
-npx gitnexus analyze
-```
-
-If the index previously included embeddings, preserve them by adding `--embeddings`:
-
-```bash
-npx gitnexus analyze --embeddings
-```
-
-To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.embeddings` field shows the count (0 means no embeddings). **Running analyze without `--embeddings` will delete any previously generated embeddings.**
-
-> Claude Code users: A PostToolUse hook handles this automatically after `git commit` and `git merge`.
-
-## CLI
-
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
-
-<!-- gitnexus:end -->

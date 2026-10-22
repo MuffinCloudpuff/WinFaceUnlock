@@ -76,7 +76,7 @@ try {
         --minifasnet-model $minifasnet `
         --minifasnet-crop-scale 2.7 `
         --minifasnet-max-spoof-frame-ratio 0.40 `
-        --match-threshold 0.75 `
+        --match-threshold 0.65 `
         --required-consecutive 2
     & $installer service-auth-status
 

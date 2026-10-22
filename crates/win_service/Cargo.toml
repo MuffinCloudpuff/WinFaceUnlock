@@ -16,6 +16,7 @@ face_engine = { path = "../face_engine" }
 face_liveness = { path = "../face_liveness" }
 hardware_binding = { path = "../hardware_binding" }
 ipc = { path = "../ipc" }
+logon_safety = { path = "../logon_safety" }
 opencv = { version = "0.98.2", default-features = false, features = ["clang-runtime", "dnn", "imgproc"] }
 ort = { version = "2.0.0-rc.12", default-features = true }
 serde = { version = "1.0.228", features = ["derive"] }

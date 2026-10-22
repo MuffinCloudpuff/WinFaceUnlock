@@ -52,7 +52,7 @@ Service / Provider 只调用稳定 workflow
 
 - 检测模型和识别模型必须独立可替换。
 - `SFACE_COSINE_MATCH_THRESHOLD = 0.363` 保留为 OpenCV/SFace 原始参考阈值。
-- 项目登录策略阈值当前默认是 `0.75`，不要和模型参考阈值混淆。
+- 项目登录策略阈值当前默认是 `0.65`，不要和模型参考阈值混淆。
 
 ### face_pose
 
@@ -127,7 +127,7 @@ AntiSpoofModelLivenessProvider
 当前默认人脸匹配阈值已经收紧到：
 
 ```text
-face_match_threshold = 0.75
+face_match_threshold = 0.65
 ```
 
 ### win_service

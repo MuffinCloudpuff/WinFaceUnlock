@@ -103,7 +103,7 @@ pub fn build_development_handler(
     presence_command_sender: mpsc::Sender<PresenceServiceCommand>,
 ) -> Result<DevelopmentServiceRequestHandler, ProtocolError> {
     build_development_handler_with_paths(
-        &ServiceCredentialStorePaths::from_environment_or_default(),
+        &ServiceCredentialStorePaths::from_environment_or_default()?,
         Some(presence_command_sender),
     )
 }
@@ -111,7 +111,7 @@ pub fn build_development_handler(
 pub fn build_development_handler_without_presence_reload()
 -> Result<DevelopmentServiceRequestHandler, ProtocolError> {
     build_development_handler_with_paths(
-        &ServiceCredentialStorePaths::from_environment_or_default(),
+        &ServiceCredentialStorePaths::from_environment_or_default()?,
         None,
     )
 }

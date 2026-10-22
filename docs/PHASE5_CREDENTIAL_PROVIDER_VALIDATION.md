@@ -199,7 +199,7 @@ can read it after it starts as LocalSystem:
   --sface-model C:\WinFaceUnlock\models\face_recognition_sface_2021dec.onnx `
   --minifasnet-model C:\WinFaceUnlock\models\minifasnet_v2.onnx `
   --minifasnet-max-spoof-frame-ratio 0.40 `
-  --match-threshold 0.75 `
+  --match-threshold 0.65 `
   --required-consecutive 2
 
 .\installer_cli.exe service-auth-status

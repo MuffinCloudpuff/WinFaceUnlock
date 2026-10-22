@@ -23,7 +23,7 @@ if ([string]::IsNullOrWhiteSpace($ControlAppPublishDir)) {
 $ControlAppPublishDir = [System.IO.Path]::GetFullPath($ControlAppPublishDir)
 
 if (-not $SkipBuild) {
-    $cargoArgs = @("build", "-p", "control_tray", "-p", "desktop_input_agent", "-p", "installer_cli", "-p", "diagnostics_cli", "-p", "win_service", "-p", "windows_provider")
+    $cargoArgs = @("build", "-p", "camera_worker", "-p", "control_tray", "-p", "desktop_input_agent", "-p", "installer_cli", "-p", "diagnostics_cli", "-p", "win_service", "-p", "windows_provider")
     if ($Configuration -eq "release") {
         $cargoArgs += "--release"
     }
@@ -202,6 +202,7 @@ $ManifestFiles = [System.Collections.ArrayList]::new()
 
 Copy-RequiredFile -SourcePath (Join-Path $BinaryDir "installer_cli.exe") -TargetRelativePath "installer_cli.exe" -ManifestFiles $ManifestFiles
 Copy-RequiredFile -SourcePath (Join-Path $BinaryDir "diagnostics_cli.exe") -TargetRelativePath "diagnostics_cli.exe" -ManifestFiles $ManifestFiles
+Copy-RequiredFile -SourcePath (Join-Path $BinaryDir "camera_worker.exe") -TargetRelativePath "camera_worker.exe" -ManifestFiles $ManifestFiles
 Copy-RequiredFile -SourcePath (Join-Path $BinaryDir "control_tray.exe") -TargetRelativePath "control_tray.exe" -ManifestFiles $ManifestFiles
 Copy-RequiredFile -SourcePath (Join-Path $BinaryDir "desktop_input_agent.exe") -TargetRelativePath "desktop_input_agent.exe" -ManifestFiles $ManifestFiles
 Copy-RequiredFile -SourcePath (Join-Path $BinaryDir "win_service.exe") -TargetRelativePath "win_service.exe" -ManifestFiles $ManifestFiles
@@ -241,6 +242,11 @@ Get-ChildItem -LiteralPath $RuntimeDllDir -Filter "*.dll" | Sort-Object Name | F
 Copy-OptionalFile -SourcePath "C:\Windows\System32\vcruntime140.dll" -TargetRelativePath "vcruntime140.dll" -FileId "msvc_vcruntime140" -ManifestFiles $ManifestFiles
 Copy-OptionalFile -SourcePath "C:\Windows\System32\vcruntime140_1.dll" -TargetRelativePath "vcruntime140_1.dll" -FileId "msvc_vcruntime140_1" -ManifestFiles $ManifestFiles
 Copy-OptionalFile -SourcePath "C:\Windows\System32\msvcp140.dll" -TargetRelativePath "msvcp140.dll" -FileId "msvc_msvcp140" -ManifestFiles $ManifestFiles
+Copy-OptionalFile -SourcePath "C:\Windows\System32\msvcp140_1.dll" -TargetRelativePath "msvcp140_1.dll" -FileId "msvc_msvcp140_1" -ManifestFiles $ManifestFiles
+Copy-OptionalFile -SourcePath "C:\Windows\System32\msvcp140_2.dll" -TargetRelativePath "msvcp140_2.dll" -FileId "msvc_msvcp140_2" -ManifestFiles $ManifestFiles
+Copy-OptionalFile -SourcePath "C:\Windows\System32\msvcp140_codecvt_ids.dll" -TargetRelativePath "msvcp140_codecvt_ids.dll" -FileId "msvc_msvcp140_codecvt_ids" -ManifestFiles $ManifestFiles
+Copy-OptionalFile -SourcePath "C:\Windows\System32\concrt140.dll" -TargetRelativePath "concrt140.dll" -FileId "msvc_concrt140" -ManifestFiles $ManifestFiles
+Copy-OptionalFile -SourcePath "C:\Windows\System32\vcomp140.dll" -TargetRelativePath "vcomp140.dll" -FileId "msvc_vcomp140" -ManifestFiles $ManifestFiles
 
 Write-RecoveryScript -TargetRelativePath "recovery\emergency-disable.cmd" -ManifestFiles $ManifestFiles -Lines @(
     "@echo off",

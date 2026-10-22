@@ -199,24 +199,23 @@ pub(crate) fn request_wake_in_background(
                         "Provider.WakeStopped",
                         "reason=user-input-wait-ended",
                     );
-                    worker_state.apply_wake_transport_error(
-                        ProtocolError::TransportUnavailable,
-                        1,
-                        AUTOMATIC_WAKE_ATTEMPT_LIMIT,
-                    );
                     return;
                 }
 
-                let session_id = match worker_state.begin_wake_request(configured_attempt_limit) {
-                    WakeRequestStart::Started { session_id } => session_id,
-                    WakeRequestStart::Blocked { reason } => {
-                        write_provider_event_detail(
-                            "Provider.WakeSkipped",
-                            format!("reason={reason:?}"),
-                        );
-                        return;
-                    }
-                };
+                let (session_id, request_id) =
+                    match worker_state.begin_wake_request(configured_attempt_limit) {
+                        WakeRequestStart::Started {
+                            session_id,
+                            request_id,
+                        } => (session_id, request_id),
+                        WakeRequestStart::Blocked { reason } => {
+                            write_provider_event_detail(
+                                "Provider.WakeSkipped",
+                                format!("reason={reason:?}"),
+                            );
+                            return;
+                        }
+                    };
 
                 write_provider_event(trigger_name);
 
@@ -232,8 +231,13 @@ pub(crate) fn request_wake_in_background(
                         if !worker_state.has_events_sink() {
                             break;
                         }
-                        worker_state
-                            .mark_automatic_retry_started(attempt_number, configured_attempt_limit);
+                        if !worker_state.mark_automatic_retry_started(
+                            request_id,
+                            attempt_number,
+                            configured_attempt_limit,
+                        ) {
+                            break;
+                        }
                     }
 
                     write_provider_event_detail(
@@ -246,6 +250,8 @@ pub(crate) fn request_wake_in_background(
                     );
                     match wake_and_fetch_with_transport_retry(
                         &broker_client,
+                        &worker_state,
+                        request_id,
                         session_id.clone(),
                         trigger_source,
                         TRANSPORT_WAKE_ATTEMPT_LIMIT,
@@ -274,6 +280,7 @@ pub(crate) fn request_wake_in_background(
                                 automatic_retry_pending,
                             );
                             worker_state.apply_wake_outcome(
+                                request_id,
                                 outcome,
                                 attempt_number,
                                 configured_attempt_limit,
@@ -295,6 +302,7 @@ pub(crate) fn request_wake_in_background(
                                 ),
                             );
                             worker_state.apply_wake_transport_error(
+                                request_id,
                                 error,
                                 attempt_number,
                                 configured_attempt_limit,
@@ -305,7 +313,10 @@ pub(crate) fn request_wake_in_background(
                     attempt_number = attempt_number.saturating_add(1);
                 }
 
-                if auth_succeeded || !worker_state.has_events_sink() {
+                if auth_succeeded
+                    || !worker_state.has_events_sink()
+                    || !worker_state.is_wake_request_current(request_id)
+                {
                     return;
                 }
 
@@ -316,11 +327,6 @@ pub(crate) fn request_wake_in_background(
         });
     if spawn_result.is_err() {
         write_provider_event("Provider.WakeThreadSpawnFailed");
-        state.apply_wake_transport_error(
-            ProtocolError::TransportUnavailable,
-            1,
-            AUTOMATIC_WAKE_ATTEMPT_LIMIT,
-        );
     }
 }
 
@@ -455,11 +461,16 @@ fn write_wake_outcome_detail(
 
 fn wake_and_fetch_with_transport_retry(
     broker_client: &ProviderBrokerClient,
+    state: &ProviderState,
+    request_id: u64,
     session_id: common_protocol::SessionId,
     trigger_source: AuthTriggerSource,
     transport_attempt_limit: u32,
 ) -> std::result::Result<ProviderWakeOutcome, ProtocolError> {
     for transport_attempt_number in 1..=transport_attempt_limit {
+        if !state.is_wake_request_current(request_id) {
+            return Err(ProtocolError::TransportUnavailable);
+        }
         match broker_client.wake_and_fetch_credential_material(session_id.clone(), trigger_source) {
             Ok(outcome) => return Ok(outcome),
             Err(error) if transport_attempt_number < transport_attempt_limit => {

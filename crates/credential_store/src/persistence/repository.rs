@@ -30,6 +30,13 @@ pub trait StoreRepository {
         credential_blob_record: CredentialBlobRecord,
     ) -> Result<(), CredentialStoreError>;
 
+    /// Commit the secret and its account binding as one indivisible update.
+    fn save_credential_enrollment(
+        &mut self,
+        user_record: StoredUserRecord,
+        credential_blob_record: CredentialBlobRecord,
+    ) -> Result<(), CredentialStoreError>;
+
     fn load_credential_blob_record(
         &self,
         credential_ref: &CredentialRef,

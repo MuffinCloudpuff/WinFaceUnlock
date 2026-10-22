@@ -1,4 +1,4 @@
-﻿use std::path::Path;
+use std::path::Path;
 
 use common_protocol::{AccountType, CredentialRef, UserId};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -89,23 +89,7 @@ impl StoreRepository for SqlCipherRepository {
         &mut self,
         user_record: StoredUserRecord,
     ) -> Result<(), CredentialStoreError> {
-        self.connection.execute(
-            "INSERT OR REPLACE INTO users (
-                user_id, user_sid, username, account_type, credential_ref, policy_id,
-                created_at_unix_ms, updated_at_unix_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                user_record.user_id.0,
-                user_record.user_sid,
-                user_record.username,
-                account_type_to_storage(user_record.account_type),
-                user_record.credential_ref.0,
-                user_record.policy_id.0,
-                user_record.created_at.0,
-                user_record.updated_at.0,
-            ],
-        )?;
-        Ok(())
+        write_user_record(&self.connection, user_record)
     }
 
     fn load_user_record(&self, user_id: &UserId) -> Result<StoredUserRecord, CredentialStoreError> {
@@ -136,18 +120,29 @@ impl StoreRepository for SqlCipherRepository {
         &mut self,
         credential_blob_record: CredentialBlobRecord,
     ) -> Result<(), CredentialStoreError> {
-        self.connection.execute(
-            "INSERT OR REPLACE INTO credentials (
-                credential_ref, encrypted_blob_bytes, key_version, created_at_unix_ms, updated_at_unix_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                credential_blob_record.credential_ref.0,
-                credential_blob_record.encrypted_blob_bytes,
-                credential_blob_record.key_version,
-                credential_blob_record.created_at.0,
-                credential_blob_record.updated_at.0,
-            ],
+        write_credential_blob_record(&self.connection, credential_blob_record)
+    }
+
+    fn save_credential_enrollment(
+        &mut self,
+        user_record: StoredUserRecord,
+        credential_blob_record: CredentialBlobRecord,
+    ) -> Result<(), CredentialStoreError> {
+        if user_record.credential_ref != credential_blob_record.credential_ref {
+            return Err(CredentialStoreError::RecordValidationFailed);
+        }
+        let transaction = self.connection.transaction()?;
+        let bound_to_another_user: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE credential_ref = ?1 AND user_id <> ?2)",
+            params![user_record.credential_ref.0, user_record.user_id.0],
+            |row| row.get(0),
         )?;
+        if bound_to_another_user {
+            return Err(CredentialStoreError::RecordValidationFailed);
+        }
+        write_credential_blob_record(&transaction, credential_blob_record)?;
+        write_user_record(&transaction, user_record)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -328,6 +323,50 @@ impl StoreRepository for SqlCipherRepository {
     }
 }
 
+fn write_user_record(
+    connection: &Connection,
+    record: StoredUserRecord,
+) -> Result<(), CredentialStoreError> {
+    connection.execute(
+        "INSERT INTO users (
+            user_id, user_sid, username, account_type, credential_ref, policy_id,
+            created_at_unix_ms, updated_at_unix_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ON CONFLICT(user_id) DO UPDATE SET
+            user_sid = excluded.user_sid, username = excluded.username,
+            account_type = excluded.account_type, credential_ref = excluded.credential_ref,
+            policy_id = excluded.policy_id, updated_at_unix_ms = excluded.updated_at_unix_ms",
+        params![
+            record.user_id.0,
+            record.user_sid,
+            record.username,
+            account_type_to_storage(record.account_type),
+            record.credential_ref.0,
+            record.policy_id.0,
+            record.created_at.0,
+            record.updated_at.0
+        ],
+    )?;
+    Ok(())
+}
+
+fn write_credential_blob_record(
+    connection: &Connection,
+    record: CredentialBlobRecord,
+) -> Result<(), CredentialStoreError> {
+    connection.execute(
+        "INSERT INTO credentials (
+            credential_ref, encrypted_blob_bytes, key_version, created_at_unix_ms, updated_at_unix_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(credential_ref) DO UPDATE SET
+            encrypted_blob_bytes = excluded.encrypted_blob_bytes,
+            key_version = excluded.key_version, updated_at_unix_ms = excluded.updated_at_unix_ms",
+        params![record.credential_ref.0, record.encrypted_blob_bytes, record.key_version,
+            record.created_at.0, record.updated_at.0],
+    )?;
+    Ok(())
+}
+
 fn encode_sqlcipher_raw_key(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(bytes.len() * 2);
@@ -405,6 +444,121 @@ mod tests {
         SqlCipherRepository, StoreRepository, UnixTimeMillis, UserFaceTemplateLinkRecord,
         persistence::records::StoredUserRecord,
     };
+
+    fn enrollment_records(
+        user_id: &str,
+        secret_marker: u8,
+    ) -> (StoredUserRecord, CredentialBlobRecord) {
+        (
+            StoredUserRecord {
+                user_id: UserId(user_id.to_owned()),
+                user_sid: "S-1-5-test".to_owned(),
+                username: "test-account".to_owned(),
+                account_type: AccountType::Local,
+                credential_ref: CredentialRef("enrollment-secret".to_owned()),
+                policy_id: PolicyId("default".to_owned()),
+                created_at: UnixTimeMillis(1),
+                updated_at: UnixTimeMillis(2),
+            },
+            CredentialBlobRecord {
+                credential_ref: CredentialRef("enrollment-secret".to_owned()),
+                encrypted_blob_bytes: vec![secret_marker; 24],
+                key_version: 1,
+                created_at: UnixTimeMillis(1),
+                updated_at: UnixTimeMillis(2),
+            },
+        )
+    }
+
+    fn enrollment_repository(
+        name: &str,
+    ) -> Result<(SqlCipherRepository, PathBuf), CredentialStoreError> {
+        let path = unique_temp_path(name)?;
+        let mut repository =
+            SqlCipherRepository::open(&path, &MasterKey::from_bytes([7; MASTER_KEY_LEN]))?;
+        repository.save_policy_record(PolicyRecord {
+            policy_id: PolicyId("default".to_owned()),
+            liveness_requirement: LivenessRequirement::Required,
+            face_match_threshold: 0.65,
+            failure_limit_before_cooldown: 3,
+            cooldown_duration_seconds: 30,
+        })?;
+        Ok((repository, path))
+    }
+
+    #[test]
+    fn enrollment_rolls_back_secret_when_account_write_fails() -> Result<(), CredentialStoreError> {
+        let (mut repository, path) = enrollment_repository("enrollment-rollback.db")?;
+        let (user, blob) = enrollment_records("user-1", 1);
+        repository.save_credential_enrollment(user, blob.clone())?;
+        let (mut update, replacement) = enrollment_records("user-1", 2);
+        update.policy_id = PolicyId("missing-policy".to_owned());
+        update.username = "changed-account".to_owned();
+
+        assert!(
+            repository
+                .save_credential_enrollment(update, replacement)
+                .is_err()
+        );
+        assert_eq!(
+            repository
+                .load_credential_blob_record(&blob.credential_ref)?
+                .encrypted_blob_bytes,
+            blob.encrypted_blob_bytes
+        );
+        assert_eq!(
+            repository
+                .load_user_record(&UserId("user-1".into()))?
+                .username,
+            "test-account"
+        );
+        drop(repository);
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_initial_enrollment_does_not_leave_an_orphan_secret()
+    -> Result<(), CredentialStoreError> {
+        let (mut repository, path) = enrollment_repository("enrollment-orphan.db")?;
+        let (mut user, blob) = enrollment_records("user-1", 1);
+        user.policy_id = PolicyId("missing-policy".to_owned());
+        let credential_ref = blob.credential_ref.clone();
+        assert!(repository.save_credential_enrollment(user, blob).is_err());
+        assert_eq!(
+            repository.load_credential_blob_record(&credential_ref),
+            Err(CredentialStoreError::CredentialNotFound)
+        );
+        drop(repository);
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn enrollment_cannot_replace_a_different_users_secret() -> Result<(), CredentialStoreError> {
+        let (mut repository, path) = enrollment_repository("enrollment-owner.db")?;
+        let (user, blob) = enrollment_records("user-1", 1);
+        repository.save_credential_enrollment(user, blob.clone())?;
+        let (other_user, replacement) = enrollment_records("user-2", 2);
+
+        assert_eq!(
+            repository.save_credential_enrollment(other_user, replacement),
+            Err(CredentialStoreError::RecordValidationFailed)
+        );
+        assert_eq!(
+            repository
+                .load_credential_blob_record(&blob.credential_ref)?
+                .encrypted_blob_bytes,
+            blob.encrypted_blob_bytes
+        );
+        assert_eq!(
+            repository.load_user_record(&UserId("user-2".into())),
+            Err(CredentialStoreError::UserNotFound)
+        );
+        drop(repository);
+        fs::remove_file(path)?;
+        Ok(())
+    }
 
     #[test]
     fn sqlcipher_repository_round_trips_core_records() -> Result<(), CredentialStoreError> {

@@ -88,7 +88,7 @@ $env:WINFACEUNLOCK_MAX_AUTH_FRAMES = "30"
 $env:WINFACEUNLOCK_REQUIRED_CONSECUTIVE = "2"
 ```
 
-OpenCV SFace 示例常用 cosine 阈值是 `0.363`，但本项目 Service 主链路当前默认阈值已经根据 Phase 5.5 初步校准提高到 `0.75`。如果当前摄像头角度、光照或旧模板导致 Service 链路验收无法通过，可以临时设置较低阈值来验证 IPC 和 Service 编排链路，例如：
+OpenCV SFace 示例常用 cosine 阈值是 `0.363`，但本项目 Service 主链路当前默认阈值是 `0.65`。如果当前摄像头角度、光照或旧模板导致 Service 链路验收无法通过，可以临时设置较低阈值来验证 IPC 和 Service 编排链路，例如：
 
 ```powershell
 $env:WINFACEUNLOCK_REQUIRED_CONSECUTIVE = "1"
@@ -162,4 +162,4 @@ opencv-index:1
 8. `calibrate-threshold` 能输出有效分数分布，用于后续阈值收紧。
 9. 命令结束后摄像头被释放；没有常驻占用。
 
-OpenCV SFace 官方示例阈值是 `0.363`，本项目 Service 主链路当前默认使用 `0.75` 作为初步收紧值。如果后续切换量化模型或采集环境变化，需要重新做阈值校准。
+OpenCV SFace 官方示例阈值是 `0.363`，本项目 Service 主链路当前默认使用 `0.65`。如果后续切换量化模型或采集环境变化，需要重新做阈值校准。

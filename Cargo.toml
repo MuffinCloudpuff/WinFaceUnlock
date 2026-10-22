@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/camera_worker",
     "crates/common_protocol",
     "crates/control_tray",
     "crates/control_backend",
@@ -17,6 +18,7 @@ members = [
     "crates/hardware_binding",
     "crates/installer_cli",
     "crates/ipc",
+    "crates/logon_safety",
     "crates/setup_api",
     "crates/setup_bootstrapper",
     "crates/usage_audit",

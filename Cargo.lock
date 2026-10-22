@@ -119,6 +119,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 
 [[package]]
+name = "camera_worker"
+version = "0.1.0"
+dependencies = [
+ "video_provider",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -716,8 +723,10 @@ dependencies = [
  "common_protocol",
  "control_protocol",
  "control_status",
+ "credential_store",
  "serde_json",
  "setup_api",
+ "video_provider",
  "win_service",
  "windows-service",
  "windows-sys 0.61.2",
@@ -830,6 +839,13 @@ name = "log"
 version = "0.4.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "113b30b4cd05f7c06868fdb2854f66a7b9fece9a48425351cd532e810d74024f"
+
+[[package]]
+name = "logon_safety"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "lzma-rust2"
@@ -1693,7 +1709,9 @@ version = "0.1.0"
 dependencies = [
  "opencv",
  "serde",
+ "serde_json",
  "windows",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1898,6 +1916,7 @@ dependencies = [
  "face_liveness",
  "hardware_binding",
  "ipc",
+ "logon_safety",
  "opencv",
  "ort",
  "serde",
@@ -2129,6 +2148,7 @@ version = "0.1.0"
 dependencies = [
  "common_protocol",
  "ipc",
+ "logon_safety",
  "windows",
  "windows-core",
  "windows-sys 0.61.2",

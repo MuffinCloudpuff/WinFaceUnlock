@@ -1,4 +1,4 @@
-﻿use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use common_protocol::{AccountType, CredentialRef, ProtocolError, UserId};
 use credential_store::{
@@ -21,6 +21,7 @@ pub type ServiceCredentialStore = RepositoryCredentialStore<SqlCipherRepository>
 pub struct ServiceCredentialStorePaths {
     pub master_key_path: PathBuf,
     pub database_path: PathBuf,
+    pinned: bool,
 }
 
 pub struct ServiceCredentialStoreContext {
@@ -39,26 +40,36 @@ pub struct WindowsCredentialEnrollment {
 }
 
 impl ServiceCredentialStorePaths {
-    pub fn from_environment_or_default() -> Self {
+    pub fn from_environment_or_default() -> Result<Self, ProtocolError> {
+        if let Some(store_dir) = credential_store::location::load_pinned_store_directory()
+            .map_err(|_| ProtocolError::TransportUnavailable)?
+        {
+            return Ok(Self {
+                pinned: true,
+                ..Self::from_store_dir(store_dir)
+            });
+        }
         if let Some(store_dir) = std::env::var_os(ENV_CREDENTIAL_STORE_DIR) {
-            return Self::from_store_dir(PathBuf::from(store_dir));
+            let store_dir = PathBuf::from(store_dir);
+            if !store_dir.is_absolute() {
+                return Err(ProtocolError::InvalidMessage);
+            }
+            return Ok(Self::from_store_dir(store_dir));
         }
 
         let root = std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(|parent| parent.join(STORE_DIR_NAME)))
-            .unwrap_or_else(|| {
-                std::env::temp_dir()
-                    .join("WinFaceUnlock")
-                    .join(STORE_DIR_NAME)
-            });
-        Self::from_store_dir(root)
+            .map_err(|_| ProtocolError::TransportUnavailable)?
+            .parent()
+            .map(|parent| parent.join(STORE_DIR_NAME))
+            .ok_or(ProtocolError::TransportUnavailable)?;
+        Ok(Self::from_store_dir(root))
     }
 
     pub fn from_store_dir(store_dir: PathBuf) -> Self {
         Self {
             master_key_path: store_dir.join(MASTER_KEY_FILE_NAME),
             database_path: store_dir.join(DATABASE_FILE_NAME),
+            pinned: false,
         }
     }
 }
@@ -66,6 +77,9 @@ impl ServiceCredentialStorePaths {
 pub fn open_service_credential_store(
     paths: &ServiceCredentialStorePaths,
 ) -> Result<ServiceCredentialStoreContext, ProtocolError> {
+    // A missing half of an existing store must never become a fresh store.
+    // In particular, generating another key cannot recover an encrypted database.
+    credential_store_files_exist(paths)?;
     ensure_parent_directory(&paths.master_key_path)?;
     ensure_parent_directory(&paths.database_path)?;
     let master_key = load_or_create_service_master_key(&paths.master_key_path)?;
@@ -75,6 +89,14 @@ pub fn open_service_credential_store(
     store
         .initialize(&HardwareFingerprint::empty())
         .map_err(credential_store_error_to_protocol_error)?;
+    if paths.pinned {
+        let directory = paths
+            .database_path
+            .parent()
+            .ok_or(ProtocolError::InvalidMessage)?;
+        credential_store::location::mark_pinned_store_initialized(directory)
+            .map_err(|_| ProtocolError::TransportUnavailable)?;
+    }
     Ok(ServiceCredentialStoreContext { store, master_key })
 }
 
@@ -86,7 +108,18 @@ pub fn enroll_windows_credential(
         mut store,
         master_key,
     } = open_service_credential_store(paths)?;
-    save_enrollment(&mut store, &master_key, enrollment)
+    save_enrollment(&mut store, &master_key, enrollment)?;
+    // Only an explicit update of the installed store may re-enable automatic
+    // Windows submission. Temporary diagnostics/test stores must not touch the
+    // machine guard. Neither checking/decrypting a credential nor restarting
+    // the service clears a Windows rejection.
+    if paths.pinned {
+        use logon_safety::LogonSubmissionGuard;
+        logon_safety::PersistentLogonGuard
+            .credentials_updated()
+            .map_err(|_| ProtocolError::TransportUnavailable)?;
+    }
+    Ok(())
 }
 
 pub fn is_credential_secret_configured(
@@ -94,24 +127,35 @@ pub fn is_credential_secret_configured(
     user_id: &UserId,
     credential_ref: &CredentialRef,
 ) -> Result<bool, ProtocolError> {
-    if !paths.master_key_path.is_file() || !paths.database_path.is_file() {
+    if !credential_store_files_exist(paths)? {
         return Ok(false);
     }
 
-    let ServiceCredentialStoreContext { store, .. } = open_service_credential_store(paths)?;
-    let configured = match (
-        store.get_user(user_id),
-        store.load_encrypted_credential_blob(credential_ref),
-    ) {
-        (Ok(user), Ok(_)) if user.credential_ref == *credential_ref => true,
-        (Err(CredentialStoreError::UserNotFound), _)
-        | (_, Err(CredentialStoreError::CredentialNotFound))
-        | (Ok(_), Ok(_)) => false,
-        (Err(error), _) | (_, Err(error)) => {
-            return Err(credential_store_error_to_protocol_error(error));
-        }
+    let ServiceCredentialStoreContext { store, master_key } = open_service_credential_store(paths)?;
+    let user = match store.get_user(user_id) {
+        Ok(user) => user,
+        Err(CredentialStoreError::UserNotFound) => return Ok(false),
+        Err(error) => return Err(credential_store_error_to_protocol_error(error)),
     };
-    Ok(configured)
+    if user.credential_ref != *credential_ref {
+        return Ok(false);
+    }
+    // A user record referencing a missing/corrupt blob is unavailable, not an
+    // unenrolled account. Verify decryption as well as the serialized blob.
+    let blob = store
+        .load_encrypted_credential_blob(credential_ref)
+        .map_err(|_| ProtocolError::TransportUnavailable)?;
+    AesGcmCredentialBlobProtector::new(WindowsSecureRandom::new())
+        .decrypt_credential_secret(
+            &master_key,
+            &CredentialBlobAssociatedData {
+                user_id: user.user_id,
+                credential_ref: user.credential_ref,
+            },
+            &blob,
+        )
+        .map_err(|_| ProtocolError::TransportUnavailable)?;
+    Ok(true)
 }
 
 pub fn ensure_development_credential_if_missing(
@@ -119,8 +163,10 @@ pub fn ensure_development_credential_if_missing(
     master_key: &MasterKey,
     user_id: &UserId,
 ) -> Result<(), ProtocolError> {
-    if store.get_user(user_id).is_ok() {
-        return Ok(());
+    match store.get_user(user_id) {
+        Ok(_) => return Ok(()),
+        Err(CredentialStoreError::UserNotFound) => {}
+        Err(error) => return Err(credential_store_error_to_protocol_error(error)),
     }
 
     save_enrollment(
@@ -155,16 +201,16 @@ fn save_enrollment(
         .map_err(credential_store_error_to_protocol_error)?;
 
     store
-        .save_encrypted_credential_blob(enrollment.credential_ref.clone(), credential_blob)
-        .map_err(credential_store_error_to_protocol_error)?;
-    store
-        .upsert_user(UserRecord {
-            user_id: enrollment.user_id,
-            user_sid: enrollment.user_sid,
-            username: enrollment.username,
-            account_type: enrollment.account_type,
-            credential_ref: enrollment.credential_ref,
-        })
+        .save_credential_enrollment(
+            UserRecord {
+                user_id: enrollment.user_id,
+                user_sid: enrollment.user_sid,
+                username: enrollment.username,
+                account_type: enrollment.account_type,
+                credential_ref: enrollment.credential_ref,
+            },
+            credential_blob,
+        )
         .map_err(credential_store_error_to_protocol_error)
 }
 
@@ -172,7 +218,11 @@ fn load_or_create_service_master_key(master_key_path: &Path) -> Result<MasterKey
     let key_file = ProtectedMasterKeyFile::new(master_key_path.to_path_buf());
     let key_protector = WindowsDpapiKeyProtector::new();
 
-    if key_file.path().exists() {
+    if key_file
+        .path()
+        .try_exists()
+        .map_err(|_| ProtocolError::TransportUnavailable)?
+    {
         let protected = key_file
             .load()
             .map_err(|_| ProtocolError::TransportUnavailable)?;
@@ -186,10 +236,50 @@ fn load_or_create_service_master_key(master_key_path: &Path) -> Result<MasterKey
         let protected = key_protector
             .protect_master_key(&master_key)
             .map_err(|_| ProtocolError::TransportUnavailable)?;
-        key_file
-            .save(&protected)
-            .map_err(|_| ProtocolError::TransportUnavailable)?;
-        Ok(master_key)
+        if key_file
+            .save_if_absent(&protected)
+            .map_err(|_| ProtocolError::TransportUnavailable)?
+        {
+            Ok(master_key)
+        } else {
+            let protected = key_file
+                .load()
+                .map_err(|_| ProtocolError::TransportUnavailable)?;
+            key_protector
+                .unprotect_master_key(&protected)
+                .map_err(|_| ProtocolError::TransportUnavailable)
+        }
+    }
+}
+
+fn credential_store_files_exist(
+    paths: &ServiceCredentialStorePaths,
+) -> Result<bool, ProtocolError> {
+    if paths.pinned {
+        // Paths can outlive their original lookup. Revalidate the initialization
+        // marker and pin on every access before considering file creation.
+        let directory = credential_store::location::load_pinned_store_directory()
+            .map_err(|_| ProtocolError::TransportUnavailable)?
+            .ok_or(ProtocolError::TransportUnavailable)?;
+        if paths.master_key_path != directory.join(MASTER_KEY_FILE_NAME)
+            || paths.database_path != directory.join(DATABASE_FILE_NAME)
+        {
+            return Err(ProtocolError::TransportUnavailable);
+        }
+    }
+    let is_file = |path: &Path| match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(ProtocolError::TransportUnavailable),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(ProtocolError::TransportUnavailable),
+    };
+    match (
+        is_file(&paths.master_key_path)?,
+        is_file(&paths.database_path)?,
+    ) {
+        (true, true) => Ok(true),
+        (false, false) => Ok(false),
+        _ => Err(ProtocolError::TransportUnavailable),
     }
 }
 
@@ -213,6 +303,110 @@ fn credential_store_error_to_protocol_error(error: CredentialStoreError) -> Prot
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unique_store_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "winfaceunlock-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn missing_master_key_never_replaces_an_existing_database() -> std::io::Result<()> {
+        let root = unique_store_root("missing-key");
+        let paths = ServiceCredentialStorePaths::from_store_dir(root.clone());
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(&paths.database_path, b"existing encrypted database")?;
+
+        assert!(matches!(
+            open_service_credential_store(&paths),
+            Err(ProtocolError::TransportUnavailable)
+        ));
+        assert_eq!(
+            is_credential_secret_configured(
+                &paths,
+                &UserId("user".into()),
+                &CredentialRef("credential".into())
+            ),
+            Err(ProtocolError::TransportUnavailable)
+        );
+        assert!(!paths.master_key_path.exists());
+        assert_eq!(
+            std::fs::read(&paths.database_path)?,
+            b"existing encrypted database"
+        );
+        std::fs::remove_dir_all(root)
+    }
+
+    #[test]
+    fn missing_database_never_creates_an_empty_replacement() -> std::io::Result<()> {
+        let root = unique_store_root("missing-database");
+        let paths = ServiceCredentialStorePaths::from_store_dir(root.clone());
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(&paths.master_key_path, b"existing protected key")?;
+
+        assert!(matches!(
+            open_service_credential_store(&paths),
+            Err(ProtocolError::TransportUnavailable)
+        ));
+        assert_eq!(
+            is_credential_secret_configured(
+                &paths,
+                &UserId("user".into()),
+                &CredentialRef("credential".into())
+            ),
+            Err(ProtocolError::TransportUnavailable)
+        );
+        assert!(!paths.database_path.exists());
+        assert_eq!(
+            std::fs::read(&paths.master_key_path)?,
+            b"existing protected key"
+        );
+        std::fs::remove_dir_all(root)
+    }
+
+    #[test]
+    fn corrupted_credential_is_unavailable_instead_of_not_configured() -> Result<(), ProtocolError>
+    {
+        let root = unique_store_root("corrupt-credential");
+        let paths = ServiceCredentialStorePaths::from_store_dir(root.clone());
+        let user_id = UserId("user".into());
+        let credential_ref = CredentialRef("credential".into());
+        enroll_windows_credential(
+            &paths,
+            WindowsCredentialEnrollment {
+                user_id: user_id.clone(),
+                user_sid: "S-1-5-test".into(),
+                username: "test".into(),
+                account_type: AccountType::Local,
+                credential_ref: credential_ref.clone(),
+                password: "test-secret".into(),
+            },
+        )?;
+        let ServiceCredentialStoreContext { mut store, .. } =
+            open_service_credential_store(&paths)?;
+        store
+            .save_encrypted_credential_blob(
+                credential_ref.clone(),
+                credential_store::CredentialBlob::new(
+                    credential_store::CredentialBlobAlgorithm::Aes256GcmV1,
+                    vec![0; 12],
+                    vec![0; 16],
+                ),
+            )
+            .map_err(credential_store_error_to_protocol_error)?;
+        drop(store);
+        assert_eq!(
+            is_credential_secret_configured(&paths, &user_id, &credential_ref),
+            Err(ProtocolError::TransportUnavailable)
+        );
+        std::fs::remove_dir_all(root).map_err(|_| ProtocolError::TransportUnavailable)?;
+        Ok(())
+    }
 
     #[test]
     fn store_paths_use_named_files_under_store_dir() {

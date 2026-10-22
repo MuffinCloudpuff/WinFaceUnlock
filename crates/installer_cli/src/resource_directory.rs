@@ -8,6 +8,8 @@ const PRESENCE_AUDIT_DIR_NAME: &str = "presence-audit";
 const RUNTIME_DIR_NAME: &str = "runtime";
 const LOGS_DIR_NAME: &str = "logs";
 const CREDENTIAL_STORE_DIR_NAME: &str = "credential-store";
+const FACE_ENROLLMENT_DIR_NAME: &str = "face-enrollment";
+const INTRUDERS_DIR_NAME: &str = "Intruders";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResourceDirectoryPlan {
@@ -16,6 +18,8 @@ pub struct ResourceDirectoryPlan {
     pub logs_dir: PathBuf,
     pub credential_store_dir: PathBuf,
     pub presence_audit_dir: PathBuf,
+    pub face_enrollment_dir: PathBuf,
+    pub intruders_dir: PathBuf,
 }
 
 impl ResourceDirectoryPlan {
@@ -33,6 +37,8 @@ impl ResourceDirectoryPlan {
             logs_dir: root_dir.join(LOGS_DIR_NAME),
             credential_store_dir: root_dir.join(CREDENTIAL_STORE_DIR_NAME),
             presence_audit_dir: root_dir.join(PRESENCE_AUDIT_DIR_NAME),
+            face_enrollment_dir: root_dir.join(FACE_ENROLLMENT_DIR_NAME),
+            intruders_dir: root_dir.join(INTRUDERS_DIR_NAME),
             root_dir,
         }
     }
@@ -43,9 +49,13 @@ impl ResourceDirectoryPlan {
         fs::create_dir_all(&self.logs_dir)?;
         fs::create_dir_all(&self.credential_store_dir)?;
         fs::create_dir_all(&self.presence_audit_dir)?;
+        fs::create_dir_all(&self.face_enrollment_dir)?;
+        fs::create_dir_all(&self.intruders_dir)?;
         apply_program_files_acl(&self.root_dir)?;
         apply_user_writable_acl(&self.runtime_dir)?;
         apply_user_writable_acl(&self.logs_dir)?;
+        apply_user_writable_acl(&self.face_enrollment_dir)?;
+        apply_user_writable_acl(&self.intruders_dir)?;
         apply_restricted_acl(&self.credential_store_dir)?;
         apply_restricted_acl(&self.presence_audit_dir)
     }
@@ -205,6 +215,14 @@ mod tests {
         assert_eq!(
             plan.presence_audit_dir,
             PathBuf::from(r"D:\Apps\WinFaceUnlock\presence-audit")
+        );
+        assert_eq!(
+            plan.face_enrollment_dir,
+            PathBuf::from(r"D:\Apps\WinFaceUnlock\face-enrollment")
+        );
+        assert_eq!(
+            plan.intruders_dir,
+            PathBuf::from(r"D:\Apps\WinFaceUnlock\Intruders")
         );
     }
 

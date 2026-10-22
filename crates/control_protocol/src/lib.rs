@@ -115,6 +115,7 @@ pub enum ControlOperation {
     RunFaceAuthSelfTest,
     ListIntruderSnapshots,
     DeleteIntruderSnapshot,
+    ClearIntruderSnapshots,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -178,11 +179,15 @@ pub enum ControlErrorCode {
     PermissionDenied,
     IntruderSnapshotUnavailable,
     IntruderSnapshotDeleteFailed,
+    IntruderSnapshotClearFailed,
 }
 
-pub const DEFAULT_LOGON_FACE_MATCH_THRESHOLD: f32 = 0.75;
+pub const DEFAULT_LOGON_FACE_MATCH_THRESHOLD: f32 = 0.65;
 pub const MIN_LOGON_FACE_MATCH_THRESHOLD: f32 = 0.30;
 pub const MAX_LOGON_FACE_MATCH_THRESHOLD: f32 = 0.90;
+pub const DEFAULT_INTRUDER_SIMILARITY_THRESHOLD: f32 = 0.30;
+pub const MIN_INTRUDER_SIMILARITY_THRESHOLD: f32 = 0.10;
+pub const MAX_INTRUDER_SIMILARITY_THRESHOLD: f32 = 0.60;
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct ControlSettingsSnapshot {
@@ -191,6 +196,7 @@ pub struct ControlSettingsSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logon_wake_mode: Option<LogonWakeMode>,
     pub logon_face_match_threshold: f32,
+    pub intruder_similarity_threshold: f32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
@@ -203,6 +209,8 @@ pub struct ControlSettingsPatch {
     pub logon_wake_mode: Option<LogonWakeMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logon_face_match_threshold: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intruder_similarity_threshold: Option<f32>,
 }
 
 impl ControlSettingsPatch {
@@ -211,12 +219,17 @@ impl ControlSettingsPatch {
             || self.intruder_snap_enabled.is_some()
             || self.logon_wake_mode.is_some()
             || self.logon_face_match_threshold.is_some()
+            || self.intruder_similarity_threshold.is_some()
     }
 
     pub fn has_valid_values(&self) -> bool {
         self.logon_face_match_threshold.is_none_or(|threshold| {
             threshold.is_finite()
                 && (MIN_LOGON_FACE_MATCH_THRESHOLD..=MAX_LOGON_FACE_MATCH_THRESHOLD)
+                    .contains(&threshold)
+        }) && self.intruder_similarity_threshold.is_none_or(|threshold| {
+            threshold.is_finite()
+                && (MIN_INTRUDER_SIMILARITY_THRESHOLD..=MAX_INTRUDER_SIMILARITY_THRESHOLD)
                     .contains(&threshold)
         })
     }
@@ -695,6 +708,11 @@ pub struct DeleteIntruderSnapshotOutcome {
     pub success: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct ClearIntruderSnapshotsOutcome {
+    pub deleted_count: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -846,6 +864,7 @@ mod tests {
                 intruder_snap_enabled: None,
                 logon_wake_mode: Some(LogonWakeMode::TriggeredRecognition),
                 logon_face_match_threshold: Some(0.55),
+                intruder_similarity_threshold: None,
             }),
         };
 
@@ -869,6 +888,7 @@ mod tests {
                 intruder_snap_enabled: None,
                 logon_wake_mode: None,
                 logon_face_match_threshold: None,
+                intruder_similarity_threshold: None,
             }
             .has_updates()
         );
@@ -878,6 +898,7 @@ mod tests {
                 intruder_snap_enabled: None,
                 logon_wake_mode: Some(LogonWakeMode::TriggeredRecognition),
                 logon_face_match_threshold: None,
+                intruder_similarity_threshold: None,
             }
             .has_updates()
         );
@@ -887,6 +908,7 @@ mod tests {
                 intruder_snap_enabled: None,
                 logon_wake_mode: None,
                 logon_face_match_threshold: Some(0.50),
+                intruder_similarity_threshold: None,
             }
             .has_updates()
         );

@@ -1,4 +1,4 @@
-﻿#![allow(unsafe_code)]
+#![allow(unsafe_code)]
 
 use std::sync::{Arc, Mutex};
 
@@ -6,7 +6,7 @@ use windows::Win32::{
     Foundation::{E_INVALIDARG, E_NOTIMPL, NTSTATUS},
     Graphics::Gdi::HBITMAP,
     UI::Shell::{
-        CPGSR_NO_CREDENTIAL_NOT_FINISHED, CPGSR_RETURN_CREDENTIAL_FINISHED, CPSI_NONE,
+        CPGSR_NO_CREDENTIAL_NOT_FINISHED, CPGSR_RETURN_CREDENTIAL_FINISHED, CPSI_ERROR, CPSI_NONE,
         CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION, CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE,
         CREDENTIAL_PROVIDER_FIELD_STATE, CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE,
         CREDENTIAL_PROVIDER_STATUS_ICON, ICredentialProviderCredential,
@@ -170,7 +170,7 @@ impl ICredentialProviderCredential_Impl for WinFaceUnlockCredential_Impl {
             return Err(E_INVALIDARG.into());
         }
 
-        if let Some(credential_material) = self.state.credential_material() {
+        if let Some(credential_material) = self.state.take_credential_for_submission() {
             write_provider_event_detail(
                 "Credential.GetSerializationMaterial",
                 format!(
@@ -178,9 +178,17 @@ impl ICredentialProviderCredential_Impl for WinFaceUnlockCredential_Impl {
                     credential_material.domain, credential_material.username
                 ),
             );
-            let auth_package_id = retrieve_negotiate_auth_package_id()?;
-            let serialization = pack_credential_material(auth_package_id, &credential_material)?;
-            self.state.mark_credential_material_serialized();
+            let packed = retrieve_negotiate_auth_package_id().and_then(|id| {
+                pack_credential_material(id, &credential_material)
+                    .map(|serialization| (id, serialization))
+            });
+            let (auth_package_id, serialization) = match packed {
+                Ok(packed) => packed,
+                Err(error) => {
+                    self.state.cancel_unsubmitted_credential();
+                    return Err(error);
+                }
+            };
             write_provider_event_detail(
                 "Credential.GetSerializationPacked",
                 format!(
@@ -199,7 +207,7 @@ impl ICredentialProviderCredential_Impl for WinFaceUnlockCredential_Impl {
                 *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
                 *pcpcs = CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION::default();
                 *ppszoptionalstatustext =
-                    allocate_wide_string("Face authentication has not produced a credential yet")?;
+                    allocate_wide_string(&self.state.credential_status_message())?;
                 *pcpsioptionalstatusicon = CPSI_NONE;
             }
         }
@@ -220,15 +228,29 @@ impl ICredentialProviderCredential_Impl for WinFaceUnlockCredential_Impl {
                 ntsstatus.0 as u32, ntssubstatus.0 as u32
             ),
         );
-        self.state.mark_report_result_received();
+        let result = logon_safety::WindowsLogonResult {
+            status: ntsstatus.0,
+            substatus: ntssubstatus.0,
+        };
+        self.state.mark_report_result_received(result);
         if !ppszoptionalstatustext.is_null() {
             unsafe {
-                *ppszoptionalstatustext = PWSTR::null();
+                *ppszoptionalstatustext = if result.succeeded() {
+                    PWSTR::null()
+                } else {
+                    allocate_wide_string(
+                        "Windows rejected face sign-in. Automatic retries are paused. Use Windows PIN/password, then save your Windows credential again in WinFaceUnlock.",
+                    )?
+                };
             }
         }
         if !pcpsioptionalstatusicon.is_null() {
             unsafe {
-                *pcpsioptionalstatusicon = CPSI_NONE;
+                *pcpsioptionalstatusicon = if result.succeeded() {
+                    CPSI_NONE
+                } else {
+                    CPSI_ERROR
+                };
             }
         }
         Ok(())

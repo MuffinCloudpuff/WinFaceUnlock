@@ -410,10 +410,18 @@ fn run_person_presence_monitor_for_local_camera(
     let mut camera_config = local_camera_config.camera_config;
     apply_profile_to_config(&local_camera_config.camera_id, &mut camera_config);
     let detector_config = person_detector_config_from_presence_config(&presence_config)?;
+    if presence_config.presence_person_debug_output_dir.is_some() {
+        write_service_event_detail(
+            "PresenceMonitor.BackgroundDebugCaptureIgnored",
+            format!(
+                "session_id={session_id} reason=background-image-recording-disabled use=explicit-diagnostics-command"
+            ),
+        );
+    }
     write_service_event_detail(
         "PresenceMonitor.PersonConfigResolved",
         format!(
-            "session_id={} detector_model={:?} detector_config={:?} model_path={} model_exists={} config_path={} config_exists={} debug_output_dir={}",
+            "session_id={} detector_model={:?} detector_config={:?} model_path={} model_exists={} config_path={} config_exists={} debug_capture_enabled=false",
             session_id,
             presence_config.presence_person_detector_model,
             detector_config,
@@ -429,11 +437,6 @@ fn run_person_presence_monitor_for_local_camera(
                 .as_ref()
                 .map(|path| path.exists())
                 .unwrap_or(true),
-            presence_config
-                .presence_person_debug_output_dir
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "<none>".to_owned())
         ),
     );
     let source =
@@ -441,7 +444,9 @@ fn run_person_presence_monitor_for_local_camera(
             camera_id: local_camera_config.camera_id,
             camera_config,
             detector_config,
-            debug_output_dir: presence_config.presence_person_debug_output_dir.clone(),
+            // Background presence checks never save image diagnostics. Explicit
+            // diagnostics_cli commands construct their own opt-in recorder.
+            debug_output_dir: None,
         })
         .map_err(|error| {
             write_service_event_detail(

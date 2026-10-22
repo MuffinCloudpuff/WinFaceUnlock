@@ -24,5 +24,7 @@ pub mod screen_snapshot;
 pub mod service_config;
 pub mod service_host;
 pub mod service_log;
+mod service_priority;
 pub mod session_lock;
 pub mod simulated_auth;
+mod snapshot_policy;

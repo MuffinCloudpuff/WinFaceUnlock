@@ -1955,6 +1955,9 @@ where
             ControlOperation::DeleteIntruderSnapshot => {
                 self.handle_delete_intruder_snapshot(&request)
             }
+            ControlOperation::ClearIntruderSnapshots => {
+                self.handle_clear_intruder_snapshots(&request)
+            }
         }
     }
 
@@ -2086,13 +2089,17 @@ where
                 }
             };
 
-        let install_dir = std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Program Files\WinFaceUnlock"));
-        let snapshot_path = install_dir
-            .join("Intruders")
-            .join(format!("intruder_{}.jpg", payload.id));
+        if !is_valid_intruder_snapshot_id(&payload.id) {
+            return ControlResponseEnvelope::invalid_request(
+                request,
+                "Intruder snapshot id must be a timestamp.",
+                json!({
+                    "control_error_code": ControlErrorCode::InvalidIntruderSnapshotRequest,
+                }),
+            );
+        }
+
+        let snapshot_path = intruder_snapshots_dir().join(format!("intruder_{}.jpg", payload.id));
 
         if snapshot_path.exists() {
             if let Err(e) = std::fs::remove_file(&snapshot_path) {
@@ -2110,6 +2117,37 @@ where
             serde_json::to_value(control_protocol::DeleteIntruderSnapshotOutcome { success: true })
                 .unwrap_or_default(),
         )
+    }
+
+    fn handle_clear_intruder_snapshots(
+        &self,
+        request: &ControlRequestEnvelope,
+    ) -> ControlResponseEnvelope {
+        if !payload_is_empty(&request.payload) {
+            return ControlResponseEnvelope::invalid_request(
+                request,
+                "clear_intruder_snapshots does not accept a payload.",
+                json!({
+                    "control_error_code": ControlErrorCode::InvalidIntruderSnapshotRequest,
+                }),
+            );
+        }
+
+        match clear_intruder_snapshot_files(&intruder_snapshots_dir()) {
+            Ok(deleted_count) => ControlResponseEnvelope::completed(
+                request,
+                "Intruder snapshots cleared.",
+                serde_json::to_value(control_protocol::ClearIntruderSnapshotsOutcome {
+                    deleted_count,
+                })
+                .unwrap_or_default(),
+            ),
+            Err(error) => ControlResponseEnvelope::failed(
+                request,
+                format!("Failed to clear intruder snapshots: {error}"),
+                ControlErrorCode::IntruderSnapshotClearFailed,
+            ),
+        }
     }
 
     fn handle_list_cameras(&self, request: &ControlRequestEnvelope) -> ControlResponseEnvelope {
@@ -2785,6 +2823,44 @@ fn default_install_dir() -> PathBuf {
     std::env::temp_dir().join("WinFaceUnlock")
 }
 
+fn intruder_snapshots_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\WinFaceUnlock"))
+        .join("Intruders")
+}
+
+fn is_valid_intruder_snapshot_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_intruder_snapshot_path(path: &Path) -> bool {
+    path.is_file()
+        && path.extension().and_then(|extension| extension.to_str()) == Some("jpg")
+        && path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.strip_prefix("intruder_"))
+            .is_some_and(is_valid_intruder_snapshot_id)
+}
+
+fn clear_intruder_snapshot_files(intruders_dir: &Path) -> std::io::Result<u32> {
+    if !intruders_dir.exists() {
+        return Ok(0);
+    }
+
+    let mut deleted_count = 0_u32;
+    for entry in fs::read_dir(intruders_dir)? {
+        let path = entry?.path();
+        if is_intruder_snapshot_path(&path) {
+            fs::remove_file(path)?;
+            deleted_count = deleted_count.saturating_add(1);
+        }
+    }
+    Ok(deleted_count)
+}
+
 fn auth_wake_protocol_error(error: ProtocolError) -> ControlBackendError {
     match error {
         ProtocolError::TransportUnavailable => {
@@ -2897,9 +2973,9 @@ mod tests {
         ProtectedCredentialMaterial, UserId,
     };
     use control_protocol::{
-        DataDirectorySummary, FaceRecognitionModelSummary, FaceTemplateKind,
-        FaceTemplateSourceState, FaceTemplateSummary, LogonWakeMode, PathPresence,
-        PresenceMonitorState, PresenceRuntimeSummary, ProviderRegistrationState,
+        DEFAULT_LOGON_FACE_MATCH_THRESHOLD, DataDirectorySummary, FaceRecognitionModelSummary,
+        FaceTemplateKind, FaceTemplateSourceState, FaceTemplateSummary, LogonWakeMode,
+        PathPresence, PresenceMonitorState, PresenceRuntimeSummary, ProviderRegistrationState,
         ProviderStatusSummary, RegistryConfigState, ServiceConfigSummary, ServiceInstallationState,
         ServiceRuntimeState, ServiceStatusSummary, WindowsCredentialAccountType,
         WindowsCredentialSecretState,
@@ -2951,6 +3027,9 @@ mod tests {
             if let Some(logon_face_match_threshold) = patch.logon_face_match_threshold {
                 settings.logon_face_match_threshold = logon_face_match_threshold;
             }
+            if let Some(intruder_similarity_threshold) = patch.intruder_similarity_threshold {
+                settings.intruder_similarity_threshold = intruder_similarity_threshold;
+            }
             Ok(settings.clone())
         }
     }
@@ -2961,10 +3040,37 @@ mod tests {
                 presence_lock_enabled: true,
                 intruder_snap_enabled: true,
                 logon_wake_mode: Some(LogonWakeMode::TriggeredRecognition),
-                logon_face_match_threshold: 0.75,
+                logon_face_match_threshold: DEFAULT_LOGON_FACE_MATCH_THRESHOLD,
+                intruder_similarity_threshold:
+                    control_protocol::DEFAULT_INTRUDER_SIMILARITY_THRESHOLD,
             }))),
             last_patch: Rc::new(RefCell::new(None)),
         }
+    }
+
+    #[test]
+    fn clear_intruder_snapshot_files_only_removes_managed_snapshot_images()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = std::env::temp_dir().join(format!(
+            "winfaceunlock-clear-intruder-snapshots-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
+        ));
+        fs::create_dir_all(&directory)?;
+        fs::write(directory.join("intruder_1735689600000.jpg"), b"snapshot")?;
+        fs::write(directory.join("intruder_invalid.jpg"), b"not-managed")?;
+        fs::write(directory.join("notes.jpg"), b"not-managed")?;
+        fs::write(directory.join("intruder_1735689600001.png"), b"not-managed")?;
+
+        let deleted_count = clear_intruder_snapshot_files(&directory)?;
+
+        assert_eq!(deleted_count, 1);
+        assert!(!directory.join("intruder_1735689600000.jpg").exists());
+        assert!(directory.join("intruder_invalid.jpg").exists());
+        assert!(directory.join("notes.jpg").exists());
+        assert!(directory.join("intruder_1735689600001.png").exists());
+        fs::remove_dir_all(directory)?;
+        Ok(())
     }
 
     #[derive(Clone)]
@@ -3745,7 +3851,10 @@ mod tests {
             decoded_settings.logon_wake_mode,
             Some(LogonWakeMode::TriggeredRecognition)
         );
-        assert_eq!(decoded_settings.logon_face_match_threshold, 0.75);
+        assert_eq!(
+            decoded_settings.logon_face_match_threshold,
+            DEFAULT_LOGON_FACE_MATCH_THRESHOLD
+        );
         Ok(())
     }
 
@@ -4539,6 +4648,7 @@ mod tests {
                 intruder_snap_enabled: Some(false),
                 logon_wake_mode: None,
                 logon_face_match_threshold: None,
+                intruder_similarity_threshold: None,
             })
         );
         Ok(())
@@ -4575,6 +4685,7 @@ mod tests {
                 intruder_snap_enabled: None,
                 logon_wake_mode: Some(LogonWakeMode::TriggeredRecognition),
                 logon_face_match_threshold: None,
+                intruder_similarity_threshold: None,
             })
         );
         Ok(())
@@ -4607,6 +4718,37 @@ mod tests {
                 intruder_snap_enabled: None,
                 logon_wake_mode: None,
                 logon_face_match_threshold: Some(0.50),
+                intruder_similarity_threshold: None,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn update_settings_accepts_intruder_similarity_threshold() -> Result<(), serde_json::Error> {
+        let settings_store = settings_store_fixture();
+        let last_patch = settings_store.last_patch.clone();
+        let handler = ControlHandler::new(
+            FixedDashboardStatusProvider {
+                result: Ok(dashboard_status_fixture()),
+            },
+            settings_store,
+            credential_enrollment_store_fixture(),
+        );
+
+        let response = handler.handle_request(update_settings_request(json!({
+            "intruder_similarity_threshold": 0.42,
+        })));
+
+        assert_eq!(response.operation_status, ControlOperationStatus::Completed);
+        let decoded_settings: ControlSettingsSnapshot =
+            serde_json::from_value(response.safe_details)?;
+        assert_eq!(decoded_settings.intruder_similarity_threshold, 0.42);
+        assert_eq!(
+            last_patch.borrow().as_ref(),
+            Some(&ControlSettingsPatch {
+                intruder_similarity_threshold: Some(0.42),
+                ..ControlSettingsPatch::default()
             })
         );
         Ok(())

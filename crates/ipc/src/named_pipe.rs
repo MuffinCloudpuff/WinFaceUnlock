@@ -1,4 +1,4 @@
-﻿#![allow(unsafe_code)]
+#![allow(unsafe_code)]
 
 use std::ptr;
 
@@ -159,7 +159,12 @@ impl crate::IpcServer for NamedPipeServer {
     }
 
     fn receive(&mut self) -> Result<ServiceRequest, ProtocolError> {
-        self.connect_client_if_needed()?;
+        if let Err(error) = self.connect_client_if_needed() {
+            // A client may close before ConnectNamedPipe runs (ERROR_NO_DATA).
+            // Reset this instance even though client_connected was never set.
+            self.disconnect_current_client();
+            return Err(error);
+        }
         let result = read_frame(self.pipe_handle()?).and_then(|frame| decode_request(&frame));
         if result.is_err() {
             self.disconnect_current_client();
@@ -232,6 +237,7 @@ impl crate::IpcClient for NamedPipeClient {
             };
             if handle != INVALID_HANDLE_VALUE {
                 self.pipe_handle = Some(OwnedHandle { raw: handle });
+                self.last_connect_error = None;
                 return Ok(());
             }
 
@@ -240,8 +246,16 @@ impl crate::IpcClient for NamedPipeClient {
             if last_error != ERROR_PIPE_BUSY && last_error != ERROR_FILE_NOT_FOUND {
                 return Err(ProtocolError::TransportUnavailable);
             }
-            unsafe {
-                let _ = WaitNamedPipeW(pipe_name.as_ptr(), CLIENT_CONNECT_RETRY_WAIT_MS);
+            let wait_started = std::time::Instant::now();
+            let available =
+                unsafe { WaitNamedPipeW(pipe_name.as_ptr(), CLIENT_CONNECT_RETRY_WAIT_MS) };
+            if available == 0 {
+                // WaitNamedPipe returns immediately when the service has not
+                // created any instance yet. Preserve a real retry interval.
+                let remaining =
+                    std::time::Duration::from_millis(u64::from(CLIENT_CONNECT_RETRY_WAIT_MS))
+                        .saturating_sub(wait_started.elapsed());
+                std::thread::sleep(remaining);
             }
         }
 
@@ -444,6 +458,7 @@ mod tests {
         let pipe_name = unique_pipe_name();
         let (ready_tx, ready_rx) = mpsc::channel();
         let (recovered_tx, recovered_rx) = mpsc::channel();
+        let (disconnected_tx, disconnected_rx) = mpsc::channel();
         let server_pipe_name = pipe_name.clone();
 
         let server_thread = thread::spawn(move || -> Result<(), ProtocolError> {
@@ -453,6 +468,10 @@ mod tests {
                 .send(())
                 .map_err(|_| ProtocolError::TransportUnavailable)?;
 
+            // Force the previously racy ERROR_NO_DATA path deterministically.
+            disconnected_rx
+                .recv()
+                .map_err(|_| ProtocolError::TransportUnavailable)?;
             assert_eq!(server.receive(), Err(ProtocolError::TransportUnavailable));
             recovered_tx
                 .send(())
@@ -471,6 +490,9 @@ mod tests {
         let mut broken_client = NamedPipeClient::new(pipe_name.clone());
         broken_client.connect()?;
         broken_client.disconnect();
+        disconnected_tx
+            .send(())
+            .map_err(|_| ProtocolError::TransportUnavailable)?;
         recovered_rx
             .recv()
             .map_err(|_| ProtocolError::TransportUnavailable)?;
@@ -485,6 +507,40 @@ mod tests {
             .map_err(|_| ProtocolError::TransportUnavailable)?;
         assert_eq!(server_result, Ok(()));
         assert_eq!(response, ServiceEvent::HealthOk);
+        Ok(())
+    }
+
+    #[test]
+    fn client_waits_for_a_service_that_has_not_created_its_pipe_yet() -> Result<(), ProtocolError> {
+        let pipe_name = unique_pipe_name();
+        let server_pipe_name = pipe_name.clone();
+        let (start_tx, start_rx) = mpsc::channel();
+        let server_thread = thread::spawn(move || -> Result<(), ProtocolError> {
+            start_rx
+                .recv()
+                .map_err(|_| ProtocolError::TransportUnavailable)?;
+            thread::sleep(std::time::Duration::from_millis(150));
+            let mut server = NamedPipeServer::new(server_pipe_name);
+            server.start(PipeSecurity::service_default())?;
+            assert_eq!(server.receive()?, ServiceRequest::HealthCheck);
+            server.send(ServiceEvent::HealthOk)?;
+            server.stop();
+            Ok(())
+        });
+        start_tx
+            .send(())
+            .map_err(|_| ProtocolError::TransportUnavailable)?;
+        let mut client = NamedPipeClient::new(pipe_name);
+        client.connect()?;
+        assert_eq!(client.last_connect_error(), None);
+        assert_eq!(
+            client.request(ServiceRequest::HealthCheck)?,
+            ServiceEvent::HealthOk
+        );
+        client.disconnect();
+        server_thread
+            .join()
+            .map_err(|_| ProtocolError::TransportUnavailable)??;
         Ok(())
     }
 

@@ -1,90 +1,92 @@
-# Camera backend profiling
+# Camera identity and backend profiling
 
-## Problem
+## Device binding
 
-`opencv-index:N` only identifies a camera index. OpenCV still needs a Windows capture backend:
-`msmf`, `dshow`, or `any`. On real hardware these can differ by tens of seconds. The service
-must not discover this during enrollment or unlock.
+Windows discovery reads Media Foundation activation metadata without opening a
+video stream. Each listed `CameraId` is `windows-device:<device interface path>`,
+using `MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK`. Friendly names
+are display-only. Paths are normalized case-insensitively for comparison;
+missing or ambiguous identities are rejected instead of falling back to a name.
 
-## Decision
+Media Foundation and DirectShow have independent enumeration orders. Immediately
+before each backend opens, the provider resolves the saved path to that backend's
+current index. DirectShow reads each moniker's `DevicePath` property, without
+binding a capture filter. SetupAPI resolves DirectShow capture-class paths to Media Foundation camera-class aliases; the OS requires the same device and reference string, so distinct RGB/IR endpoints are not merged. Missing aliases keep exact-path comparison and fail closed if no unique match exists. An enumeration check after open rejects observable
+hotplug/reordering during the open. `CAP_ANY` is deliberately excluded because
+its backend selection cannot preserve the association between a path and an index.
+The legacy `Any` enum remains deserializable; ordinary opens treat it as the
+explicit DirectShow / Media Foundation fallback order unless a measured preference
+selects Media Foundation first.
 
-The Windows service owns camera backend profiling.
+`CameraId::validate()` checks syntax only. `resolve_camera_id()` performs metadata
+resolution. New enrollment/application and legacy service configuration migration
+persist the returned identity. A legacy `opencv-index:N` still means the current
+Media Foundation slot N at the initial binding; historical physical identity
+cannot be reconstructed from an old index alone. After migration, reordering or
+an identically named replacement cannot redirect that binding. A device without
+an available path fails closed. USB devices without stable serial numbers can
+receive another interface path when moved to a different port; the user must
+select/rebind that device instead of silently selecting a substitute.
 
-- On service startup, profile all currently visible cameras in the background.
-- On camera device changes, profile again in the background.
-- Store the fastest readable backend per camera in an install-local JSON file.
-- Enrollment, presence monitoring, and unlock use the stored backend before fallback probing.
-- If a stored backend fails, the normal fallback still works and the profiler refreshes later.
+Microsoft documents the [Media Foundation symbolic-link attribute](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-devsource-attribute-source-type-vidcap-symbolic-link)
+the unique DirectShow [DevicePath property](https://learn.microsoft.com/en-us/windows/win32/directshow/selecting-a-capture-device), and the device/reference guarantee of [SetupDiGetDeviceInterfaceAlias](https://learn.microsoft.com/en-us/windows/win32/api/setupapi/nf-setupapi-setupdigetdeviceinterfacealias).
 
-The profile file is a camera-management contract, not a hard-coded setting owned
-by any one feature. Face enrollment, unlock authentication, presence lock, and
-diagnostic commands must ask the same camera-management layer for the runtime
-camera configuration instead of each feature choosing OpenCV backends directly.
+## Probe policy and latency
 
-The profiler must not let a transient bad probe overwrite a known-good profile.
-For example, if `dshow` previously opened a C920 in about 200 ms, a later probe
-where only `any` succeeds after 23 seconds is degraded evidence. It should be
-logged and ignored as a preferred backend unless no acceptable profile exists
-and a caller explicitly falls back during camera open.
+Profile lookup is passive: it reads the saved preference without starting a
+thread, enumerating devices, or opening a stream. There is no 30-second camera
+poll, and session unlock/logon does not start profiling. Device identity is still
+resolved against current metadata when a business operation actually opens the
+camera, so removing background polling does not reintroduce stale index binding.
+
+- Backend probing is an explicit diagnostic operation. Unknown/locked sessions
+  are rejected before enumeration; interrupted probes return an error without
+  scheduling a hidden retry. Saved timestamps/status remain available for diagnostics.
+- A known-good backend is tested first. The first backend that returns a valid
+  frame within 3000 ms wins. This is a first-usable policy, not a global fastest
+  backend benchmark. There is no unconditional 1500 ms pause between attempts.
+- Foreground capture, the worker, and profiling share `windows_camera_backend_order`.
+  With no measured preference (including an index-to-stable-ID cache miss), try
+  DirectShow first, then Media Foundation. A measured Media Foundation preference
+  still takes precedence. Do not copy an old index profile to a physical identity
+  based on its friendly name. The default addresses the observed C920 regression;
+  it does not assert DirectShow is faster for every device.
+- The only Windows candidates are Media Foundation and DirectShow. Every probe
+  uses `OpenCvCameraProvider::open_backend` with exactly one backend, including
+  the provider's bounded first-frame warm-up and process deadline.
+- A backend attempt holds its own camera lease. Locking stops further backend
+  and device attempts. Interrupted devices
+  receive no fresh success/failure timestamp. Already-blocked native code is
+  bounded by the isolated worker's deadline.
+- A transient failed/slow explicit probe retains a previously usable backend and
+  records the failed attempt without reclassifying it as a successful measurement.
+- Normal camera release sends `Close`, waits up to one second for `Closed` after
+  driver/capture release, then allows a short process-exit grace period. Transport
+  failures, driver hangs, or a parent exit still terminate the isolated worker.
+
+`open_ms` measures worker startup, device resolution, open, and the first readable
+frame. `read_ms` measures transfer of that already-validated first frame. The
+`camera-open-benchmark` command uses the same isolated, exact-backend path and
+reports the resolved stable ID. Its explicit backends are `msmf` and `dshow`.
+`--backend auto` exercises the ordinary configured-preference/fallback path and
+prints `selected_backend`; it captures one frame without saving an image or
+requesting authentication. Logon camera-open completion also logs the selected
+backend and elapsed `open_ms`.
 
 ## Storage
 
-Path:
+Profiles live at `<install-dir>\runtime\camera_backend_profiles.json`, keyed by
+stable `camera_id`. An old index-keyed profile is not reassigned by friendly name.
+The persisted `last_attempt_unix_ms` records attempts independently from the last
+successful `measured_at_unix_ms`; older files default the attempt timestamp to
+their measurement time. Status is `usable`, `degraded`, or `unavailable`. These
+timestamps no longer create autonomous retry jobs.
 
-`<install-dir>\config\camera_backend_profiles.json`
-
-Shape:
-
-```json
-{
-  "profiles": [
-    {
-      "camera_id": "opencv-index:1",
-      "display_name": "Logitech HD Pro Webcam C920",
-      "preferred_backend": "dshow",
-      "open_ms": 640,
-      "read_ms": 101,
-      "frame_width": 640,
-      "frame_height": 480,
-      "measured_at_unix_ms": 1781940000000,
-      "last_probe_status": "usable",
-      "last_probe_reason": "fastest-readable-backend"
-    }
-  ]
-}
-```
-
-`camera_id` is the initial key because the current provider contract is index-based. `display_name`
-is stored as a weak device signature so later device-path support can replace the key without
-changing users' saved preference semantics.
-
-## Runtime Flow
-
-1. Service starts.
-2. `CameraBackendProfileService` enumerates cameras without opening streams.
-3. For each camera, it measures `msmf`, `dshow`, and `any`.
-4. It writes the fastest backend that opens and returns a non-empty first frame.
-5. `OpenCvCameraProvider` reads `preferred_backend` from config and tries it first.
-6. If no profile exists, it uses fallback order.
-7. Windows device change notification triggers another profiling pass.
-
-The refresh merge policy is:
-
-1. Probe all candidate backends: `msmf`, `dshow`, and `any`.
-2. Pick the fastest readable candidate.
-3. Accept the candidate as preferred only when `open_ms` is within the usable
-   threshold.
-4. If the candidate is too slow and an existing usable profile exists, keep the
-   existing profile.
-5. If both the candidate and existing profile are degraded, do not expose either
-   as a preferred backend; callers should use the provider fallback order.
-6. Log whether the profile was updated, kept, skipped, or degraded, including
-   old and new backend/timing data.
-
-The first implementation uses a conservative 3000 ms usable threshold. This is
-not a product promise; it is a guardrail that prevents a 20+ second backend from
-becoming the long-lived preferred path.
-
+Authentication reads a metadata-keyed in-process cache. A temporarily unreadable
+or partially written profile file keeps the last readable snapshot, with no
+foreground sleep/retry loop. Profile lookup never opens a stream. Ordinary face
+authentication, opt-in enrollment/diagnostics, and input-gated presence sampling
+still use the camera when their business conditions allow it.
 ## Camera Runtime Boundary
 
 Business modules should depend on a resolved camera runtime configuration:
@@ -108,9 +110,8 @@ OpenCvCameraProvider
   -> owns the platform adapter and final fallback attempts
 ```
 
-This keeps feature code from embedding camera-backend policy and makes future
-device-path based camera IDs or exclusive camera leases possible without
-rewriting every feature.
+This keeps backend policy and device identity resolution out of feature code;
+features share the same stable binding and exclusive camera lease rules.
 
 ## Interface State And Camera Lease Runtime
 
@@ -194,7 +195,7 @@ Service log records:
 - degraded probe candidates that were not persisted as preferred
 - cases where an existing good profile was kept
 - cases where an existing bad profile was ignored or removed
-- device-change-triggered refresh
+- explicit refresh completion or deferral (no device-change polling job)
 
 No credentials or frame image data are logged.
 

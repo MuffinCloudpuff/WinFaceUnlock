@@ -2013,6 +2013,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
+name = "logon_safety"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "lzma-rust2"
 version = "0.15.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4355,7 +4362,9 @@ version = "0.1.0"
 dependencies = [
  "opencv",
  "serde",
+ "serde_json",
  "windows 0.62.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4654,6 +4663,7 @@ dependencies = [
  "face_liveness",
  "hardware_binding",
  "ipc",
+ "logon_safety",
  "opencv",
  "ort",
  "serde",
@@ -5055,6 +5065,7 @@ version = "0.1.0"
 dependencies = [
  "common_protocol",
  "ipc",
+ "logon_safety",
  "windows 0.62.2",
  "windows-core 0.62.2",
  "windows-sys 0.61.2",

@@ -16,7 +16,8 @@ export type ControlOperation =
   | 'finish_face_enrollment'
   | 'run_face_auth_self_test'
   | 'list_intruder_snapshots'
-  | 'delete_intruder_snapshot';
+  | 'delete_intruder_snapshot'
+  | 'clear_intruder_snapshots';
 
 export type ControlOperationStatus =
   | 'completed'
@@ -58,6 +59,7 @@ export interface ControlSettingsSnapshot {
   intruder_snap_enabled: boolean;
   logon_wake_mode?: LogonWakeMode;
   logon_face_match_threshold: number;
+  intruder_similarity_threshold: number;
 }
 
 export interface ControlSettingsPatch {
@@ -65,6 +67,7 @@ export interface ControlSettingsPatch {
   intruder_snap_enabled?: boolean;
   logon_wake_mode?: LogonWakeMode;
   logon_face_match_threshold?: number;
+  intruder_similarity_threshold?: number;
 }
 
 export type WindowsCredentialAccountType = 'local' | 'microsoft_account' | 'domain';
@@ -250,4 +253,8 @@ export interface DeleteIntruderSnapshotPayload {
 
 export interface DeleteIntruderSnapshotOutcome {
   success: boolean;
+}
+
+export interface ClearIntruderSnapshotsOutcome {
+  deleted_count: number;
 }

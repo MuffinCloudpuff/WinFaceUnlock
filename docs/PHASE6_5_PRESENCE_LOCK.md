@@ -200,7 +200,7 @@ UnknownFaceSuspect：连续 3 次低匹配锁屏并触发审计
 ```text
 unlock_match_threshold
   用途：允许登录或解锁。
-  建议值：0.75 左右。
+  建议值：0.65 左右。
   含义：身份认证通过。
 
 presence_owner_match_threshold

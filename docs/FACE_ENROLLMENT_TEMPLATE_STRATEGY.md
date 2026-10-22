@@ -313,7 +313,7 @@ sequence_auth_threshold
 示例：
 
 ```text
-frame_match_threshold = 0.75
+frame_match_threshold = 0.65
 min_passed_frames = 3
 max_observed_frames = 8
 min_quality_score = 0.70

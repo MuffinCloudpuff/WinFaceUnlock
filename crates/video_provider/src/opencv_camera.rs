@@ -9,7 +9,7 @@ use crate::{CameraId, CameraInfo, PixelFormat, VideoError, VideoFrame, VideoFram
 
 const DEFAULT_MAX_CAMERA_INDEX: u32 = 8;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OpenCvCameraProviderConfig {
     pub max_camera_index: u32,
     pub requested_frame_width: Option<u32>,
@@ -58,16 +58,18 @@ impl OpenCvCameraBackend {
     }
 }
 
-pub struct OpenCvCameraProvider {
+pub struct InProcessCameraProvider {
     config: OpenCvCameraProviderConfig,
     capture: Option<VideoCapture>,
+    first_frame: Option<VideoFrame>,
 }
 
-impl OpenCvCameraProvider {
+impl InProcessCameraProvider {
     pub fn new(config: OpenCvCameraProviderConfig) -> Self {
         Self {
             config,
             capture: None,
+            first_frame: None,
         }
     }
 
@@ -76,31 +78,84 @@ impl OpenCvCameraProvider {
     }
 
     fn try_open_camera(
-        camera_index: i32,
+        camera_id: &CameraId,
         config: &OpenCvCameraProviderConfig,
-    ) -> Result<VideoCapture, VideoError> {
+        exact_backend: Option<OpenCvCameraBackend>,
+    ) -> Result<(VideoCapture, VideoFrame), VideoError> {
+        let camera_id = crate::resolve_camera_id(camera_id)?;
         #[cfg(windows)]
-        let backends = preferred_backend_order(config.preferred_backend);
+        let backends = exact_backend
+            .map(|backend| vec![backend])
+            .unwrap_or_else(|| {
+                crate::windows_camera_backend_order(config.preferred_backend).to_vec()
+            });
         #[cfg(not(windows))]
-        let backends = [OpenCvCameraBackend::Any];
+        let backends = [exact_backend.unwrap_or(OpenCvCameraBackend::Any)];
 
-        for backend in backends {
-            let Ok(mut capture) = VideoCapture::new(camera_index, backend.videoio_id()) else {
-                continue;
-            };
-            if let Some(width) = config.requested_frame_width {
-                let _ = capture.set(videoio::CAP_PROP_FRAME_WIDTH, f64::from(width));
-            }
-            if let Some(height) = config.requested_frame_height {
-                let _ = capture.set(videoio::CAP_PROP_FRAME_HEIGHT, f64::from(height));
-            }
+        crate::capture_open::open_readable_capture(
+            backends,
+            |backend| {
+                let camera_index =
+                    crate::camera_identity::camera_index_for_backend(&camera_id, backend)?;
+                let mut capture = VideoCapture::new(camera_index, backend.videoio_id())
+                    .map_err(|_| VideoError::OpenFailed)?;
+                if !capture.is_opened().unwrap_or(false) {
+                    return Err(VideoError::OpenFailed);
+                }
+                if let Some(width) = config.requested_frame_width {
+                    let _ = capture.set(videoio::CAP_PROP_FRAME_WIDTH, f64::from(width));
+                }
+                if let Some(height) = config.requested_frame_height {
+                    let _ = capture.set(videoio::CAP_PROP_FRAME_HEIGHT, f64::from(height));
+                }
 
-            if capture.is_opened().unwrap_or(false) {
-                return Ok(capture);
-            }
+                // Reject a hotplug/reordering observed while opening rather than
+                // continuing with an index that now denotes a different device.
+                if crate::camera_identity::camera_index_for_backend(&camera_id, backend)?
+                    != camera_index
+                {
+                    return Err(VideoError::CameraNotFound);
+                }
+
+                Ok(capture)
+            },
+            Self::read_capture_frame,
+            || std::thread::sleep(std::time::Duration::from_millis(50)),
+        )
+    }
+
+    /// Opens exactly one backend for profiling, with no hidden fallback.
+    pub fn open_backend(
+        &mut self,
+        camera_id: &CameraId,
+        backend: OpenCvCameraBackend,
+    ) -> Result<(), VideoError> {
+        self.open_with_backend(camera_id, Some(backend))
+    }
+
+    fn open_with_backend(
+        &mut self,
+        camera_id: &CameraId,
+        backend: Option<OpenCvCameraBackend>,
+    ) -> Result<(), VideoError> {
+        if self.capture.is_some() {
+            return Err(VideoError::CameraAlreadyOpen);
         }
+        let (capture, first_frame) = Self::try_open_camera(camera_id, &self.config, backend)?;
+        self.capture = Some(capture);
+        self.first_frame = Some(first_frame);
+        Ok(())
+    }
 
-        Err(VideoError::OpenFailed)
+    fn read_capture_frame(capture: &mut VideoCapture) -> Result<VideoFrame, VideoError> {
+        let mut frame = Mat::default();
+        if !capture
+            .read(&mut frame)
+            .map_err(|_| VideoError::ReadFailed)?
+        {
+            return Err(VideoError::ReadFailed);
+        }
+        Self::frame_from_mat(&frame)
     }
 
     fn frame_from_mat(frame: &Mat) -> Result<VideoFrame, VideoError> {
@@ -131,7 +186,9 @@ impl OpenCvCameraProvider {
     fn list_sources_by_open_probe(&self) -> Result<Vec<CameraInfo>, VideoError> {
         let mut sources = Vec::new();
         for camera_index in 0..=self.config.max_camera_index {
-            let Ok(mut capture) = Self::try_open_camera(camera_index as i32, &self.config) else {
+            let Ok((mut capture, _)) =
+                Self::try_open_camera(&CameraId::from_index(camera_index), &self.config, None)
+            else {
                 continue;
             };
             sources.push(CameraInfo {
@@ -145,91 +202,51 @@ impl OpenCvCameraProvider {
 }
 
 #[cfg(windows)]
-fn preferred_backend_order(
-    preferred_backend: Option<OpenCvCameraBackend>,
-) -> [OpenCvCameraBackend; 3] {
-    match preferred_backend {
-        Some(OpenCvCameraBackend::Msmf) => [
-            OpenCvCameraBackend::Msmf,
-            OpenCvCameraBackend::Dshow,
-            OpenCvCameraBackend::Any,
-        ],
-        Some(OpenCvCameraBackend::Dshow) => [
-            OpenCvCameraBackend::Dshow,
-            OpenCvCameraBackend::Msmf,
-            OpenCvCameraBackend::Any,
-        ],
-        Some(OpenCvCameraBackend::Any) => [
-            OpenCvCameraBackend::Any,
-            OpenCvCameraBackend::Msmf,
-            OpenCvCameraBackend::Dshow,
-        ],
-        None => [
-            OpenCvCameraBackend::Msmf,
-            OpenCvCameraBackend::Dshow,
-            OpenCvCameraBackend::Any,
-        ],
-    }
-}
-
-#[cfg(windows)]
-impl OpenCvCameraProvider {
+impl InProcessCameraProvider {
     fn list_sources_without_stream_open(&self) -> Result<Vec<CameraInfo>, VideoError> {
-        crate::mf_bindings::windows_media_foundation_camera_sources()
+        crate::list_camera_sources()
     }
 }
 
 #[cfg(not(windows))]
-impl OpenCvCameraProvider {
+impl InProcessCameraProvider {
     fn list_sources_without_stream_open(&self) -> Result<Vec<CameraInfo>, VideoError> {
         self.list_sources_by_open_probe()
     }
 }
 
-impl Default for OpenCvCameraProvider {
+impl Default for InProcessCameraProvider {
     fn default() -> Self {
         Self::with_default_config()
     }
 }
 
-impl VideoFrameProvider for OpenCvCameraProvider {
+impl VideoFrameProvider for InProcessCameraProvider {
     fn list_sources(&self) -> Result<Vec<CameraInfo>, VideoError> {
         self.list_sources_without_stream_open()
     }
 
     fn open(&mut self, camera_id: &CameraId) -> Result<(), VideoError> {
-        if self.capture.is_some() {
-            return Err(VideoError::CameraAlreadyOpen);
-        }
-
-        self.capture = Some(Self::try_open_camera(
-            camera_id.camera_index()?,
-            &self.config,
-        )?);
-        Ok(())
+        self.open_with_backend(camera_id, None)
     }
 
     fn read_frame(&mut self) -> Result<VideoFrame, VideoError> {
-        let capture = self.capture.as_mut().ok_or(VideoError::CameraNotOpen)?;
-        let mut frame = Mat::default();
-        let frame_was_read = capture
-            .read(&mut frame)
-            .map_err(|_| VideoError::ReadFailed)?;
-        if !frame_was_read {
-            return Err(VideoError::ReadFailed);
+        if let Some(frame) = self.first_frame.take() {
+            return Ok(frame);
         }
-
-        Self::frame_from_mat(&frame)
+        let capture = self.capture.as_mut().ok_or(VideoError::CameraNotOpen)?;
+        Self::read_capture_frame(capture)
     }
 
     fn close(&mut self) {
+        self.first_frame = None;
         if let Some(mut capture) = self.capture.take() {
             let _ = capture.release();
         }
     }
 }
 
-impl Drop for OpenCvCameraProvider {
+impl Drop for InProcessCameraProvider {
     fn drop(&mut self) {
         self.close();
     }

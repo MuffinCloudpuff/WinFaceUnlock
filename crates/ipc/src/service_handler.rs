@@ -1,10 +1,18 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::GrantRegistry;
 use common_protocol::{
     AuthFailureReason, AuthGrant, AuthSource, AuthTriggerSource, ProtectedCredential,
     ProtectedCredentialMaterial, ProtocolError, ServiceEvent, ServiceRequest, SessionId,
 };
+
+// Abandoned polling sessions cannot accumulate forever. This is deliberately
+// longer than a normal authentication attempt; only fresh WakeAuth requests
+// can establish another result-fetch window after it elapses.
+const PENDING_AUTH_RESULT_TTL_MS: i64 = 5 * 60 * 1_000;
 
 pub trait AuthGrantIssuer {
     fn issue_auth_grant(
@@ -124,6 +132,7 @@ pub struct ServiceRequestHandler<I, R, C> {
     credential_resolver: R,
     clock: C,
     grant_registry: GrantRegistry,
+    pending_auth_sessions: HashMap<SessionId, i64>,
 }
 
 impl<I, R, C> ServiceRequestHandler<I, R, C>
@@ -138,6 +147,7 @@ where
             credential_resolver,
             clock,
             grant_registry: GrantRegistry::default(),
+            pending_auth_sessions: HashMap::new(),
         }
     }
 
@@ -145,6 +155,11 @@ where
         &mut self,
         request: ServiceRequest,
     ) -> Result<ServiceEvent, ProtocolError> {
+        let now = self.clock.now_unix_ms();
+        self.grant_registry.remove_expired_grants(now);
+        self.pending_auth_sessions.retain(|_, started| {
+            now >= *started && now.saturating_sub(*started) < PENDING_AUTH_RESULT_TTL_MS
+        });
         match request {
             ServiceRequest::WakeAuth {
                 session_id,
@@ -196,10 +211,12 @@ where
             }
             ServiceRequest::Cancel { session_id } => {
                 self.grant_issuer.cancel_auth(&session_id);
-                self.grant_registry.remove_grants_for_session(&session_id);
+                self.pending_auth_sessions.remove(&session_id);
+                self.grant_registry.revoke_grants_for_session(&session_id);
                 Ok(ServiceEvent::AuthCancelled { session_id })
             }
             ServiceRequest::ReloadAuthConfig => {
+                self.invalidate_auth_state();
                 self.grant_issuer.reload_auth_config()?;
                 Ok(ServiceEvent::AuthConfigReloaded)
             }
@@ -208,6 +225,7 @@ where
                 camera_id,
                 install_dir,
             } => {
+                self.invalidate_auth_state();
                 self.grant_issuer.apply_local_camera_auth_config(
                     &template_path,
                     &camera_id,
@@ -216,6 +234,7 @@ where
                 Ok(ServiceEvent::AuthConfigReloaded)
             }
             ServiceRequest::UpdateSettings { patch } => {
+                self.invalidate_auth_state();
                 self.grant_issuer.update_settings(&patch)?;
                 Ok(ServiceEvent::AuthConfigReloaded)
             }
@@ -250,6 +269,13 @@ where
         }
     }
 
+    fn invalidate_auth_state(&mut self) {
+        // Invalidate before the fallible reload. A failed change must not leave
+        // grants authorized under the previous policy redeemable.
+        self.grant_registry.revoke_all_grants();
+        self.pending_auth_sessions.clear();
+    }
+
     fn handle_wake_auth(
         &mut self,
         session_id: SessionId,
@@ -266,11 +292,18 @@ where
 
         match grant_result {
             AuthGrantIssueResult::Issued(grant) => {
-                self.grant_registry.insert_issued_grant(grant.clone())?;
+                self.pending_auth_sessions.remove(&session_id);
+                self.grant_registry
+                    .insert_issued_grant(grant.clone(), self.clock.now_unix_ms())?;
                 Ok(ServiceEvent::AuthSucceeded { grant })
             }
-            AuthGrantIssueResult::Started => Ok(ServiceEvent::AuthStarted { session_id }),
+            AuthGrantIssueResult::Started => {
+                self.pending_auth_sessions
+                    .insert(session_id.clone(), issued_at_unix_ms);
+                Ok(ServiceEvent::AuthStarted { session_id })
+            }
             AuthGrantIssueResult::Failed(reason) => {
+                self.pending_auth_sessions.remove(&session_id);
                 Ok(ServiceEvent::AuthFailed { session_id, reason })
             }
         }
@@ -280,6 +313,12 @@ where
         &mut self,
         session_id: SessionId,
     ) -> Result<ServiceEvent, ProtocolError> {
+        if !self.pending_auth_sessions.contains_key(&session_id) {
+            return Ok(ServiceEvent::AuthFailed {
+                session_id,
+                reason: AuthFailureReason::Cancelled,
+            });
+        }
         let issued_at_unix_ms = self.clock.now_unix_ms();
         let Some(grant_result) = self
             .grant_issuer
@@ -287,10 +326,12 @@ where
         else {
             return Ok(ServiceEvent::AuthStarted { session_id });
         };
+        self.pending_auth_sessions.remove(&session_id);
 
         match grant_result {
             Ok(grant) => {
-                self.grant_registry.insert_issued_grant(grant.clone())?;
+                self.grant_registry
+                    .insert_issued_grant(grant.clone(), self.clock.now_unix_ms())?;
                 Ok(ServiceEvent::AuthSucceeded { grant })
             }
             Err(reason) => Ok(ServiceEvent::AuthFailed { session_id, reason }),
@@ -615,7 +656,7 @@ mod tests {
                 session_id: SessionId("session-1".to_owned()),
             }
         );
-        assert_eq!(fetch_result, Err(ProtocolError::InvalidMessage));
+        assert_eq!(fetch_result, Err(ProtocolError::Unauthorized));
         Ok(())
     }
 
@@ -631,6 +672,200 @@ mod tests {
 
         assert_eq!(event, ServiceEvent::AuthConfigReloaded);
         assert_eq!(handler.grant_issuer.reload_count, 1);
+        Ok(())
+    }
+
+    struct ConfigurationChangingGrantIssuer {
+        fail_change: bool,
+        issued_count: usize,
+    }
+
+    impl AuthGrantIssuer for ConfigurationChangingGrantIssuer {
+        fn issue_auth_grant(
+            &mut self,
+            session_id: &SessionId,
+            source: AuthSource,
+            trigger_source: AuthTriggerSource,
+            issued_at_unix_ms: i64,
+        ) -> AuthGrantIssueResult {
+            self.issued_count += 1;
+            let mut result = SuccessfulGrantIssuer.issue_auth_grant(
+                session_id,
+                source,
+                trigger_source,
+                issued_at_unix_ms,
+            );
+            if let AuthGrantIssueResult::Issued(grant) = &mut result {
+                grant.grant_id = GrantId(format!("grant-{}", self.issued_count));
+            }
+            result
+        }
+
+        fn reload_auth_config(&mut self) -> Result<(), ProtocolError> {
+            if self.fail_change {
+                Err(ProtocolError::InvalidMessage)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn apply_local_camera_auth_config(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<(), ProtocolError> {
+            self.reload_auth_config()
+        }
+
+        fn update_settings(
+            &mut self,
+            _: &control_protocol::ControlSettingsPatch,
+        ) -> Result<(), ProtocolError> {
+            self.reload_auth_config()
+        }
+    }
+
+    fn assert_configuration_change_revokes_issued_grants(
+        fail_change: bool,
+    ) -> Result<(), ProtocolError> {
+        for change_kind in 0..3 {
+            let mut handler = ServiceRequestHandler::new(
+                ConfigurationChangingGrantIssuer {
+                    fail_change,
+                    issued_count: 0,
+                },
+                FixedCredentialResolver,
+                FixedClock { now_unix_ms: 1_000 },
+            );
+            let session_id = SessionId("reload-session".to_owned());
+            assert!(matches!(
+                handler.handle_request(ServiceRequest::WakeAuth {
+                    session_id: session_id.clone(),
+                    source: AuthSource::LocalCamera,
+                    trigger_source: AuthTriggerSource::CredentialScreenEntered,
+                })?,
+                ServiceEvent::AuthSucceeded { .. }
+            ));
+            let change = match change_kind {
+                0 => ServiceRequest::ReloadAuthConfig,
+                1 => ServiceRequest::UpdateSettings {
+                    patch: control_protocol::ControlSettingsPatch {
+                        intruder_snap_enabled: Some(false),
+                        ..Default::default()
+                    },
+                },
+                _ => ServiceRequest::ApplyLocalCameraAuthConfig {
+                    template_path: "template.json".to_owned(),
+                    camera_id: "opencv-index:0".to_owned(),
+                    install_dir: "install".to_owned(),
+                },
+            };
+            let changed = handler.handle_request(change);
+            if fail_change {
+                assert_eq!(changed, Err(ProtocolError::InvalidMessage));
+            } else {
+                assert_eq!(changed, Ok(ServiceEvent::AuthConfigReloaded));
+            }
+            assert_eq!(
+                handler.handle_request(ServiceRequest::FetchCredential {
+                    session_id: session_id.clone(),
+                    grant_id: GrantId("grant-1".to_owned()),
+                    nonce: Nonce("nonce-1".to_owned()),
+                }),
+                Err(ProtocolError::Unauthorized)
+            );
+            assert_eq!(
+                handler.handle_request(ServiceRequest::FetchCredentialMaterial {
+                    session_id: session_id.clone(),
+                    grant_id: GrantId("grant-1".to_owned()),
+                    nonce: Nonce("nonce-1".to_owned()),
+                }),
+                Err(ProtocolError::Unauthorized)
+            );
+
+            // Invalidating old grants does not disable subsequent authentication.
+            if !fail_change {
+                handler.handle_request(ServiceRequest::WakeAuth {
+                    session_id: session_id.clone(),
+                    source: AuthSource::LocalCamera,
+                    trigger_source: AuthTriggerSource::CredentialScreenEntered,
+                })?;
+                assert!(matches!(
+                    handler.handle_request(ServiceRequest::FetchCredentialMaterial {
+                        session_id,
+                        grant_id: GrantId("grant-2".to_owned()),
+                        nonce: Nonce("nonce-1".to_owned()),
+                    })?,
+                    ServiceEvent::CredentialMaterialReady { .. }
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn failed_configuration_change_revokes_already_issued_grants() -> Result<(), ProtocolError> {
+        assert_configuration_change_revokes_issued_grants(true)
+    }
+
+    #[test]
+    fn successful_configuration_change_requires_fresh_grants() -> Result<(), ProtocolError> {
+        assert_configuration_change_revokes_issued_grants(false)
+    }
+
+    #[test]
+    fn reload_does_not_reimport_an_old_background_auth_result() -> Result<(), ProtocolError> {
+        let mut handler = ServiceRequestHandler::new(
+            StartedThenSuccessfulGrantIssuer,
+            FixedCredentialResolver,
+            FixedClock { now_unix_ms: 1_000 },
+        );
+        let session_id = SessionId("reload-session".to_owned());
+        handler.handle_request(ServiceRequest::WakeAuth {
+            session_id: session_id.clone(),
+            source: AuthSource::LocalCamera,
+            trigger_source: AuthTriggerSource::CredentialScreenEntered,
+        })?;
+        handler.handle_request(ServiceRequest::ReloadAuthConfig)?;
+        assert_eq!(
+            handler.handle_request(ServiceRequest::FetchAuthResult {
+                session_id: session_id.clone()
+            })?,
+            ServiceEvent::AuthFailed {
+                session_id,
+                reason: AuthFailureReason::Cancelled
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn abandoned_pending_sessions_expire_on_subsequent_requests() -> Result<(), ProtocolError> {
+        let mut handler = ServiceRequestHandler::new(
+            StartedThenSuccessfulGrantIssuer,
+            FixedCredentialResolver,
+            FixedClock { now_unix_ms: 1_000 },
+        );
+        let session_id = SessionId("abandoned-session".to_owned());
+        handler.handle_request(ServiceRequest::WakeAuth {
+            session_id: session_id.clone(),
+            source: AuthSource::LocalCamera,
+            trigger_source: AuthTriggerSource::CredentialScreenEntered,
+        })?;
+        assert_eq!(handler.pending_auth_sessions.len(), 1);
+        handler.clock.now_unix_ms += PENDING_AUTH_RESULT_TTL_MS;
+        handler.handle_request(ServiceRequest::HealthCheck)?;
+        assert!(handler.pending_auth_sessions.is_empty());
+        assert_eq!(
+            handler.handle_request(ServiceRequest::FetchAuthResult {
+                session_id: session_id.clone()
+            })?,
+            ServiceEvent::AuthFailed {
+                session_id,
+                reason: AuthFailureReason::Cancelled
+            }
+        );
         Ok(())
     }
 }

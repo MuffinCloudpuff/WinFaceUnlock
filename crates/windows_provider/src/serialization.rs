@@ -3,7 +3,7 @@
 use windows::Win32::{
     Foundation::E_FAIL,
     Security::Credentials::{CRED_PACK_FLAGS, CredPackAuthenticationBufferW},
-    System::Com::CoTaskMemAlloc,
+    System::Com::{CoTaskMemAlloc, CoTaskMemFree},
     UI::Shell::CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION,
 };
 use windows_core::{PCWSTR, Result};
@@ -49,7 +49,10 @@ pub fn pack_credential_material(
         )
     };
     password_wide.fill(0);
-    pack_result?;
+    if let Err(error) = pack_result {
+        unsafe { CoTaskMemFree(Some(buffer.cast())) };
+        return Err(error);
+    }
 
     Ok(CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION {
         ulAuthenticationPackage: auth_package_id,

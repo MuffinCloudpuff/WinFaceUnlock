@@ -1,25 +1,35 @@
 import { motion, AnimatePresence } from 'motion/react';
-import { Camera, Keyboard, ScanFace, ShieldAlert, UserCog, User, X } from 'lucide-react';
+import { Camera, Keyboard, ScanFace, ShieldAlert, Trash2, UserCog, User, X } from 'lucide-react';
 import { useSettingsArea, type TriggerMode } from '../bindings/useSettingsArea';
 
 export function SettingsArea() {
   const {
     autoLock,
     intruderSnap,
+    intruderSnapSaving,
     triggerMode,
     logonFaceMatchThreshold,
+    intruderSimilarityThreshold,
     enrolledFaces,
     intruders,
+    actionError,
     setIntruderSnap,
     changeAutoLock: handleAutoLockChange,
     changeTriggerMode: handleTriggerModeChange,
     changeLogonFaceMatchThreshold: handleLogonFaceMatchThresholdChange,
+    changeIntruderSimilarityThreshold: handleIntruderSimilarityThresholdChange,
     deleteFace: handleFaceDelete,
     deleteIntruder,
+    clearIntruders,
   } = useSettingsArea();
 
   return (
     <div className="relative z-50 flex min-h-0 flex-1 flex-col items-center justify-start gap-8 overflow-y-auto overscroll-contain px-6 pt-8 pb-20 w-full max-w-2xl mx-auto scrollbar-hide">
+      {actionError && (
+        <div role="alert" className="w-full rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {actionError}
+        </div>
+      )}
       
       {/* 核心安全控制 */}
       <motion.div 
@@ -53,11 +63,11 @@ export function SettingsArea() {
                      <ShieldAlert className="w-5 h-5" />
                   </div>
                   <div className="flex flex-col">
-                     <span className="text-base font-medium text-slate-800">防偷窥 / 入侵者抓拍</span>
-                     <span className="text-xs text-slate-500">他人试图解锁或偷看屏幕时自动拍下照片</span>
+                   <span className="text-base font-medium text-slate-800">防偷窥 / 入侵者抓拍</span>
+                   <span className="text-xs text-slate-500" role="status">{intruderSnapSaving ? '正在等待后台确认抓拍设置…' : '关闭后隐藏历史记录且不再保存新抓拍；离座落锁由上方开关单独控制'}</span>
                   </div>
                </div>
-               <Switch checked={intruderSnap} onChange={setIntruderSnap} />
+               <Switch checked={intruderSnap} onChange={setIntruderSnap} disabled={intruderSnapSaving} />
             </div>
 
             <AnimatePresence>
@@ -68,6 +78,21 @@ export function SettingsArea() {
                   exit={{ height: 0, opacity: 0 }}
                   className="px-[60px] pb-4 overflow-hidden"
                 >
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <span className="text-xs font-medium text-slate-500">历史抓拍</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (window.confirm('确定清空全部历史抓拍吗？此操作无法恢复。')) {
+                          clearIntruders();
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-white px-2 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-50"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      清空全部
+                    </button>
+                  </div>
                   <div className="flex gap-4 overflow-x-auto pb-2 scrollbar-hide">
                     {intruders.map(intruder => (
                       <div key={intruder.id} className="relative flex flex-col items-center gap-2 group px-1 pt-1">
@@ -95,6 +120,39 @@ export function SettingsArea() {
                 </motion.div>
               )}
             </AnimatePresence>
+
+            {intruderSnap && (
+              <div className="flex flex-col gap-3 border-t border-slate-100 px-4 pb-4 pt-3">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex flex-col">
+                    <span className="text-sm font-medium text-slate-700">入侵抓拍灵敏度</span>
+                    <span className="text-xs text-slate-500">调高更容易将陌生面孔判为入侵者，不影响登录匹配</span>
+                  </div>
+                  <span className="min-w-14 rounded-lg border border-slate-200 bg-white/70 px-2 py-1 text-center text-sm font-semibold text-slate-700">
+                    {intruderSimilarityThreshold.toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex flex-col gap-2">
+                  <input
+                    type="range"
+                    min="0.10"
+                    max="0.60"
+                    step="0.01"
+                    value={intruderSimilarityThreshold}
+                    aria-label="入侵抓拍灵敏度"
+                    onChange={(event) => {
+                      handleIntruderSimilarityThresholdChange(Number(event.currentTarget.value));
+                    }}
+                    className="h-2 w-full cursor-pointer accent-red-500"
+                  />
+                  <div className="relative h-4 text-[11px] font-medium text-slate-400">
+                    <span className="absolute left-0">低 0.10</span>
+                    <span className="absolute left-[40%] -translate-x-1/2">默认 0.30</span>
+                    <span className="absolute right-0">高 0.60</span>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
           
         </div>
@@ -218,7 +276,7 @@ export function SettingsArea() {
                />
                <div className="relative h-4 text-[11px] font-medium text-slate-400 mt-1">
                  <span className="absolute left-0">宽松 0.30</span>
-                 <span className="absolute left-[75%] -translate-x-1/2">默认 0.75</span>
+                 <span className="absolute left-[58.333%] -translate-x-1/2">默认 0.65</span>
                  <span className="absolute right-0">严格 0.90</span>
                </div>
              </div>
@@ -231,11 +289,15 @@ export function SettingsArea() {
   );
 }
 
-function Switch({ checked, onChange }: { checked: boolean, onChange: (c: boolean) => void }) {
+function Switch({ checked, onChange, disabled = false }: { checked: boolean, onChange: (c: boolean) => void, disabled?: boolean }) {
   return (
     <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors outline-none focus:outline-none ${
+      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors outline-none focus:outline-none disabled:cursor-wait disabled:opacity-60 ${
         checked ? 'bg-[#007acc]' : 'bg-slate-300'
       }`}
     >

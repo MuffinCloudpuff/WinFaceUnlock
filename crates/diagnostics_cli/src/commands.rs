@@ -81,7 +81,7 @@ use crate::threshold_preview::{
 const DEFAULT_YUNET_MODEL_PATH: &str = "models/face_detection_yunet_2023mar.onnx";
 const DEFAULT_SFACE_MODEL_PATH: &str = "models/ghostfacenet_v1_stride2.onnx";
 const DEFAULT_MINIFASNET_MODEL_PATH: &str = "models/minifasnet_v2.onnx";
-const DEFAULT_PROJECT_FACE_MATCH_THRESHOLD: f32 = 0.75;
+const DEFAULT_PROJECT_FACE_MATCH_THRESHOLD: f32 = 0.65;
 const DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD: f32 = 0.50;
 const ENROLLMENT_STATUS_FILE_NAME: &str = "enrollment_status.json";
 const PREVIEW_EVENT_PREFIX: &str = "WINFACEUNLOCK_PREVIEW_FRAME ";
@@ -367,8 +367,12 @@ fn run_enroll_windows_credential(args: &[String]) -> Result<(), DiagnosticError>
             .unwrap_or_else(|| format!("windows-credential-{}", user_id.0)),
     );
     let store_paths = argument_value(args, "--store-dir")
-        .map(|path| ServiceCredentialStorePaths::from_store_dir(PathBuf::from(path)))
-        .unwrap_or_else(ServiceCredentialStorePaths::from_environment_or_default);
+        .map(|path| {
+            Ok(ServiceCredentialStorePaths::from_store_dir(PathBuf::from(
+                path,
+            )))
+        })
+        .unwrap_or_else(ServiceCredentialStorePaths::from_environment_or_default)?;
 
     println!(
         "credential_store_database: {}",
@@ -568,64 +572,58 @@ fn run_list_cameras(args: &[String]) -> Result<(), DiagnosticError> {
 }
 
 fn run_camera_open_benchmark(args: &[String]) -> Result<(), DiagnosticError> {
-    use opencv::{
-        prelude::{MatTraitConst, VideoCaptureTrait, VideoCaptureTraitConst},
-        videoio::{self, VideoCapture},
-    };
     use std::time::Instant;
+    use video_provider::OpenCvCameraBackend;
 
-    let camera_id = selected_camera_id(args, &[])?;
-    let camera_index = camera_id.camera_index()?;
+    let config = camera_provider_config(args)?;
+    let provider = OpenCvCameraProvider::new(config.clone());
+    let selected = selected_camera_id_without_forced_scan(args, &provider)?;
+    let camera_id = video_provider::resolve_camera_id(&selected)?;
+    println!("camera_id: {}", camera_id.0);
     let backend_filter = argument_value(args, "--backend");
-    let backends = [
-        ("msmf", videoio::CAP_MSMF),
-        ("dshow", videoio::CAP_DSHOW),
-        ("any", videoio::CAP_ANY),
-    ];
-
-    for (backend_name, backend) in backends {
+    if backend_filter.is_some_and(|filter| !matches!(filter, "msmf" | "dshow" | "auto")) {
+        return Err(DiagnosticError::InvalidArgument);
+    }
+    let backends = if backend_filter == Some("auto") {
+        vec![None]
+    } else {
+        vec![
+            Some(OpenCvCameraBackend::Msmf),
+            Some(OpenCvCameraBackend::Dshow),
+        ]
+    };
+    for backend in backends {
+        let backend_name = backend.map_or("auto", OpenCvCameraBackend::as_str);
         if backend_filter.is_some_and(|filter| filter != backend_name) {
             continue;
         }
-
+        let mut capture = OpenCvCameraProvider::new(config.clone());
         let open_started = Instant::now();
-        let capture_result = VideoCapture::new(camera_index, backend);
-        let open_ms = open_started.elapsed().as_millis();
-        let Ok(mut capture) = capture_result else {
-            println!("backend={backend_name} open_ms={open_ms} opened=false error=new_failed");
-            continue;
+        let result = match backend {
+            Some(backend) => capture.open_backend(&camera_id, backend),
+            None => capture.open(&camera_id),
         };
-
-        if let Some(width) = optional_u32(args, "--frame-width")? {
-            let _ = capture.set(videoio::CAP_PROP_FRAME_WIDTH, f64::from(width));
-        }
-        if let Some(height) = optional_u32(args, "--frame-height")? {
-            let _ = capture.set(videoio::CAP_PROP_FRAME_HEIGHT, f64::from(height));
-        }
-
-        let opened = capture.is_opened().unwrap_or(false);
-        if !opened {
-            println!("backend={backend_name} open_ms={open_ms} opened=false");
-            let _ = capture.release();
+        // Includes worker startup, backend open, and first readable-frame warm-up.
+        let open_ms = open_started.elapsed().as_millis();
+        if let Err(error) = result {
+            println!("backend={backend_name} open_ms={open_ms} opened=false error={error:?}");
             continue;
         }
-
         let read_started = Instant::now();
-        let mut frame = opencv::core::Mat::default();
-        let read_ok = capture.read(&mut frame).unwrap_or(false);
+        let frame = capture.read_frame()?;
         let read_ms = read_started.elapsed().as_millis();
         println!(
-            "backend={backend_name} open_ms={open_ms} opened=true read_ms={read_ms} read_ok={read_ok} width={} height={} empty={}",
-            frame.cols(),
-            frame.rows(),
-            frame.empty()
+            "backend={backend_name} selected_backend={} open_ms={open_ms} opened=true read_ms={read_ms} read_ok=true width={} height={} empty=false",
+            capture
+                .opened_backend()
+                .map_or("unknown", OpenCvCameraBackend::as_str),
+            frame.width,
+            frame.height
         );
-        let _ = capture.release();
+        capture.close();
     }
-
     Ok(())
 }
-
 fn run_test_face(args: &[String]) -> Result<(), DiagnosticError> {
     let image_path = argument_value(args, "--image").ok_or(DiagnosticError::InvalidArgument)?;
     let mut model_provider = build_loaded_model_provider(args)?;
@@ -2905,7 +2903,7 @@ fn print_usage() {
         "Usage: diagnostics_cli test-camera [--camera-id opencv-index:0] [--frame-width 640 --frame-height 480]"
     );
     println!(
-        "Usage: diagnostics_cli camera-open-benchmark [--camera-id opencv-index:0] [--backend msmf|dshow|any] [--frame-width 640 --frame-height 480]"
+        "Usage: diagnostics_cli camera-open-benchmark [--camera-id opencv-index:0] [--backend auto|msmf|dshow] [--frame-width 640 --frame-height 480]"
     );
     println!(
         "Usage: diagnostics_cli test-face --image <path> [--yunet-model <onnx>] [--sface-model <onnx>]"

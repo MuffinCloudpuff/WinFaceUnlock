@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     thread,
@@ -29,7 +29,27 @@ where
     }
 
     pub fn try_with_issuer<R>(&self, read: impl FnOnce(&I) -> R) -> Option<R> {
-        self.issuer.lock().ok().map(|issuer| read(&issuer))
+        self.issuer.try_lock().ok().map(|issuer| read(&issuer))
+    }
+
+    pub(crate) fn invalidate_results(&mut self) {
+        // In-flight jobs retain the old collections. Replacing them, rather than
+        // clearing them, prevents a late publication from restoring a revoked
+        // result while preserving the loaded issuer for fresh authentication.
+        self.running_sessions = Arc::new(Mutex::new(HashSet::new()));
+        self.cached_grant_outcomes = Arc::new(Mutex::new(HashMap::new()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_cached_grant_for_test(issuer: I, grant: AuthGrant) -> Self {
+        Self {
+            issuer: Arc::new(Mutex::new(issuer)),
+            running_sessions: Arc::new(Mutex::new(HashSet::new())),
+            cached_grant_outcomes: Arc::new(Mutex::new(HashMap::from([(
+                grant.session_id.clone(),
+                Ok(grant),
+            )]))),
+        }
     }
 }
 
@@ -214,6 +234,24 @@ mod tests {
 
     struct ImmediateIssuer;
 
+    #[test]
+    fn inspecting_busy_issuer_does_not_wait_for_authentication()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let runner = Arc::new(CameraAuthOrchestrator::new(ImmediateIssuer));
+        let worker_runner = Arc::clone(&runner);
+        let guard = runner.issuer.lock().map_err(|_| "issuer lock poisoned")?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = thread::spawn(move || {
+            let result = worker_runner.try_with_issuer(|_| true);
+            let _ = sender.send(result);
+        });
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(1));
+        drop(guard);
+        assert!(reader.join().is_ok());
+        assert_eq!(result?, None);
+        Ok(())
+    }
+
     impl AuthGrantIssuer for ImmediateIssuer {
         fn issue_auth_grant(
             &mut self,
@@ -236,6 +274,111 @@ mod tests {
                 expires_at_unix_ms: issued_at_unix_ms + 5_000,
             })
         }
+    }
+
+    #[test]
+    fn invalidation_discards_cached_grants() -> Result<(), Box<dyn std::error::Error>> {
+        let session_id = SessionId("settings-changed".to_owned());
+        let AuthGrantIssueResult::Issued(grant) = ImmediateIssuer.issue_auth_grant(
+            &session_id,
+            AuthSource::LocalCamera,
+            AuthTriggerSource::CredentialScreenEntered,
+            1_000,
+        ) else {
+            return Err("test issuer did not issue a grant".into());
+        };
+        let mut runner = CameraAuthOrchestrator::with_cached_grant_for_test(ImmediateIssuer, grant);
+
+        runner.invalidate_results();
+
+        assert_eq!(runner.fetch_auth_result(&session_id, 1_000), None);
+        Ok(())
+    }
+
+    #[test]
+    fn invalidation_isolates_late_worker_results_and_allows_fresh_authentication()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct ControlledIssuer {
+            started: std::sync::mpsc::Sender<i64>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+
+        impl AuthGrantIssuer for ControlledIssuer {
+            fn issue_auth_grant(
+                &mut self,
+                session_id: &SessionId,
+                source: AuthSource,
+                trigger_source: AuthTriggerSource,
+                issued_at_unix_ms: i64,
+            ) -> AuthGrantIssueResult {
+                let _ = self.started.send(issued_at_unix_ms);
+                if self
+                    .release
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .is_err()
+                {
+                    return AuthGrantIssueResult::Failed(AuthFailureReason::InternalError);
+                }
+                ImmediateIssuer.issue_auth_grant(
+                    session_id,
+                    source,
+                    trigger_source,
+                    issued_at_unix_ms,
+                )
+            }
+        }
+
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let mut runner = CameraAuthOrchestrator::new(ControlledIssuer {
+            started: started_sender,
+            release: release_receiver,
+        });
+        let session_id = SessionId("in-flight-settings-change".to_owned());
+        assert_eq!(
+            runner.issue_auth_grant(
+                &session_id,
+                AuthSource::LocalCamera,
+                AuthTriggerSource::CredentialScreenEntered,
+                1_000,
+            ),
+            AuthGrantIssueResult::Started
+        );
+        assert_eq!(
+            started_receiver.recv_timeout(std::time::Duration::from_secs(1))?,
+            1_000
+        );
+
+        runner.invalidate_results();
+        assert_eq!(
+            runner.issue_auth_grant(
+                &session_id,
+                AuthSource::LocalCamera,
+                AuthTriggerSource::CredentialScreenEntered,
+                2_000,
+            ),
+            AuthGrantIssueResult::Started
+        );
+        release_sender.send(())?;
+        // The second job can only enter the shared issuer after the first job
+        // has published its result into its now-unreachable cache.
+        assert_eq!(
+            started_receiver.recv_timeout(std::time::Duration::from_secs(1))?,
+            2_000
+        );
+        assert_eq!(runner.fetch_auth_result(&session_id, 2_000), None);
+        release_sender.send(())?;
+
+        let mut result = None;
+        for _ in 0..100 {
+            result = runner.fetch_auth_result(&session_id, 2_000);
+            if result.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(result, Some(Ok(grant)) if grant.issued_at_unix_ms == 2_000));
+        Ok(())
     }
 
     #[test]

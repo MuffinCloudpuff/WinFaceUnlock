@@ -1,4 +1,5 @@
 import type {
+  ClearIntruderSnapshotsOutcome,
   DeleteIntruderSnapshotOutcome,
   DeleteIntruderSnapshotPayload,
   ListIntruderSnapshotsResponse,
@@ -22,5 +23,13 @@ export function deleteIntruderSnapshot(
     transport,
     'delete_intruder_snapshot',
     payload,
+  );
+}
+
+export function clearIntruderSnapshots(transport: ControlTransport) {
+  return sendControlRequest<ClearIntruderSnapshotsOutcome>(
+    transport,
+    'clear_intruder_snapshots',
+    {},
   );
 }

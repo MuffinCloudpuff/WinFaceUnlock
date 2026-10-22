@@ -33,7 +33,11 @@ elseif (-not (Test-Path $WinUiOutputDir -PathType Container)) {
 if (-not $SkipTauriBuild) {
     Push-Location $ControlTauriDir
     try {
-        & npm.cmd run tauri:build -- --target x86_64-pc-windows-msvc --no-bundle
+        $tauriBuildArgs = @("--target", "x86_64-pc-windows-msvc", "--no-bundle")
+        if ($Configuration -eq "Debug") {
+            $tauriBuildArgs += "--debug"
+        }
+        & npm.cmd run tauri:build -- @tauriBuildArgs
         if ($LASTEXITCODE -ne 0) {
             throw "Tauri control app build failed with exit code $LASTEXITCODE"
         }
@@ -54,7 +58,7 @@ Get-ChildItem -LiteralPath $ControlTauriOutputDir -File | Where-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $ControlAppOutputDir -Force
 }
 
-& powershell -ExecutionPolicy Bypass -File $PayloadScript -ControlAppPublishDir $ControlAppOutputDir
+& powershell -ExecutionPolicy Bypass -File $PayloadScript -ControlAppPublishDir $ControlAppOutputDir -Configuration ($Configuration.ToLowerInvariant())
 if ($LASTEXITCODE -ne 0) {
     throw "Setup payload build failed with exit code $LASTEXITCODE"
 }

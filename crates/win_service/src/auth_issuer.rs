@@ -1,5 +1,6 @@
 use std::{
     fs,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -32,13 +33,20 @@ use crate::{
     service_config::{LocalCameraAuthConfig, ServiceAuthConfig, ServiceAuthMode},
     service_log::{write_service_event, write_service_event_detail},
     simulated_auth::SimulatedAuthGrantIssuer,
+    snapshot_policy::{SnapshotOutcome, SnapshotPolicy},
 };
 use std::time::Duration;
+
+// IPC retains grant identities across issuer replacement. Never reset this
+// sequence while the service process and its authorization registry are alive.
+static NEXT_CAMERA_GRANT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct DevelopmentAuthGrantIssuer {
     manual_test_user_id: UserId,
     manual_test_issuer: SimulatedAuthGrantIssuer,
     local_camera_issuer: Option<CameraAuthOrchestrator<LocalCameraAuthGrantIssuer>>,
+    snapshot_policy: SnapshotPolicy,
+    auth_mode_unavailable: bool,
 }
 
 impl DevelopmentAuthGrantIssuer {
@@ -50,19 +58,46 @@ impl DevelopmentAuthGrantIssuer {
         manual_test_user_id: UserId,
         config: ServiceAuthConfig,
     ) -> Result<Self, ProtocolError> {
-        let local_camera_issuer = local_camera_issuer_from_config(config)?;
+        let auth_mode_unavailable =
+            matches!(config.auth_mode, ServiceAuthMode::LocalCameraUnavailable);
+        let snapshot_policy = snapshot_policy_from_config(&config);
+        let local_camera_issuer = local_camera_issuer_from_config(config, snapshot_policy.clone())?;
 
         Ok(Self {
             manual_test_issuer: SimulatedAuthGrantIssuer::for_user(manual_test_user_id.clone()),
             manual_test_user_id,
             local_camera_issuer,
+            snapshot_policy,
+            auth_mode_unavailable,
         })
     }
 
     fn reload_from_environment(&mut self) -> Result<(), ProtocolError> {
+        self.reload_with_config_loader(ServiceAuthConfig::from_environment)
+    }
+
+    fn reload_with_config_loader(
+        &mut self,
+        load_config: impl FnOnce() -> Result<ServiceAuthConfig, ProtocolError>,
+    ) -> Result<(), ProtocolError> {
+        // Old jobs can outlive their orchestrator. Revoke before any fallible reload
+        // so even a failed reload cannot leave old workers saving private images.
+        self.snapshot_policy.revoke();
         let previous_camera_id = self.current_local_camera_id();
-        self.local_camera_issuer =
-            local_camera_issuer_from_config(ServiceAuthConfig::from_environment()?)?;
+        // Detach every old result cache before loading persisted settings or
+        // templates. A failed reload must not continue authorizing with old state.
+        self.local_camera_issuer = None;
+        self.auth_mode_unavailable = true;
+        let config = load_config()?;
+        if matches!(config.auth_mode, ServiceAuthMode::LocalCameraUnavailable) {
+            write_service_event("AuthIssuer.ReloadUnavailable");
+            return Err(ProtocolError::TransportUnavailable);
+        }
+        let snapshot_policy = snapshot_policy_from_config(&config);
+        let local_camera_issuer = local_camera_issuer_from_config(config, snapshot_policy.clone())?;
+        self.local_camera_issuer = local_camera_issuer;
+        self.snapshot_policy = snapshot_policy;
+        self.auth_mode_unavailable = false;
         let current_camera_id = self.current_local_camera_id();
         write_service_event_detail(
             "AuthIssuer.Reloaded",
@@ -81,6 +116,12 @@ impl DevelopmentAuthGrantIssuer {
             .as_ref()
             .and_then(|issuer| issuer.try_with_issuer(|inner| inner.camera_id().0.clone()))
     }
+
+    fn invalidate_auth_results(&mut self) {
+        if let Some(issuer) = self.local_camera_issuer.as_mut() {
+            issuer.invalidate_results();
+        }
+    }
 }
 
 impl AuthGrantIssuer for DevelopmentAuthGrantIssuer {
@@ -91,6 +132,9 @@ impl AuthGrantIssuer for DevelopmentAuthGrantIssuer {
         trigger_source: AuthTriggerSource,
         issued_at_unix_ms: i64,
     ) -> AuthGrantIssueResult {
+        if self.auth_mode_unavailable {
+            return AuthGrantIssueResult::Failed(AuthFailureReason::InternalError);
+        }
         write_service_event_detail(
             "AuthTrigger.Received",
             format!(
@@ -128,6 +172,9 @@ impl AuthGrantIssuer for DevelopmentAuthGrantIssuer {
         session_id: &SessionId,
         issued_at_unix_ms: i64,
     ) -> Option<Result<AuthGrant, AuthFailureReason>> {
+        if self.auth_mode_unavailable {
+            return Some(Err(AuthFailureReason::InternalError));
+        }
         self.local_camera_issuer
             .as_mut()
             .and_then(|issuer| issuer.fetch_auth_result(session_id, issued_at_unix_ms))
@@ -150,12 +197,15 @@ impl AuthGrantIssuer for DevelopmentAuthGrantIssuer {
         install_dir: &str,
     ) -> Result<(), ProtocolError> {
         use control_status::WindowsFaceTemplateStatusStore;
+        self.invalidate_auth_results();
         let template_store = WindowsFaceTemplateStatusStore::from_environment_or_default();
         let install_path = std::path::Path::new(install_dir);
         let template_path = std::path::Path::new(template_path);
+        let camera_id = video_provider::resolve_camera_id(&CameraId(camera_id.to_owned()))
+            .map_err(|_| ProtocolError::InvalidMessage)?;
 
         template_store
-            .apply_local_camera_auth_config(template_path, camera_id, install_path)
+            .apply_local_camera_auth_config(template_path, &camera_id.0, install_path)
             .map_err(|e| {
                 write_service_event_detail(
                     "AuthIssuer.ApplyLocalCameraAuthConfigFailed",
@@ -174,12 +224,31 @@ impl AuthGrantIssuer for DevelopmentAuthGrantIssuer {
         use control_status::WindowsControlSettingsStore;
         let settings_store = WindowsControlSettingsStore::new();
 
+        if !patch.has_updates() || !patch.has_valid_values() {
+            return Err(ProtocolError::InvalidMessage);
+        }
+        self.invalidate_auth_results();
+        if patch.intruder_snap_enabled == Some(false) {
+            // Revoke before persistence: a failed disk/registry write must not
+            // allow an in-flight task to continue capturing after an opt-out.
+            self.snapshot_policy.revoke();
+        }
+
         settings_store.update_settings(patch).map_err(|e| {
             write_service_event_detail("AuthIssuer.UpdateSettingsFailed", format!("{:?}", e));
             ProtocolError::InvalidMessage
         })?;
 
-        // We only reload if face match threshold changed, but for simplicity we can just reload anyway
+        if patch.intruder_snap_enabled == Some(false)
+            && patch.presence_lock_enabled.is_none()
+            && patch.logon_wake_mode.is_none()
+            && patch.logon_face_match_threshold.is_none()
+            && patch.intruder_similarity_threshold.is_none()
+        {
+            // Disabling capture needs neither a camera nor a valid face model.
+            // The revocation barrier above is already the effective runtime change.
+            return Ok(());
+        }
         self.reload_from_environment()
     }
 
@@ -192,7 +261,7 @@ impl AuthGrantIssuer for DevelopmentAuthGrantIssuer {
             ServiceCredentialStorePaths, is_credential_secret_configured,
         };
 
-        let store_paths = ServiceCredentialStorePaths::from_environment_or_default();
+        let store_paths = ServiceCredentialStorePaths::from_environment_or_default()?;
         is_credential_secret_configured(&store_paths, user_id, credential_ref)
     }
 
@@ -209,7 +278,7 @@ impl AuthGrantIssuer for DevelopmentAuthGrantIssuer {
             ServiceCredentialStorePaths, WindowsCredentialEnrollment, enroll_windows_credential,
         };
 
-        let store_paths = ServiceCredentialStorePaths::from_environment_or_default();
+        let store_paths = ServiceCredentialStorePaths::from_environment_or_default()?;
         let enrollment = WindowsCredentialEnrollment {
             user_id: user_id.clone(),
             user_sid: user_sid.to_owned(),
@@ -231,13 +300,21 @@ impl AuthGrantIssuer for DevelopmentAuthGrantIssuer {
 
 fn local_camera_issuer_from_config(
     config: ServiceAuthConfig,
+    snapshot_policy: SnapshotPolicy,
 ) -> Result<Option<CameraAuthOrchestrator<LocalCameraAuthGrantIssuer>>, ProtocolError> {
     match config.auth_mode {
-        ServiceAuthMode::ManualTestOnly => Ok(None),
+        ServiceAuthMode::ManualTestOnly | ServiceAuthMode::LocalCameraUnavailable => Ok(None),
         ServiceAuthMode::LocalCamera(local_camera_config) => Ok(Some(CameraAuthOrchestrator::new(
-            LocalCameraAuthGrantIssuer::from_config(*local_camera_config)?,
+            LocalCameraAuthGrantIssuer::from_config(*local_camera_config, snapshot_policy)?,
         ))),
     }
+}
+
+fn snapshot_policy_from_config(config: &ServiceAuthConfig) -> SnapshotPolicy {
+    SnapshotPolicy::new(match &config.auth_mode {
+        ServiceAuthMode::ManualTestOnly | ServiceAuthMode::LocalCameraUnavailable => false,
+        ServiceAuthMode::LocalCamera(config) => config.intruder_snap_enabled,
+    })
 }
 
 fn optional_camera_id_for_log(camera_id: Option<&str>) -> &str {
@@ -253,8 +330,8 @@ struct LocalCameraAuthGrantIssuer {
     liveness_provider: MiniFasNetLivenessProvider,
     black_frame_filter: BlackFrameFilter,
     max_spoof_frame_ratio: f32,
-    intruder_snap_enabled: bool,
-    next_grant_sequence: u64,
+    snapshot_policy: SnapshotPolicy,
+    next_grant_sequence: &'static AtomicU64,
 }
 
 struct LocalCameraAuthenticationOutcome {
@@ -263,7 +340,10 @@ struct LocalCameraAuthenticationOutcome {
 }
 
 impl LocalCameraAuthGrantIssuer {
-    fn from_config(config: LocalCameraAuthConfig) -> Result<Self, ProtocolError> {
+    fn from_config(
+        config: LocalCameraAuthConfig,
+        snapshot_policy: SnapshotPolicy,
+    ) -> Result<Self, ProtocolError> {
         let templates = read_face_templates(&config.face_template_path)?;
         let mut camera_config = config.camera_config;
         apply_profile_to_config(&config.camera_id, &mut camera_config);
@@ -276,6 +356,7 @@ impl LocalCameraAuthGrantIssuer {
         let matcher = FaceTemplateMatcher::new(config.match_threshold);
         let attempt_policy = AttemptPolicy::new(AttemptPolicyConfig {
             required_consecutive_match_count: config.required_consecutive_match_count,
+            intruder_similarity_threshold: config.intruder_similarity_threshold,
             ..AttemptPolicyConfig::default()
         });
         let authenticator = FaceAuthenticator::new(model_provider, matcher, attempt_policy);
@@ -290,8 +371,8 @@ impl LocalCameraAuthGrantIssuer {
             liveness_provider,
             black_frame_filter: BlackFrameFilter::default(),
             max_spoof_frame_ratio: config.minifasnet_max_spoof_frame_ratio,
-            intruder_snap_enabled: config.intruder_snap_enabled,
-            next_grant_sequence: 1,
+            snapshot_policy,
+            next_grant_sequence: &NEXT_CAMERA_GRANT_SEQUENCE,
         })
     }
 
@@ -327,8 +408,7 @@ impl LocalCameraAuthGrantIssuer {
             "LocalCameraAuth.Started",
             format!("session_id={} camera_id={}", session_id.0, self.camera_id.0),
         );
-        let grant_sequence = self.next_grant_sequence;
-        self.next_grant_sequence = self.next_grant_sequence.saturating_add(1);
+        let grant_sequence = reserve_camera_grant_sequence(self.next_grant_sequence)?;
         let mut issued_grant = None;
         self.authenticate_from_camera(trigger_source, &mut |outcome| {
             let grant = build_auth_grant(session_id, source, grant_sequence, outcome);
@@ -400,8 +480,12 @@ impl LocalCameraAuthGrantIssuer {
             );
             AuthFailureReason::InternalError
         })?;
-        let mut camera_provider = OpenCvCameraProvider::new(self.camera_config.clone());
+        // Pick up refreshed backend preferences without requiring a service restart.
+        let mut camera_config = self.camera_config.clone();
+        apply_profile_to_config(&self.camera_id, &mut camera_config);
+        let mut camera_provider = OpenCvCameraProvider::new(camera_config);
         let auth_result = (|| {
+            let camera_open_started = std::time::Instant::now();
             write_service_event_detail(
                 "LocalCameraAuth.OpenCameraStarted",
                 format!("camera_id={}", self.camera_id.0),
@@ -409,7 +493,16 @@ impl LocalCameraAuthGrantIssuer {
             camera_provider
                 .open(&self.camera_id)
                 .map_err(video_error_to_auth_failure)?;
-            write_service_event("LocalCameraAuth.OpenCameraSucceeded");
+            write_service_event_detail(
+                "LocalCameraAuth.OpenCameraSucceeded",
+                format!(
+                    "backend={} open_ms={}",
+                    camera_provider
+                        .opened_backend()
+                        .map_or("unknown", |backend| backend.as_str()),
+                    camera_open_started.elapsed().as_millis(),
+                ),
+            );
             let mut last_rejection = AuthFailureReason::Timeout;
             let mut frame_failure_tolerance =
                 TransientFrameFailureTolerance::default_for_camera_stream();
@@ -501,17 +594,15 @@ impl LocalCameraAuthGrantIssuer {
                             }
                             Err(reason) => {
                                 last_rejection = reason.clone();
-                                if matches!(reason, AuthFailureReason::IntruderDetected) {
-                                    if self.intruder_snap_enabled {
-                                        if let Err(e) =
-                                            save_intruder_snapshot(&frame, &detected_face)
-                                        {
-                                            write_service_event_detail(
-                                                "LocalCameraAuth.SaveIntruderSnapshotFailed",
-                                                format!("error={e:?}"),
-                                            );
-                                        }
-                                    }
+                                if matches!(reason, AuthFailureReason::IntruderDetected)
+                                    && let SnapshotOutcome::Captured(Err(error)) = self
+                                        .snapshot_policy
+                                        .capture(|| save_intruder_snapshot(&frame, &detected_face))
+                                {
+                                    write_service_event_detail(
+                                        "LocalCameraAuth.SaveIntruderSnapshotFailed",
+                                        format!("error={error:?}"),
+                                    );
                                 }
                                 write_service_event_detail(
                                     "LocalCameraAuth.FrameRejected",
@@ -759,6 +850,14 @@ fn handle_auth_transient_frame_failure(
     }
 }
 
+fn reserve_camera_grant_sequence(sequence: &AtomicU64) -> Result<u64, AuthFailureReason> {
+    sequence
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| AuthFailureReason::InternalError)
+}
+
 fn build_auth_grant(
     session_id: &SessionId,
     source: AuthSource,
@@ -799,6 +898,266 @@ fn auth_trigger_source_name(trigger_source: AuthTriggerSource) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn issuer_with_cached_camera_grant() -> (DevelopmentAuthGrantIssuer, SessionId) {
+        let session_id = SessionId("previous-session".to_owned());
+        let user_id = UserId("configured-user".to_owned());
+        let snapshot_policy = SnapshotPolicy::new(true);
+        let local_camera = LocalCameraAuthGrantIssuer {
+            camera_id: CameraId::from_index(0),
+            camera_config: OpenCvCameraProviderConfig::default(),
+            max_auth_frames: 1,
+            templates: RecognitionTemplates::new(Vec::new()),
+            authenticator: FaceAuthenticator::new(
+                HybridFaceModelProvider::new(HybridFaceModelConfig::new(
+                    "unused-yunet.onnx".into(),
+                    "unused-recognizer.onnx".into(),
+                )),
+                FaceTemplateMatcher::new(0.65),
+                AttemptPolicy::new(AttemptPolicyConfig::default()),
+            ),
+            liveness_provider: MiniFasNetLivenessProvider::new(Default::default()),
+            black_frame_filter: BlackFrameFilter::default(),
+            max_spoof_frame_ratio: 0.4,
+            snapshot_policy: snapshot_policy.clone(),
+            next_grant_sequence: &NEXT_CAMERA_GRANT_SEQUENCE,
+        };
+        let grant = AuthGrant {
+            grant_id: GrantId("previous-grant".to_owned()),
+            nonce: Nonce("previous-nonce".to_owned()),
+            session_id: session_id.clone(),
+            user_id: user_id.clone(),
+            source: AuthSource::LocalCamera,
+            score: AuthScore {
+                match_score: 0.9,
+                liveness_score: Some(0.95),
+            },
+            issued_at_unix_ms: 1_000,
+            expires_at_unix_ms: 6_000,
+        };
+        (
+            DevelopmentAuthGrantIssuer {
+                manual_test_issuer: SimulatedAuthGrantIssuer::for_user(user_id.clone()),
+                manual_test_user_id: user_id,
+                local_camera_issuer: Some(CameraAuthOrchestrator::with_cached_grant_for_test(
+                    local_camera,
+                    grant,
+                )),
+                snapshot_policy,
+                auth_mode_unavailable: false,
+            },
+            session_id,
+        )
+    }
+
+    fn assert_failed_reload_blocks_auth(
+        issuer: &mut DevelopmentAuthGrantIssuer,
+        session_id: &SessionId,
+    ) {
+        assert!(issuer.local_camera_issuer.is_none());
+        assert_eq!(
+            issuer.fetch_auth_result(session_id, 1_001),
+            Some(Err(AuthFailureReason::InternalError)),
+        );
+        for source in [
+            AuthSource::LocalCamera,
+            AuthSource::ManualTest,
+            AuthSource::VehicleCamera,
+        ] {
+            assert_eq!(
+                issuer.issue_auth_grant(
+                    session_id,
+                    source,
+                    AuthTriggerSource::CredentialScreenEntered,
+                    1_001
+                ),
+                AuthGrantIssueResult::Failed(AuthFailureReason::InternalError),
+            );
+        }
+        assert_eq!(
+            issuer.snapshot_policy.capture(|| ()),
+            SnapshotOutcome::Disabled
+        );
+    }
+
+    #[test]
+    fn settings_read_failure_invalidates_old_grant_and_all_auth_sources() {
+        let (mut issuer, session_id) = issuer_with_cached_camera_grant();
+        assert!(matches!(
+            issuer.fetch_auth_result(&session_id, 1_001),
+            Some(Ok(_))
+        ));
+        assert_eq!(
+            issuer.reload_with_config_loader(|| Err(ProtocolError::TransportUnavailable)),
+            Err(ProtocolError::TransportUnavailable),
+        );
+        assert_failed_reload_blocks_auth(&mut issuer, &session_id);
+    }
+
+    #[test]
+    fn explicitly_reloading_unavailable_config_reports_failure_and_revokes_auth() {
+        let (mut issuer, session_id) = issuer_with_cached_camera_grant();
+        assert_eq!(
+            issuer.reload_with_config_loader(|| Ok(ServiceAuthConfig {
+                auth_mode: ServiceAuthMode::LocalCameraUnavailable,
+            })),
+            Err(ProtocolError::TransportUnavailable),
+        );
+        assert_failed_reload_blocks_auth(&mut issuer, &session_id);
+    }
+
+    #[test]
+    fn camera_grant_identities_remain_unique_after_issuer_recreation()
+    -> Result<(), AuthFailureReason> {
+        let (first_issuer, session_id) = issuer_with_cached_camera_grant();
+        let first_sequence = first_issuer
+            .local_camera_issuer
+            .as_ref()
+            .ok_or(AuthFailureReason::InternalError)?
+            .try_with_issuer(|inner| reserve_camera_grant_sequence(inner.next_grant_sequence))
+            .ok_or(AuthFailureReason::InternalError)??;
+        drop(first_issuer);
+        let (replacement_issuer, _) = issuer_with_cached_camera_grant();
+        let replacement_sequence = replacement_issuer
+            .local_camera_issuer
+            .as_ref()
+            .ok_or(AuthFailureReason::InternalError)?
+            .try_with_issuer(|inner| reserve_camera_grant_sequence(inner.next_grant_sequence))
+            .ok_or(AuthFailureReason::InternalError)??;
+        let outcome = LocalCameraAuthenticationOutcome {
+            face_authentication: face_auth::AuthenticationOutcome {
+                matched_user_id: UserId("configured-user".to_owned()),
+                match_score: 0.9,
+                matched_template: face_engine::FaceTemplateMatch {
+                    template_ref: face_engine::FaceTemplateRef("configured-template".to_owned()),
+                    user_id: "configured-user".to_owned(),
+                    pose_group: face_engine::FacePoseGroup::FrontalPrimary,
+                    score: 0.9,
+                    decision: face_engine::FaceMatchDecision::MatchAccepted,
+                },
+                matched_pose_group: face_engine::FacePoseGroup::FrontalPrimary,
+            },
+            liveness_score: 0.95,
+        };
+        let first_grant = build_auth_grant(
+            &session_id,
+            AuthSource::LocalCamera,
+            first_sequence,
+            &outcome,
+        );
+        let replacement_grant = build_auth_grant(
+            &session_id,
+            AuthSource::LocalCamera,
+            replacement_sequence,
+            &outcome,
+        );
+        assert_ne!(first_grant.grant_id, replacement_grant.grant_id);
+        assert_ne!(first_grant.nonce, replacement_grant.nonce);
+        Ok(())
+    }
+
+    #[test]
+    fn exhausted_camera_grant_sequence_never_wraps_or_reuses_an_identity() {
+        let sequence = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(reserve_camera_grant_sequence(&sequence), Ok(u64::MAX - 1));
+        for _ in 0..2 {
+            assert_eq!(
+                reserve_camera_grant_sequence(&sequence),
+                Err(AuthFailureReason::InternalError)
+            );
+            assert_eq!(sequence.load(Ordering::Relaxed), u64::MAX);
+        }
+    }
+
+    #[test]
+    fn malformed_replacement_template_invalidates_old_grant_and_can_be_reconfigured()
+    -> std::io::Result<()> {
+        let (mut issuer, session_id) = issuer_with_cached_camera_grant();
+        assert!(matches!(
+            issuer.fetch_auth_result(&session_id, 1_001),
+            Some(Ok(_))
+        ));
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let template_path = std::env::temp_dir().join(format!(
+            "winfaceunlock-invalid-reload-{}-{suffix}.json",
+            std::process::id()
+        ));
+        fs::write(&template_path, b"invalid replacement template")?;
+        let result = issuer.reload_with_config_loader(|| {
+            Ok(ServiceAuthConfig {
+                auth_mode: ServiceAuthMode::LocalCamera(Box::new(LocalCameraAuthConfig {
+                    face_template_path: template_path.clone(),
+                    camera_id: CameraId::from_index(0),
+                    camera_config: OpenCvCameraProviderConfig::default(),
+                    yunet_model_path: "unused-yunet.onnx".into(),
+                    sface_model_path: "unused-recognizer.onnx".into(),
+                    minifasnet_config: Default::default(),
+                    minifasnet_max_spoof_frame_ratio: 0.4,
+                    max_auth_frames: 1,
+                    required_consecutive_match_count: 1,
+                    match_threshold: 0.65,
+                    intruder_snap_enabled: true,
+                    intruder_similarity_threshold: 0.3,
+                })),
+            })
+        });
+        fs::remove_file(template_path)?;
+        assert_eq!(result, Err(ProtocolError::InvalidMessage));
+        assert_failed_reload_blocks_auth(&mut issuer, &session_id);
+
+        // A later successful management reload recovers the same issuer.
+        assert_eq!(
+            issuer.reload_with_config_loader(|| Ok(ServiceAuthConfig {
+                auth_mode: ServiceAuthMode::ManualTestOnly,
+            })),
+            Ok(())
+        );
+        assert!(matches!(
+            issuer.issue_auth_grant(
+                &session_id,
+                AuthSource::ManualTest,
+                AuthTriggerSource::CredentialScreenEntered,
+                1_002,
+            ),
+            AuthGrantIssueResult::Issued(_)
+        ));
+        assert_eq!(issuer.fetch_auth_result(&session_id, 1_002), None);
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_camera_configuration_rejects_all_authentication_sources()
+    -> Result<(), ProtocolError> {
+        let mut issuer = DevelopmentAuthGrantIssuer::from_config(
+            UserId("configured-user".to_owned()),
+            ServiceAuthConfig {
+                auth_mode: ServiceAuthMode::LocalCameraUnavailable,
+            },
+        )?;
+        for source in [
+            AuthSource::ManualTest,
+            AuthSource::LocalCamera,
+            AuthSource::VehicleCamera,
+        ] {
+            assert_eq!(
+                issuer.issue_auth_grant(
+                    &SessionId("session".to_owned()),
+                    source,
+                    AuthTriggerSource::CredentialScreenEntered,
+                    1_000,
+                ),
+                AuthGrantIssueResult::Failed(AuthFailureReason::InternalError),
+            );
+        }
+        assert_eq!(
+            issuer.snapshot_policy.capture(|| ()),
+            SnapshotOutcome::Disabled
+        );
+        Ok(())
+    }
 
     #[test]
     fn live_accepted_exposes_score_for_template_matching() {

@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 
 use common_protocol::{CredentialRef, ProtectedCredential, UserId};
 use hardware_binding::HardwareFingerprint;
@@ -52,14 +52,18 @@ impl<P: KeyProtector> FileCredentialStore<P> {
     }
 
     fn load_or_create_master_key(&self) -> Result<MasterKey, CredentialStoreError> {
-        if self.key_file.path().exists() {
+        if self.key_file.path().try_exists()? {
             let protected = self.key_file.load()?;
             self.key_protector.unprotect_master_key(&protected)
         } else {
             let master_key = self.key_protector.generate_master_key()?;
             let protected = self.key_protector.protect_master_key(&master_key)?;
-            self.key_file.save(&protected)?;
-            Ok(master_key)
+            if self.key_file.save_if_absent(&protected)? {
+                Ok(master_key)
+            } else {
+                self.key_protector
+                    .unprotect_master_key(&self.key_file.load()?)
+            }
         }
     }
 }

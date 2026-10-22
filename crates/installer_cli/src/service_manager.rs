@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     ffi::OsString,
     fmt,
     path::{Path, PathBuf},
@@ -87,6 +87,7 @@ impl ServiceManagerFacade {
 
     pub fn install_service(&self, plan: &ServiceInstallPlan) -> Result<(), InstallerError> {
         ensure_service_binary_exists(&plan.service_binary_path)?;
+        preserve_credential_store_location(&plan.service_binary_path, None)?;
         let service_info = plan.to_service_info();
         let service = self
             .manager
@@ -102,6 +103,11 @@ impl ServiceManagerFacade {
             .open_service(SERVICE_NAME, service_configuration_access())
         {
             Ok(service) => {
+                let previous_config = service.query_config()?;
+                preserve_credential_store_location(
+                    &plan.service_binary_path,
+                    Some(&previous_config.executable_path),
+                )?;
                 service.change_config(&service_info)?;
                 configure_service_metadata(&service)
             }
@@ -122,6 +128,20 @@ impl ServiceManagerFacade {
         drop(service);
 
         wait_for_service_deleted(&self.manager)
+    }
+
+    pub fn preserve_existing_credential_store_location(&self) -> Result<(), InstallerError> {
+        let service = match self
+            .manager
+            .open_service(SERVICE_NAME, ServiceAccess::QUERY_CONFIG)
+        {
+            Ok(service) => service,
+            Err(error) if is_service_missing_error(&error) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let command = service.query_config()?.executable_path;
+        let binary = service_binary_from_command(&command)?;
+        preserve_credential_store_location(&binary, Some(&command))
     }
 
     pub fn uninstall_service_if_exists(&self, stop_first: bool) -> Result<(), InstallerError> {
@@ -210,6 +230,91 @@ impl ServiceManagerFacade {
     }
 }
 
+fn preserve_credential_store_location(
+    new_service_binary: &Path,
+    previous_service_command: Option<&Path>,
+) -> Result<(), InstallerError> {
+    use credential_store::location::{
+        load_pinned_store_directory, pin_store_directory, validate_store_directory,
+    };
+    let storage_error = |error| {
+        InstallerError::InvalidArguments(format!(
+            "credential store location unavailable: {error:?}"
+        ))
+    };
+    if let Some(pinned) = load_pinned_store_directory().map_err(storage_error)? {
+        validate_store_directory(&pinned, true).map_err(storage_error)?;
+        return Ok(());
+    }
+    let legacy_override = if previous_service_command.is_some() {
+        credential_store::location::legacy_store_directory().map_err(storage_error)?
+    } else {
+        None
+    };
+    let directory = match legacy_override {
+        Some(directory) => directory,
+        None => {
+            credential_store_directory_for_install(new_service_binary, previous_service_command)?
+        }
+    };
+    validate_store_directory(&directory, true).map_err(storage_error)?;
+    pin_store_directory(&directory).map_err(storage_error)?;
+    Ok(())
+}
+
+fn credential_store_directory_for_install(
+    new_service_binary: &Path,
+    previous_service_command: Option<&Path>,
+) -> Result<PathBuf, InstallerError> {
+    let binary = if let Some(command) = previous_service_command {
+        service_binary_from_command(command)?
+    } else {
+        new_service_binary.to_path_buf()
+    };
+    if !binary.is_absolute()
+        || binary
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(InstallerError::InvalidArguments(
+            "service binary path must be absolute".to_owned(),
+        ));
+    }
+    binary
+        .parent()
+        .map(|path| path.join(credential_store::location::STORE_DIRECTORY_NAME))
+        .ok_or_else(|| {
+            InstallerError::InvalidArguments("service binary has no parent directory".to_owned())
+        })
+}
+
+fn service_binary_from_command(command: &Path) -> Result<PathBuf, InstallerError> {
+    let invalid = || {
+        InstallerError::InvalidArguments(
+            "existing service command has no valid absolute executable path".to_owned(),
+        )
+    };
+    let command = command.to_str().ok_or_else(invalid)?.trim();
+    let binary = if let Some(quoted) = command.strip_prefix('"') {
+        let (binary, arguments) = quoted.split_once('"').ok_or_else(invalid)?;
+        if !arguments.is_empty() && !arguments.starts_with(char::is_whitespace) {
+            return Err(invalid());
+        }
+        binary
+    } else {
+        command.split_whitespace().next().ok_or_else(invalid)?
+    };
+    let binary = PathBuf::from(binary);
+    if !binary.is_absolute()
+        || !binary
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    {
+        return Err(invalid());
+    }
+    Ok(binary)
+}
+
 fn service_configuration_access() -> ServiceAccess {
     ServiceAccess::QUERY_CONFIG
         | ServiceAccess::CHANGE_CONFIG
@@ -222,7 +327,13 @@ fn configure_service_metadata(
 ) -> Result<(), InstallerError> {
     service.set_description(SERVICE_DESCRIPTION)?;
     service.set_delayed_auto_start(false)?;
-    service.update_failure_actions(ServiceFailureActions {
+    service.update_failure_actions(service_failure_actions())?;
+    service.set_failure_actions_on_non_crash_failures(true)?;
+    Ok(())
+}
+
+fn service_failure_actions() -> ServiceFailureActions {
+    ServiceFailureActions {
         reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 60 * 60)),
         reboot_msg: None,
         command: None,
@@ -236,24 +347,34 @@ fn configure_service_metadata(
                 delay: Duration::from_secs(30),
             },
             ServiceAction {
-                action_type: ServiceActionType::None,
-                delay: Duration::default(),
+                // SCM repeats the final action for all subsequent failures.
+                action_type: ServiceActionType::Restart,
+                delay: Duration::from_secs(120),
             },
         ]),
-    })?;
-    service.set_failure_actions_on_non_crash_failures(true)?;
-    Ok(())
+    }
 }
 
 fn ensure_service_binary_exists(service_binary_path: &Path) -> Result<(), InstallerError> {
-    if service_binary_path.is_file() {
-        Ok(())
-    } else {
-        Err(InstallerError::InvalidArguments(format!(
+    if !service_binary_path.is_file() {
+        return Err(InstallerError::InvalidArguments(format!(
             "service binary does not exist: {}",
             service_binary_path.display()
-        )))
+        )));
     }
+    let worker = service_binary_path
+        .parent()
+        .ok_or_else(|| {
+            InstallerError::InvalidArguments("service binary has no parent directory".to_owned())
+        })?
+        .join("camera_worker.exe");
+    if !worker.is_file() {
+        return Err(InstallerError::InvalidArguments(format!(
+            "required camera worker does not exist beside service binary: {}",
+            worker.display()
+        )));
+    }
+    Ok(())
 }
 
 fn wait_for_service_state(
@@ -371,6 +492,90 @@ impl From<UserStartupError> for InstallerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_install_requires_camera_worker_beside_binary() -> Result<(), InstallerError> {
+        let root = std::env::temp_dir().join(format!(
+            "wfu-worker-payload-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let service = root.join("win_service.exe");
+        std::fs::write(&service, b"test-service")?;
+        assert!(ensure_service_binary_exists(&service).is_err());
+        std::fs::write(root.join("camera_worker.exe"), b"test-worker")?;
+        assert!(ensure_service_binary_exists(&service).is_ok());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn upgrade_to_another_directory_keeps_previous_credential_store() -> Result<(), InstallerError>
+    {
+        let store = credential_store_directory_for_install(
+            Path::new(r"D:\Apps\WinFaceUnlock\win_service.exe"),
+            Some(Path::new(
+                r#""C:\Program Files\WinFaceUnlock\win_service.exe" --service"#,
+            )),
+        )?;
+        assert_eq!(
+            store,
+            PathBuf::from(r"C:\Program Files\WinFaceUnlock\credential-store")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn new_install_uses_absolute_service_directory() -> Result<(), InstallerError> {
+        let store = credential_store_directory_for_install(
+            Path::new(r"D:\Apps\WinFaceUnlock\win_service.exe"),
+            None,
+        )?;
+        assert_eq!(
+            store,
+            PathBuf::from(r"D:\Apps\WinFaceUnlock\credential-store")
+        );
+        assert!(
+            credential_store_directory_for_install(Path::new(r"relative\win_service.exe"), None)
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn existing_service_command_is_parsed_without_arguments_in_the_path()
+    -> Result<(), InstallerError> {
+        assert_eq!(
+            service_binary_from_command(Path::new(
+                r"D:\Apps\WinFaceUnlock\win_service.exe --service"
+            ))?,
+            PathBuf::from(r"D:\Apps\WinFaceUnlock\win_service.exe")
+        );
+        for invalid in [
+            r"win_service.exe --service",
+            r#""C:\Program Files\WinFaceUnlock\win_service.exe"broken"#,
+            r#""C:\Program Files\WinFaceUnlock\win_service.exe"#,
+        ] {
+            assert!(service_binary_from_command(Path::new(invalid)).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_failures_keep_restarting_with_bounded_backoff() {
+        let actions = service_failure_actions().actions.unwrap_or_default();
+        assert_eq!(actions.len(), 3);
+        assert!(
+            actions
+                .iter()
+                .all(|action| action.action_type == ServiceActionType::Restart)
+        );
+        assert_eq!(actions[2].delay, Duration::from_secs(120));
+    }
 
     #[test]
     fn service_install_plan_uses_service_mode_argument() {

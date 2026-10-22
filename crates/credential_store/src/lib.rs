@@ -3,6 +3,7 @@ mod error;
 mod file_store;
 mod key_file;
 mod key_protector;
+pub mod location;
 mod master_key;
 mod persistence;
 mod repository_store;

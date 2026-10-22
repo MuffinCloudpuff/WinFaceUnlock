@@ -1,12 +1,13 @@
-﻿#![cfg(windows)]
+#![cfg(windows)]
 #![allow(unsafe_code)]
 
-use crate::{CameraId, CameraInfo, VideoError};
+use crate::{CameraId, VideoError, camera_identity::CameraDevice};
 use std::ptr;
 use windows::Win32::{
     Media::MediaFoundation::{
         IMFActivate, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
-        MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, MF_VERSION, MFCreateAttributes,
+        MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+        MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_VERSION, MFCreateAttributes,
         MFEnumDeviceSources, MFShutdown, MFStartup,
     },
     System::Com::CoTaskMemFree,
@@ -29,7 +30,8 @@ impl Drop for MediaFoundationRuntime {
     }
 }
 
-pub(crate) fn windows_media_foundation_camera_sources() -> Result<Vec<CameraInfo>, VideoError> {
+pub(crate) fn windows_media_foundation_devices() -> Result<Vec<CameraDevice>, VideoError> {
+    let _apartment = crate::com_bindings::ComApartment::initialize()?;
     let _runtime = MediaFoundationRuntime::start()?;
     let mut attributes = None;
     // SAFETY: MFCreateAttributes initializes an out-parameter Option managed by windows-rs.
@@ -57,8 +59,11 @@ pub(crate) fn windows_media_foundation_camera_sources() -> Result<Vec<CameraInfo
     if !activate_ptr.is_null() {
         // SAFETY: On success MFEnumDeviceSources returns activate_count initialized entries.
         let activates =
-            unsafe { std::slice::from_raw_parts(activate_ptr, activate_count as usize) };
-        for (index, activate) in activates.iter().enumerate() {
+            unsafe { std::slice::from_raw_parts_mut(activate_ptr, activate_count as usize) };
+        for (index, activate) in activates.iter_mut().enumerate() {
+            // Take ownership so windows-rs releases every IMFActivate before the
+            // CoTaskMem array is freed. Freeing the array alone leaks COM references.
+            let activate = activate.take();
             let display_name = activate
                 .as_ref()
                 .and_then(|activate| {
@@ -66,8 +71,17 @@ pub(crate) fn windows_media_foundation_camera_sources() -> Result<Vec<CameraInfo
                 })
                 .filter(|name| !name.trim().is_empty())
                 .unwrap_or_else(|| format!("Local camera {index}"));
-            sources.push(CameraInfo {
-                id: CameraId::from_index(index as u32),
+            let id = activate.as_ref().and_then(|activate| {
+                allocated_mf_string(
+                    activate,
+                    &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
+                )
+                .ok()
+                .and_then(|path| CameraId::from_device_path(&path).ok())
+            });
+            sources.push(CameraDevice {
+                index: index as i32,
+                id,
                 display_name,
             });
         }

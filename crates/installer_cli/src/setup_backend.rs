@@ -1,4 +1,4 @@
-﻿#[cfg(all(windows, not(test)))]
+#[cfg(all(windows, not(test)))]
 use std::time::Duration;
 use std::{
     fs,
@@ -516,6 +516,7 @@ mod process_cleanup {
         "control_tray.exe",
         "desktop_input_agent.exe",
         "diagnostics_cli.exe",
+        "camera_worker.exe",
         "installer_cli.exe",
     ];
 
@@ -1006,6 +1007,28 @@ fn credential_store_dir_from_payload(payload: &EnrollCredentialPayload) -> Optio
 }
 
 #[cfg(all(windows, not(test)))]
+fn credential_store_paths_from_payload(
+    payload: &EnrollCredentialPayload,
+) -> Result<ServiceCredentialStorePaths, CredentialEnrollmentError> {
+    // Explicit diagnostic paths remain opt-in; normal setup always follows the
+    // installation pin, including repair into another executable directory.
+    if let Some(path) = &payload.store_dir {
+        return Ok(ServiceCredentialStorePaths::from_store_dir(path.clone()));
+    }
+    let pinned = credential_store::location::load_pinned_store_directory()
+        .map_err(|error| CredentialEnrollmentError::StoreWriteFailed(format!("{error:?}")))?;
+    if pinned.is_some() {
+        return ServiceCredentialStorePaths::from_environment_or_default()
+            .map_err(|error| CredentialEnrollmentError::StoreWriteFailed(format!("{error:?}")));
+    }
+    if let Some(path) = credential_store_dir_from_payload(payload) {
+        return Ok(ServiceCredentialStorePaths::from_store_dir(path));
+    }
+    ServiceCredentialStorePaths::from_environment_or_default()
+        .map_err(|error| CredentialEnrollmentError::StoreWriteFailed(format!("{error:?}")))
+}
+
+#[cfg(all(windows, not(test)))]
 fn enroll_credential_from_payload(
     payload: &EnrollCredentialPayload,
     account_type: AccountType,
@@ -1046,9 +1069,7 @@ fn enroll_credential_with_secret_transport(
         return Err(CredentialEnrollmentError::EmptyPassword);
     }
 
-    let store_paths = credential_store_dir_from_payload(payload)
-        .map(ServiceCredentialStorePaths::from_store_dir)
-        .unwrap_or_else(ServiceCredentialStorePaths::from_environment_or_default);
+    let store_paths = credential_store_paths_from_payload(payload)?;
     enroll_windows_credential(
         &store_paths,
         WindowsCredentialEnrollment {
@@ -1080,9 +1101,7 @@ fn enroll_credential_with_native_prompt(
         return Err(CredentialEnrollmentError::EmptyPassword);
     }
 
-    let store_paths = credential_store_dir_from_payload(payload)
-        .map(ServiceCredentialStorePaths::from_store_dir)
-        .unwrap_or_else(ServiceCredentialStorePaths::from_environment_or_default);
+    let store_paths = credential_store_paths_from_payload(payload)?;
     enroll_windows_credential(
         &store_paths,
         WindowsCredentialEnrollment {

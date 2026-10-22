@@ -9,13 +9,14 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use common_protocol::SERVICE_NAME;
 use control_protocol::{
-    ControlSettingsPatch, ControlSettingsSnapshot, DEFAULT_LOGON_FACE_MATCH_THRESHOLD,
-    DashboardStatus, DataDirectorySummary, FaceRecognitionModelSummary, FaceTemplateKind,
-    FaceTemplateList, FaceTemplateSourceState, FaceTemplateSummary, LogonWakeMode,
-    MAX_LOGON_FACE_MATCH_THRESHOLD, MIN_LOGON_FACE_MATCH_THRESHOLD, PathPresence,
-    PresenceMonitorState, PresenceRuntimeSummary, ProviderRegistrationState, ProviderStatusSummary,
-    RegistryConfigState, ServiceConfigSummary, ServiceInstallationState, ServiceRuntimeState,
-    ServiceStatusSummary,
+    ControlSettingsPatch, ControlSettingsSnapshot, DEFAULT_INTRUDER_SIMILARITY_THRESHOLD,
+    DEFAULT_LOGON_FACE_MATCH_THRESHOLD, DashboardStatus, DataDirectorySummary,
+    FaceRecognitionModelSummary, FaceTemplateKind, FaceTemplateList, FaceTemplateSourceState,
+    FaceTemplateSummary, LogonWakeMode, MAX_INTRUDER_SIMILARITY_THRESHOLD,
+    MAX_LOGON_FACE_MATCH_THRESHOLD, MIN_INTRUDER_SIMILARITY_THRESHOLD,
+    MIN_LOGON_FACE_MATCH_THRESHOLD, PathPresence, PresenceMonitorState, PresenceRuntimeSummary,
+    ProviderRegistrationState, ProviderStatusSummary, RegistryConfigState, ServiceConfigSummary,
+    ServiceInstallationState, ServiceRuntimeState, ServiceStatusSummary,
 };
 use serde::Deserialize;
 use windows_provider::{
@@ -44,6 +45,7 @@ const REG_MINIFASNET_MODEL_PATH: &str = "MiniFasNetModelPath";
 const REG_MATCH_THRESHOLD: &str = "MatchThreshold";
 const REG_PRESENCE_LOCK_ENABLED: &str = "PresenceLockEnabled";
 const REG_INTRUDER_SNAP_ENABLED: &str = "IntruderSnapEnabled";
+const REG_INTRUDER_SIMILARITY_THRESHOLD: &str = "IntruderSimilarityThreshold";
 const REG_PRESENCE_DETECTOR_KIND: &str = "PresenceDetectorKind";
 const REG_PRESENCE_TRACKING_MODE: &str = "PresenceTrackingMode";
 const AUTH_MODE_LOCAL_CAMERA: &str = "local-camera";
@@ -127,6 +129,22 @@ impl WindowsFaceTemplateStatusStore {
         load_active_face_template_path(&WindowsStatusSource { paths: &self.paths })
     }
 
+    pub fn load_camera_id(&self) -> Result<Option<String>, FaceTemplateStatusError> {
+        registry::read_string_value(SERVICE_CONFIG_REGISTRY_PATH, REG_CAMERA_ID)
+            .map_err(|error| face_template_service_config_error(service_config_error(error)))
+    }
+
+    /// Persists the resolved camera identity without overwriting model/template settings.
+    pub fn persist_camera_id(&self, camera_id: &str) -> Result<(), FaceTemplateStatusError> {
+        if camera_id.trim().is_empty() || camera_id.contains('\0') {
+            return Err(FaceTemplateStatusError::ServiceConfigUnavailable(
+                "resolved camera identity is invalid".to_owned(),
+            ));
+        }
+        registry::write_string_value(SERVICE_CONFIG_REGISTRY_PATH, REG_CAMERA_ID, camera_id)
+            .map_err(face_template_registry_write_error)
+    }
+
     pub fn apply_active_face_template_path(
         &self,
         template_path: &Path,
@@ -165,6 +183,12 @@ impl WindowsControlSettingsStore {
 
     pub fn load_settings(&self) -> Result<ControlSettingsSnapshot, ControlStatusError> {
         load_control_settings(&WindowsSettingsSource)
+    }
+
+    /// Privacy permission is explicit, persisted consent. Missing or invalid values
+    /// are disabled; registry access failures remain visible to the service.
+    pub fn load_intruder_snap_enabled(&self) -> Result<bool, ControlStatusError> {
+        load_intruder_snap_enabled(&WindowsSettingsSource)
     }
 
     pub fn update_settings(
@@ -352,6 +376,9 @@ trait SettingsSource {
     fn write_presence_lock_enabled(&self, enabled: bool) -> Result<(), ControlStatusError>;
     fn read_intruder_snap_enabled(&self) -> Result<Option<String>, ControlStatusError>;
     fn write_intruder_snap_enabled(&self, enabled: bool) -> Result<(), ControlStatusError>;
+    fn read_intruder_similarity_threshold(&self) -> Result<Option<String>, ControlStatusError>;
+    fn write_intruder_similarity_threshold(&self, threshold: f32)
+    -> Result<(), ControlStatusError>;
     fn read_logon_wake_mode(&self) -> Result<Option<String>, ControlStatusError>;
     fn read_auto_wake_on_advise(&self) -> Result<Option<String>, ControlStatusError>;
     fn write_logon_wake_mode(&self, mode: LogonWakeMode) -> Result<(), ControlStatusError>;
@@ -677,6 +704,17 @@ fn is_valid_logon_face_match_threshold(threshold: f32) -> bool {
         && (MIN_LOGON_FACE_MATCH_THRESHOLD..=MAX_LOGON_FACE_MATCH_THRESHOLD).contains(&threshold)
 }
 
+fn parse_intruder_similarity_threshold(value: &str) -> Option<f32> {
+    let threshold = value.trim().parse::<f32>().ok()?;
+    is_valid_intruder_similarity_threshold(threshold).then_some(threshold)
+}
+
+fn is_valid_intruder_similarity_threshold(threshold: f32) -> bool {
+    threshold.is_finite()
+        && (MIN_INTRUDER_SIMILARITY_THRESHOLD..=MAX_INTRUDER_SIMILARITY_THRESHOLD)
+            .contains(&threshold)
+}
+
 fn load_control_settings(
     source: &impl SettingsSource,
 ) -> Result<ControlSettingsSnapshot, ControlStatusError> {
@@ -686,11 +724,7 @@ fn load_control_settings(
             .as_deref()
             .and_then(parse_registry_bool)
             .unwrap_or(false),
-        intruder_snap_enabled: source
-            .read_intruder_snap_enabled()?
-            .as_deref()
-            .and_then(parse_registry_bool)
-            .unwrap_or(true),
+        intruder_snap_enabled: load_intruder_snap_enabled(source)?,
         logon_wake_mode: source
             .read_logon_wake_mode()?
             .as_deref()
@@ -701,7 +735,20 @@ fn load_control_settings(
             .as_deref()
             .and_then(parse_logon_face_match_threshold)
             .unwrap_or(DEFAULT_LOGON_FACE_MATCH_THRESHOLD),
+        intruder_similarity_threshold: source
+            .read_intruder_similarity_threshold()?
+            .as_deref()
+            .and_then(parse_intruder_similarity_threshold)
+            .unwrap_or(DEFAULT_INTRUDER_SIMILARITY_THRESHOLD),
     })
+}
+
+fn load_intruder_snap_enabled(source: &impl SettingsSource) -> Result<bool, ControlStatusError> {
+    Ok(source
+        .read_intruder_snap_enabled()?
+        .as_deref()
+        .and_then(parse_registry_bool)
+        .unwrap_or(false))
 }
 
 fn update_control_settings(
@@ -724,6 +771,14 @@ fn update_control_settings(
             )));
         }
         source.write_logon_face_match_threshold(threshold)?;
+    }
+    if let Some(threshold) = patch.intruder_similarity_threshold {
+        if !is_valid_intruder_similarity_threshold(threshold) {
+            return Err(ControlStatusError::SettingsPersistenceFailed(format!(
+                "intruder similarity threshold must be between {MIN_INTRUDER_SIMILARITY_THRESHOLD:.2} and {MAX_INTRUDER_SIMILARITY_THRESHOLD:.2}"
+            )));
+        }
+        source.write_intruder_similarity_threshold(threshold)?;
     }
     load_control_settings(source)
 }
@@ -759,6 +814,26 @@ impl SettingsSource for WindowsSettingsSource {
             SERVICE_CONFIG_REGISTRY_PATH,
             REG_INTRUDER_SNAP_ENABLED,
             bool_registry_value(enabled),
+        )
+        .map_err(settings_write_error)
+    }
+
+    fn read_intruder_similarity_threshold(&self) -> Result<Option<String>, ControlStatusError> {
+        registry::read_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_INTRUDER_SIMILARITY_THRESHOLD,
+        )
+        .map_err(settings_read_error)
+    }
+
+    fn write_intruder_similarity_threshold(
+        &self,
+        threshold: f32,
+    ) -> Result<(), ControlStatusError> {
+        registry::write_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_INTRUDER_SIMILARITY_THRESHOLD,
+            &format!("{threshold:.3}"),
         )
         .map_err(settings_write_error)
     }
@@ -1472,6 +1547,7 @@ mod tests {
     struct FakeSettingsSource {
         presence_lock_enabled: RefCell<Option<String>>,
         intruder_snap_enabled: RefCell<Option<String>>,
+        intruder_similarity_threshold: RefCell<Option<String>>,
         logon_wake_mode: RefCell<Option<String>>,
         auto_wake_on_advise: RefCell<Option<String>>,
         logon_face_match_threshold: RefCell<Option<String>>,
@@ -1495,6 +1571,19 @@ mod tests {
         fn write_intruder_snap_enabled(&self, enabled: bool) -> Result<(), ControlStatusError> {
             self.intruder_snap_enabled
                 .replace(Some(bool_registry_value(enabled).to_owned()));
+            Ok(())
+        }
+
+        fn read_intruder_similarity_threshold(&self) -> Result<Option<String>, ControlStatusError> {
+            Ok(self.intruder_similarity_threshold.borrow().clone())
+        }
+
+        fn write_intruder_similarity_threshold(
+            &self,
+            threshold: f32,
+        ) -> Result<(), ControlStatusError> {
+            self.intruder_similarity_threshold
+                .replace(Some(format!("{threshold:.3}")));
             Ok(())
         }
 
@@ -1827,6 +1916,18 @@ mod tests {
         let settings = load_control_settings(&source)?;
 
         assert!(!settings.presence_lock_enabled);
+        assert!(!settings.intruder_snap_enabled);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_intruder_capture_permission_is_disabled() -> Result<(), ControlStatusError> {
+        let source = FakeSettingsSource {
+            intruder_snap_enabled: RefCell::new(Some("invalid".to_owned())),
+            ..FakeSettingsSource::default()
+        };
+        assert!(!load_intruder_snap_enabled(&source)?);
+        assert!(!load_control_settings(&source)?.intruder_snap_enabled);
         Ok(())
     }
 
@@ -1845,6 +1946,7 @@ mod tests {
                 intruder_snap_enabled: None,
                 logon_wake_mode: None,
                 logon_face_match_threshold: None,
+                intruder_similarity_threshold: None,
             },
         )?;
 
@@ -1917,6 +2019,7 @@ mod tests {
                 intruder_snap_enabled: None,
                 logon_wake_mode: Some(LogonWakeMode::TriggeredRecognition),
                 logon_face_match_threshold: None,
+                intruder_similarity_threshold: None,
             },
         )?;
 
@@ -1970,6 +2073,7 @@ mod tests {
                 intruder_snap_enabled: None,
                 logon_wake_mode: None,
                 logon_face_match_threshold: Some(0.50),
+                intruder_similarity_threshold: None,
             },
         )?;
 
@@ -1992,6 +2096,7 @@ mod tests {
                 intruder_snap_enabled: None,
                 logon_wake_mode: None,
                 logon_face_match_threshold: Some(0.10),
+                intruder_similarity_threshold: None,
             },
         ) {
             Ok(_) => return Err("out-of-range threshold should be rejected"),
@@ -2002,6 +2107,26 @@ mod tests {
             error,
             ControlStatusError::SettingsPersistenceFailed(_)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn settings_update_writes_intruder_similarity_threshold() -> Result<(), ControlStatusError> {
+        let source = FakeSettingsSource::default();
+
+        let settings = update_control_settings(
+            &source,
+            &ControlSettingsPatch {
+                intruder_similarity_threshold: Some(0.42),
+                ..ControlSettingsPatch::default()
+            },
+        )?;
+
+        assert_eq!(settings.intruder_similarity_threshold, 0.42);
+        assert_eq!(
+            source.intruder_similarity_threshold.borrow().as_deref(),
+            Some("0.420")
+        );
         Ok(())
     }
 

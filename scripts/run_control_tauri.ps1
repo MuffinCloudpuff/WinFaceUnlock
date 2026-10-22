@@ -35,7 +35,7 @@ if (-not $NoInstall -and -not (Test-Path $NodeModulesDir -PathType Container)) {
 $cargo = (Get-Command cargo.exe -ErrorAction Stop).Source
 Push-Location $RepoRoot
 try {
-    & $cargo build -p diagnostics_cli
+    & $cargo build -p diagnostics_cli -p camera_worker
     if ($LASTEXITCODE -ne 0) {
         throw "cargo build -p diagnostics_cli failed with exit code $LASTEXITCODE"
     }

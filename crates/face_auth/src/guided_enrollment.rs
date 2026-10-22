@@ -32,7 +32,7 @@ impl Default for GuidedEnrollmentConfig {
             frames_per_step: 30,
             duplicate_similarity_threshold: 0.98,
             template_acceptance_threshold: 0.45,
-            frame_match_threshold: 0.75,
+            frame_match_threshold: 0.65,
             required_consecutive_match_count: 3,
             quality_policy: FaceQualityPolicy::default(),
         }

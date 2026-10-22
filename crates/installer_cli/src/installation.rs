@@ -1,4 +1,4 @@
-﻿use crate::{
+use crate::{
     provider_registry::{ProviderInstallPlan, ProviderRegistry},
     resource_directory::ResourceDirectoryPlan,
     service_manager::{InstallerError, ServiceInstallPlan, ServiceManagerFacade},
@@ -82,6 +82,12 @@ impl InstallerOrchestrator {
     }
 
     pub fn uninstall(plan: &FullUninstallPlan) -> Result<(), InstallerError> {
+        let manager = ServiceManagerFacade::connect()?;
+        if !plan.delete_data {
+            // Legacy installs may not have a pin yet. Preserve their location
+            // before deleting the SCM entry needed to discover the old binary.
+            manager.preserve_existing_credential_store_location()?;
+        }
         if plan.remove_user_startup {
             log_step("uninstall-user-tray-startup");
             UserStartupRegistry::uninstall_tray_startup()?;
@@ -93,11 +99,15 @@ impl InstallerOrchestrator {
         ProviderRegistry::uninstall_provider()?;
 
         log_step("uninstall-service");
-        let manager = ServiceManagerFacade::connect()?;
         manager.uninstall_service_if_exists(plan.stop_service_first)?;
 
         if plan.delete_data {
             log_step("delete-resource-data");
+            credential_store::location::delete_pinned_store_data().map_err(|error| {
+                InstallerError::InvalidArguments(format!(
+                    "credential data deletion failed: {error:?}"
+                ))
+            })?;
             plan.resource_plan.delete_data()?;
         } else {
             eprintln!("installer_step_skipped: delete-resource-data");

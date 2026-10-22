@@ -21,6 +21,7 @@ const ENV_REQUIRED_CONSECUTIVE: &str = "WINFACEUNLOCK_REQUIRED_CONSECUTIVE";
 const ENV_MATCH_THRESHOLD: &str = "WINFACEUNLOCK_MATCH_THRESHOLD";
 const ENV_PRESENCE_LOCK_ENABLED: &str = "WINFACEUNLOCK_PRESENCE_LOCK_ENABLED";
 const ENV_INTRUDER_SNAP_ENABLED: &str = "WINFACEUNLOCK_INTRUDER_SNAP_ENABLED";
+const ENV_INTRUDER_SIMILARITY_THRESHOLD: &str = "WINFACEUNLOCK_INTRUDER_SIMILARITY_THRESHOLD";
 const ENV_PRESENCE_OWNER_MATCH_THRESHOLD: &str = "WINFACEUNLOCK_PRESENCE_OWNER_MATCH_THRESHOLD";
 const ENV_PRESENCE_DETECTOR_KIND: &str = "WINFACEUNLOCK_PRESENCE_DETECTOR_KIND";
 const ENV_PRESENCE_TRACKING_MODE: &str = "WINFACEUNLOCK_PRESENCE_TRACKING_MODE";
@@ -61,6 +62,7 @@ const REG_REQUIRED_CONSECUTIVE: &str = "RequiredConsecutiveMatchCount";
 const REG_MATCH_THRESHOLD: &str = "MatchThreshold";
 const REG_PRESENCE_LOCK_ENABLED: &str = "PresenceLockEnabled";
 const REG_INTRUDER_SNAP_ENABLED: &str = "IntruderSnapEnabled";
+const REG_INTRUDER_SIMILARITY_THRESHOLD: &str = "IntruderSimilarityThreshold";
 const REG_PRESENCE_OWNER_MATCH_THRESHOLD: &str = "PresenceOwnerMatchThreshold";
 const REG_PRESENCE_DETECTOR_KIND: &str = "PresenceDetectorKind";
 const REG_PRESENCE_TRACKING_MODE: &str = "PresenceTrackingMode";
@@ -92,7 +94,8 @@ const DEFAULT_MINIFASNET_MAX_SPOOF_FRAME_RATIO: f32 = 0.40;
 const DEFAULT_MAX_AUTH_FRAMES: u32 = 30;
 const DEFAULT_REQUIRED_CONSECUTIVE_MATCH_COUNT: u32 = 2;
 const DEFAULT_MAX_CAMERA_INDEX: u32 = 8;
-const DEFAULT_SERVICE_FACE_MATCH_THRESHOLD: f32 = 0.75;
+const DEFAULT_SERVICE_FACE_MATCH_THRESHOLD: f32 = 0.65;
+const DEFAULT_INTRUDER_SIMILARITY_THRESHOLD: f32 = 0.30;
 const DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD: f32 = 0.50;
 const DEFAULT_PRESENCE_DETECTOR_FPS: f32 = 2.0;
 const DEFAULT_PRESENCE_PERSON_SUSPECT_FPS: f32 = 1.0;
@@ -122,6 +125,8 @@ pub struct ServiceAuthConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ServiceAuthMode {
     ManualTestOnly,
+    /// Camera binding failed. Keep management IPC available, but issue no grants.
+    LocalCameraUnavailable,
     LocalCamera(Box<LocalCameraAuthConfig>),
 }
 
@@ -138,6 +143,7 @@ pub struct LocalCameraAuthConfig {
     pub required_consecutive_match_count: u32,
     pub match_threshold: f32,
     pub intruder_snap_enabled: bool,
+    pub intruder_similarity_threshold: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -328,15 +334,71 @@ impl ServicePresenceConfig {
 
 impl ServiceAuthConfig {
     pub fn from_environment() -> Result<Self, ProtocolError> {
-        let mut config = Self::from_lookup(|env_name| {
+        #[cfg(windows)]
+        let persisted_snapshot_permission = control_status::WindowsControlSettingsStore::new()
+            .load_intruder_snap_enabled()
+            .map_err(|_| ProtocolError::TransportUnavailable)?;
+        #[cfg(windows)]
+        let camera_store =
+            control_status::WindowsFaceTemplateStatusStore::from_environment_or_default();
+        #[cfg(windows)]
+        let persisted_camera_id = camera_store
+            .load_camera_id()
+            .map_err(|_| ProtocolError::TransportUnavailable)?;
+        let lookup = |env_name| {
             std::env::var(env_name)
                 .ok()
                 .or_else(|| registry_value_for_env_name(env_name))
-        })?;
+        };
+        #[cfg(windows)]
+        let mut config = Self::from_persisted_settings(
+            persisted_snapshot_permission,
+            persisted_camera_id.as_deref(),
+            lookup,
+        )?;
+        #[cfg(not(windows))]
+        let mut config = Self::from_lookup(lookup)?;
         if let Some(install_dir) = current_exe_dir() {
             config.resolve_relative_paths_against_install_dir(&install_dir);
         }
+        #[cfg(windows)]
+        if let ServiceAuthMode::LocalCamera(local_camera) = &mut config.auth_mode {
+            match resolve_persisted_camera_binding(
+                &local_camera.camera_id,
+                persisted_camera_id.as_deref(),
+                video_provider::resolve_camera_id,
+                |id| {
+                    camera_store
+                        .persist_camera_id(&id.0)
+                        .map_err(|_| ProtocolError::TransportUnavailable)
+                },
+            ) {
+                Ok(resolved_id) => local_camera.camera_id = resolved_id,
+                Err(error) => {
+                    crate::service_log::write_service_event_detail(
+                        "AuthConfig.CameraBindingUnavailable",
+                        format!("reason={error:?} action=reselect-camera"),
+                    );
+                    config.auth_mode = ServiceAuthMode::LocalCameraUnavailable;
+                }
+            }
+        }
         Ok(config)
+    }
+
+    #[cfg(any(windows, test))]
+    fn from_persisted_settings(
+        snapshot_permission: bool,
+        camera_id: Option<&str>,
+        mut lookup: impl FnMut(&'static str) -> Option<String>,
+    ) -> Result<Self, ProtocolError> {
+        Self::from_lookup(|env_name| match env_name {
+            // A process environment inherited before opt-out must never
+            // override persisted privacy permission after a restart.
+            ENV_INTRUDER_SNAP_ENABLED => Some(snapshot_permission.to_string()),
+            ENV_CAMERA_ID if camera_id.is_some() => camera_id.map(str::to_owned),
+            _ => lookup(env_name),
+        })
     }
 
     fn from_lookup(
@@ -400,7 +462,12 @@ impl ServiceAuthConfig {
                     match_threshold: optional_f32(&mut lookup, ENV_MATCH_THRESHOLD)?
                         .unwrap_or(DEFAULT_SERVICE_FACE_MATCH_THRESHOLD),
                     intruder_snap_enabled: optional_bool(&mut lookup, ENV_INTRUDER_SNAP_ENABLED)?
-                        .unwrap_or(true),
+                        .unwrap_or(false),
+                    intruder_similarity_threshold: optional_f32(
+                        &mut lookup,
+                        ENV_INTRUDER_SIMILARITY_THRESHOLD,
+                    )?
+                    .unwrap_or(DEFAULT_INTRUDER_SIMILARITY_THRESHOLD),
                 })),
             }),
             _ => Err(ProtocolError::InvalidMessage),
@@ -430,6 +497,31 @@ impl ServiceAuthConfig {
     }
 }
 
+#[cfg(any(windows, test))]
+fn resolve_persisted_camera_binding(
+    requested: &CameraId,
+    persisted_camera_id: Option<&str>,
+    resolve: impl FnOnce(&CameraId) -> Result<CameraId, video_provider::VideoError>,
+    persist: impl FnOnce(&CameraId) -> Result<(), ProtocolError>,
+) -> Result<CameraId, ProtocolError> {
+    requested
+        .validate()
+        .map_err(|_| ProtocolError::InvalidMessage)?;
+    // Already-bound devices may be temporarily unplugged. Keep their identity
+    // and let open report unavailable; startup must not select a replacement.
+    let resolved = if requested.is_stable() {
+        requested.clone()
+    } else {
+        resolve(requested).map_err(|_| ProtocolError::TransportUnavailable)?
+    };
+    if persisted_camera_id != Some(resolved.0.as_str()) {
+        // Legacy indexes only describe today's enumeration, not historical identity.
+        // Never use a migrated identity unless it survives the next restart.
+        persist(&resolved)?;
+    }
+    Ok(resolved)
+}
+
 fn registry_value_for_env_name(env_name: &'static str) -> Option<String> {
     service_registry::read_string_value(
         SERVICE_CONFIG_REGISTRY_PATH,
@@ -456,6 +548,7 @@ fn registry_value_name(env_name: &'static str) -> Option<&'static str> {
         ENV_MATCH_THRESHOLD => Some(REG_MATCH_THRESHOLD),
         ENV_PRESENCE_LOCK_ENABLED => Some(REG_PRESENCE_LOCK_ENABLED),
         ENV_INTRUDER_SNAP_ENABLED => Some(REG_INTRUDER_SNAP_ENABLED),
+        ENV_INTRUDER_SIMILARITY_THRESHOLD => Some(REG_INTRUDER_SIMILARITY_THRESHOLD),
         ENV_PRESENCE_OWNER_MATCH_THRESHOLD => Some(REG_PRESENCE_OWNER_MATCH_THRESHOLD),
         ENV_PRESENCE_DETECTOR_KIND => Some(REG_PRESENCE_DETECTOR_KIND),
         ENV_PRESENCE_TRACKING_MODE => Some(REG_PRESENCE_TRACKING_MODE),
@@ -620,6 +713,89 @@ mod tests {
     }
 
     #[test]
+    fn persisted_privacy_setting_and_camera_identity_override_stale_environment()
+    -> Result<(), ProtocolError> {
+        for snapshot_permission in [false, true] {
+            let config = ServiceAuthConfig::from_persisted_settings(
+                snapshot_permission,
+                Some("windows-device:camera-stable-id"),
+                |name| match name {
+                    ENV_AUTH_MODE => Some(AUTH_MODE_LOCAL_CAMERA.to_owned()),
+                    ENV_FACE_TEMPLATE_PATH => Some("face.json".to_owned()),
+                    ENV_CAMERA_ID => Some("opencv-index:0".to_owned()),
+                    ENV_INTRUDER_SNAP_ENABLED => Some((!snapshot_permission).to_string()),
+                    _ => None,
+                },
+            )?;
+            let ServiceAuthMode::LocalCamera(camera) = config.auth_mode else {
+                return Err(ProtocolError::InvalidMessage);
+            };
+            assert_eq!(camera.intruder_snap_enabled, snapshot_permission);
+            assert_eq!(camera.camera_id.0, "windows-device:camera-stable-id");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bound_camera_can_load_while_unplugged_without_enumeration() -> Result<(), ProtocolError> {
+        let camera_id = CameraId::from_device_path(r"\\?\usb#selected-camera")
+            .map_err(|_| ProtocolError::InvalidMessage)?;
+        let mut enumerated = false;
+        let mut persisted = false;
+        let resolved = resolve_persisted_camera_binding(
+            &camera_id,
+            Some(&camera_id.0),
+            |_| {
+                enumerated = true;
+                Err(video_provider::VideoError::CameraNotFound)
+            },
+            |_| {
+                persisted = true;
+                Ok(())
+            },
+        )?;
+        assert_eq!(resolved, camera_id);
+        assert!(!enumerated);
+        assert!(!persisted);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_camera_binding_requires_persistence_before_use()
+    -> Result<(), video_provider::VideoError> {
+        let stable = CameraId::from_device_path(r"\\?\usb#selected-camera")?;
+        let mut persisted = false;
+        let result = resolve_persisted_camera_binding(
+            &CameraId::from_index(0),
+            Some("opencv-index:0"),
+            |_| Ok(stable),
+            |_| {
+                persisted = true;
+                Err(ProtocolError::TransportUnavailable)
+            },
+        );
+        assert!(persisted);
+        assert_eq!(result, Err(ProtocolError::TransportUnavailable));
+        Ok(())
+    }
+
+    #[test]
+    fn missing_legacy_camera_does_not_fall_back_or_persist() {
+        let mut persisted = false;
+        let result = resolve_persisted_camera_binding(
+            &CameraId::from_index(3),
+            Some("opencv-index:3"),
+            |_| Err(video_provider::VideoError::CameraNotFound),
+            |_| {
+                persisted = true;
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err(ProtocolError::TransportUnavailable));
+        assert!(!persisted);
+    }
+
+    #[test]
     fn env_name_maps_to_explicit_registry_value_name() {
         assert_eq!(
             registry_value_name(ENV_REQUIRED_CONSECUTIVE),
@@ -628,6 +804,10 @@ mod tests {
         assert_eq!(
             registry_value_name(ENV_MATCH_THRESHOLD),
             Some(REG_MATCH_THRESHOLD)
+        );
+        assert_eq!(
+            registry_value_name(ENV_INTRUDER_SIMILARITY_THRESHOLD),
+            Some(REG_INTRUDER_SIMILARITY_THRESHOLD)
         );
     }
 
@@ -649,6 +829,7 @@ mod tests {
             (ENV_MAX_AUTH_FRAMES, "12"),
             (ENV_REQUIRED_CONSECUTIVE, "3"),
             (ENV_MATCH_THRESHOLD, "0.42"),
+            (ENV_INTRUDER_SIMILARITY_THRESHOLD, "0.38"),
         ]);
 
         let config = ServiceAuthConfig::from_lookup(|env_name| {
@@ -671,7 +852,8 @@ mod tests {
         assert_eq!(local_camera.max_auth_frames, 12);
         assert_eq!(local_camera.required_consecutive_match_count, 3);
         assert_eq!(local_camera.match_threshold, 0.42);
-        assert_eq!(local_camera.intruder_snap_enabled, true);
+        assert!(!local_camera.intruder_snap_enabled);
+        assert_eq!(local_camera.intruder_similarity_threshold, 0.38);
         assert_eq!(
             local_camera.minifasnet_config.model_path,
             PathBuf::from(r"D:\models\minifasnet.onnx")
@@ -712,6 +894,10 @@ mod tests {
         assert_eq!(
             local_camera.match_threshold,
             DEFAULT_SERVICE_FACE_MATCH_THRESHOLD
+        );
+        assert_eq!(
+            local_camera.intruder_similarity_threshold,
+            DEFAULT_INTRUDER_SIMILARITY_THRESHOLD
         );
         assert_eq!(
             local_camera.minifasnet_config.model_path,

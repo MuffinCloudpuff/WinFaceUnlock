@@ -1,4 +1,4 @@
-﻿#![allow(unsafe_code)]
+#![allow(unsafe_code)]
 
 use std::{fmt, path::PathBuf};
 
@@ -19,6 +19,7 @@ const REG_FRAME_HEIGHT: &str = "FrameHeight";
 const REG_MAX_AUTH_FRAMES: &str = "MaxAuthFrames";
 const REG_REQUIRED_CONSECUTIVE: &str = "RequiredConsecutiveMatchCount";
 const REG_MATCH_THRESHOLD: &str = "MatchThreshold";
+const REG_INTRUDER_SIMILARITY_THRESHOLD: &str = "IntruderSimilarityThreshold";
 const REG_PRESENCE_LOCK_ENABLED: &str = "PresenceLockEnabled";
 const REG_PRESENCE_OWNER_MATCH_THRESHOLD: &str = "PresenceOwnerMatchThreshold";
 const REG_PRESENCE_DETECTOR_KIND: &str = "PresenceDetectorKind";
@@ -40,7 +41,8 @@ const REG_PRESENCE_POSE_MIN_LANDMARK_VISIBILITY: &str = "PresencePoseMinLandmark
 const REG_PRESENCE_POSE_MIN_LANDMARK_PRESENCE: &str = "PresencePoseMinLandmarkPresence";
 
 const AUTH_MODE_LOCAL_CAMERA: &str = "local-camera";
-const DEFAULT_SERVICE_FACE_MATCH_THRESHOLD: f32 = 0.75;
+const DEFAULT_SERVICE_FACE_MATCH_THRESHOLD: f32 = 0.65;
+const DEFAULT_INTRUDER_SIMILARITY_THRESHOLD: f32 = 0.30;
 const DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD: f32 = 0.50;
 const DEFAULT_PRESENCE_DETECTOR_FPS: f32 = 2.0;
 const DEFAULT_PRESENCE_PERSON_SUSPECT_FPS: f32 = 1.0;
@@ -79,6 +81,7 @@ pub struct ServiceAuthRegistryConfig {
     pub max_auth_frames: u32,
     pub required_consecutive_match_count: u32,
     pub match_threshold: f32,
+    pub intruder_similarity_threshold: f32,
     pub presence_lock_enabled: bool,
     pub presence_owner_match_threshold: f32,
     pub presence_detector_kind: String,
@@ -121,6 +124,7 @@ impl ServiceAuthRegistryConfig {
             max_auth_frames: 30,
             required_consecutive_match_count: 2,
             match_threshold: DEFAULT_SERVICE_FACE_MATCH_THRESHOLD,
+            intruder_similarity_threshold: DEFAULT_INTRUDER_SIMILARITY_THRESHOLD,
             presence_lock_enabled: false,
             presence_owner_match_threshold: DEFAULT_PRESENCE_OWNER_MATCH_THRESHOLD,
             presence_detector_kind: DEFAULT_PRESENCE_DETECTOR_KIND.to_owned(),
@@ -202,6 +206,11 @@ impl ServiceAuthRegistry {
     pub fn configure_local_camera(
         config: &ServiceAuthRegistryConfig,
     ) -> Result<(), ServiceRegistryError> {
+        // Resolve before any registry mutation: numeric indices must not become
+        // long-lived authentication identities.
+        let camera_id =
+            video_provider::resolve_camera_id(&video_provider::CameraId(config.camera_id.clone()))
+                .map_err(ServiceRegistryError::CameraBinding)?;
         registry::set_string_value(
             SERVICE_CONFIG_REGISTRY_PATH,
             REG_AUTH_MODE,
@@ -212,11 +221,7 @@ impl ServiceAuthRegistry {
             REG_FACE_TEMPLATE_PATH,
             &config.face_template_path.display().to_string(),
         )?;
-        registry::set_string_value(
-            SERVICE_CONFIG_REGISTRY_PATH,
-            REG_CAMERA_ID,
-            &config.camera_id,
-        )?;
+        registry::set_string_value(SERVICE_CONFIG_REGISTRY_PATH, REG_CAMERA_ID, &camera_id.0)?;
         registry::set_string_value(
             SERVICE_CONFIG_REGISTRY_PATH,
             REG_YUNET_MODEL_PATH,
@@ -268,6 +273,11 @@ impl ServiceAuthRegistry {
             SERVICE_CONFIG_REGISTRY_PATH,
             REG_MATCH_THRESHOLD,
             &config.match_threshold.to_string(),
+        )?;
+        registry::set_string_value(
+            SERVICE_CONFIG_REGISTRY_PATH,
+            REG_INTRUDER_SIMILARITY_THRESHOLD,
+            &config.intruder_similarity_threshold.to_string(),
         )?;
         registry::set_string_value(
             SERVICE_CONFIG_REGISTRY_PATH,
@@ -619,6 +629,7 @@ fn set_optional_nullable_path(
 
 #[derive(Debug)]
 pub enum ServiceRegistryError {
+    CameraBinding(video_provider::VideoError),
     WindowsRegistry {
         operation: &'static str,
         path: String,
@@ -629,6 +640,9 @@ pub enum ServiceRegistryError {
 impl fmt::Display for ServiceRegistryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CameraBinding(error) => {
+                write!(formatter, "camera identity binding failed: {error:?}")
+            }
             Self::WindowsRegistry {
                 operation,
                 path,
@@ -844,6 +858,10 @@ mod tests {
         assert_eq!(config.camera_id, "opencv-index:0");
         assert_eq!(config.required_consecutive_match_count, 2);
         assert_eq!(config.match_threshold, DEFAULT_SERVICE_FACE_MATCH_THRESHOLD);
+        assert_eq!(
+            config.intruder_similarity_threshold,
+            DEFAULT_INTRUDER_SIMILARITY_THRESHOLD
+        );
         assert!(!config.presence_lock_enabled);
         assert_eq!(
             config.presence_owner_match_threshold,
